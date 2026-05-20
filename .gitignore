@@ -1,0 +1,45 @@
+# Secrets / live config
+.env
+*.env
+*.local.php
+/inc/config.php
+/inc/secrets.php
+/config.php
+secrets.php
+
+# Composer / package dependencies
+/vendor/
+/node_modules/
+
+# Runtime / temporary files
+/logs/
+/cache/
+/tmp/
+/sessions/
+error_log
+*.log
+
+# Uploads and private business documents
+/uploads/
+/receipts/
+/contracts/
+/signed-contracts/
+/audit-trails/
+/exports/
+/backups/
+
+# Database / backups / archives
+*.sql
+*.sqlite
+*.db
+*.bak
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
