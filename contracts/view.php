@@ -1,0 +1,388 @@
+<?php
+declare(strict_types=1);
+require_once __DIR__ . '/../inc/bootstrap.php';
+require_once __DIR__ . '/../inc/layout.php';
+require_once __DIR__ . '/../inc/accounting.php';
+require_once __DIR__ . '/../inc/syncro.php';
+require_login();
+accounting_require_ready();
+csrf_check();
+
+$contractId = (int)($_GET['id'] ?? $_POST['contract_id'] ?? 0);
+$message = null;
+$errors = [];
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $contractId > 0) {
+    $action = (string)($_POST['action'] ?? '');
+    if ($action === 'set_status') {
+        $status = (string)($_POST['contract_status'] ?? 'DRAFT');
+        $result = accounting_contract_status_update($contractId, $status, (int)(current_user()['user_id'] ?? 0));
+    } elseif ($action === 'mark_pending_signature') {
+        $result = accounting_contract_status_update($contractId, 'PENDING_SIGNATURE', (int)(current_user()['user_id'] ?? 0));
+    } elseif ($action === 'upload_signed') {
+        $result = accounting_contract_upload_signed_copy($contractId, $_FILES['signed_pdf'] ?? []);
+    } elseif ($action === 'upload_audit') {
+        $result = accounting_contract_upload_audit_copy($contractId, $_FILES['audit_pdf'] ?? []);
+    } elseif ($action === 'toggle_task') {
+        $taskId = (int)($_POST['task_id'] ?? 0);
+        $complete = !empty($_POST['complete']);
+        $result = accounting_contract_set_onboarding_task($taskId, $complete, (int)(current_user()['user_id'] ?? 0));
+    } elseif ($action === 'complete_onboarding') {
+        $result = accounting_contract_status_update($contractId, 'ACTIVE', (int)(current_user()['user_id'] ?? 0), [
+            'go_live_at' => date('Y-m-d H:i:s'),
+            'billing_start_date' => date('Y-m-d'),
+        ]);
+    } elseif ($action === 'retry_syncro') {
+        $result = syncro_retry_contract_sync($contractId);
+        if (!empty($result['ok']) && empty($result['skipped'])) {
+            $result['message'] = syncro_action_success_message((string)($result['action'] ?? ''));
+        }
+    } else {
+        $result = ['ok' => false, 'errors' => ['Unknown action.']];
+    }
+    if (!empty($result['ok'])) {
+        $message = (string)($result['message'] ?? 'Contract updated.');
+    } else {
+        $errors = $result['errors'] ?? ['Unable to update contract.'];
+    }
+}
+
+$contract = accounting_get_contract($contractId);
+if (!$contract) {
+    http_response_code(404);
+    page_header('Contract not found', 'contracts');
+    echo '<div class="flash-error">Contract not found.</div>';
+    page_footer();
+    exit;
+}
+
+$syncroReadiness = syncro_required_fields_status($contract);
+$packages = accounting_service_packages();
+$services = accounting_expand_contract_service_rows(accounting_get_contract_services($contractId));
+$serviceGroups = accounting_group_contract_services($services);
+$clientServices = accounting_contract_client_services($contractId);
+$invoices = accounting_contract_invoices($contractId);
+$onboardingTasks = accounting_contract_get_onboarding_tasks($contractId);
+$onboardingProgress = accounting_contract_onboarding_progress($contractId);
+$currentStatus = strtoupper((string)($contract['status'] ?? 'DRAFT'));
+$hasSignedCopy = !empty($contract['signed_document_path']);
+$hasAuditCopy = !empty($contract['audit_document_path']);
+$canRetrySyncro = $hasSignedCopy || in_array($currentStatus, ['ONBOARDING', 'SIGNED_PENDING_ONBOARDING', 'ACTIVE'], true);
+$canCompleteOnboarding = in_array($currentStatus, ['ONBOARDING', 'SIGNED_PENDING_ONBOARDING'], true) && !empty($onboardingProgress['all_complete']);
+$signatureStatusLabel = 'Not signed yet';
+if (!empty($contract['signed_date'])) {
+    $signatureStatusLabel = 'Signed ' . (string)$contract['signed_date'];
+    if ($currentStatus === 'ONBOARDING') {
+        $signatureStatusLabel .= ' · onboarding in progress';
+    }
+} elseif ($currentStatus === 'PENDING_SIGNATURE') {
+    $signatureStatusLabel = 'Sent for signature';
+} elseif ($hasSignedCopy) {
+    $signatureStatusLabel = 'Signed copy uploaded';
+}
+
+$legalReferenceRelative = 'assets/contracts/legal-contract-reference.pdf';
+$legalReferenceAbsolute = dirname(__DIR__) . '/' . $legalReferenceRelative;
+$hasLegalReference = is_file($legalReferenceAbsolute) && is_readable($legalReferenceAbsolute);
+
+$monthlyRecurringTotal = 0.0;
+$baseServiceCode = '';
+$baseService = null;
+$selectedAddons = [];
+$coveredServers = 0.0;
+$productivitySelection = accounting_productivity_selection_details($services);
+$productivityItemCodes = [];
+foreach (accounting_productivity_catalog() as $platformMeta) {
+    foreach ((array)($platformMeta['licenses'] ?? []) as $licenseMeta) {
+        $productivityItemCodes[] = strtoupper((string)($licenseMeta['item_code'] ?? ''));
+    }
+}
+
+foreach ($services as $svc) {
+    $isIncluded = !empty($svc['is_included']);
+    $code = strtoupper(trim((string)($svc['item_code'] ?? $svc['service_code'] ?? '')));
+    if (!$isIncluded) {
+        $monthlyRecurringTotal += (float)($svc['quantity'] ?? 0) * (float)($svc['unit_price'] ?? 0);
+        if ($baseService === null && str_starts_with($code, 'MSP-')) {
+            $baseService = $svc;
+            $baseServiceCode = preg_replace('/^MSP-/', '', $code) ?? '';
+        } elseif (!in_array($code, $productivityItemCodes, true)) {
+            if (!str_starts_with($code, 'MSP-')) {
+                $selectedAddons[] = $svc;
+            }
+        }
+    }
+    if (in_array($code, ['SRVR-MGMT', 'SRVR-BKUP'], true)) {
+        $coveredServers = max($coveredServers, (float)($svc['quantity'] ?? 0));
+    }
+}
+if ($monthlyRecurringTotal <= 0) {
+    $monthlyRecurringTotal = (float)($contract['base_amount'] ?? 0);
+}
+
+$servicePackage = null;
+if ($baseServiceCode !== '' && isset($packages[$baseServiceCode])) {
+    $servicePackage = $packages[$baseServiceCode];
+}
+if (!$servicePackage) {
+    foreach ($packages as $pkg) {
+        if (strcasecmp((string)($pkg['name'] ?? ''), (string)($contract['sla_level'] ?? '')) === 0) {
+            $servicePackage = $pkg;
+            break;
+        }
+    }
+}
+
+$includedServices = [];
+if ($servicePackage) {
+    $includedServices = (array)($servicePackage['included_services'] ?? []);
+} else {
+    foreach ($serviceGroups as $group) {
+        foreach ((array)($group['included'] ?? []) as $svc) {
+            $label = trim((string)($svc['service_name'] ?? $svc['description'] ?? ''));
+            if ($label !== '' && !in_array($label, $includedServices, true)) {
+                $includedServices[] = $label;
+            }
+        }
+    }
+}
+$notIncluded = $servicePackage ? accounting_not_included_unless_selected($servicePackage, $services) : [];
+$productivitySummary = ($productivitySelection['platform_code'] ?? 'NONE') === 'NONE'
+    ? 'No productivity platform selected'
+    : trim((string)($productivitySelection['platform_name'] ?? '') . ' · ' . (string)($productivitySelection['license_name'] ?? ''));
+
+page_header((string)$contract['contract_number'], 'contracts');
+?>
+<div style="display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:16px;">
+  <div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+      <h1 style="margin:0;font-size:28px;"><?= accounting_h((string)$contract['contract_number']) ?></h1>
+      <?= accounting_contract_status_badge_html((string)$contract['status']) ?>
+    </div>
+    <div style="opacity:.82;font-size:16px;"><?= accounting_h((string)$contract['contract_name']) ?></div>
+    <div style="opacity:.68;font-size:13px;">Client: <a href="<?= accounting_h(BASE_URL) ?>/clients/view.php?client_id=<?= (int)$contract['client_id'] ?>"><?= accounting_h((string)($contract['dba_name'] ?: $contract['legal_name'])) ?></a></div>
+  </div>
+  <div style="display:flex;gap:10px;flex-wrap:wrap;">
+    <a class="btn btn-secondary" style="width:auto;padding:10px 14px;" href="<?= accounting_h(BASE_URL) ?>/contracts/pdf.php?id=<?= (int)$contract['contract_id'] ?>" target="_blank">Agreement packet PDF</a>
+    <?php if ($hasLegalReference): ?><a class="btn btn-secondary" style="width:auto;padding:10px 14px;" href="<?= accounting_h(BASE_URL) . '/' . accounting_h($legalReferenceRelative) ?>" target="_blank">Legal reference PDF</a><?php endif; ?>
+    <?php if (!empty($contract['syncro_customer_id']) && defined('SYNCRO_SUBDOMAIN') && SYNCRO_SUBDOMAIN !== ''): ?><a class="btn btn-secondary" style="width:auto;padding:10px 14px;" href="https://<?= accounting_h(syncro_normalize_subdomain((string)SYNCRO_SUBDOMAIN)) ?>.syncromsp.com/customers/<?= (int)$contract['syncro_customer_id'] ?>" target="_blank">Open in Syncro</a><?php endif; ?>
+    <?php if ($canRetrySyncro): ?>
+    <form method="post" style="margin:0;">
+      <?= csrf_field() ?>
+      <input type="hidden" name="action" value="retry_syncro">
+      <button class="btn btn-secondary" style="width:auto;padding:10px 14px;" type="submit">Retry Syncro sync</button>
+    </form>
+    <?php else: ?>
+      <span class="btn btn-secondary" style="width:auto;padding:10px 14px;opacity:.62;cursor:not-allowed;" title="Upload the signed agreement to start onboarding and unlock Syncro push.">Retry Syncro sync</span>
+    <?php endif; ?>
+    <a class="btn btn-secondary" style="width:auto;padding:10px 14px;" href="<?= accounting_h(BASE_URL) ?>/contracts/index.php">Back to contracts</a>
+  </div>
+</div>
+
+<?php if ($message): ?><div class="flash-success"><?= accounting_h($message) ?></div><?php endif; ?>
+<?php if ($errors): ?><div class="flash-error"><?php foreach ($errors as $e): ?><div><?= accounting_h((string)$e) ?></div><?php endforeach; ?></div><?php endif; ?>
+<?php if (!empty($syncroReadiness['missing'])): ?><div class="card" style="padding:14px;margin-bottom:16px;border:1px solid rgba(248,113,113,.28);background:rgba(127,29,29,.20);"><div style="font-weight:800;margin-bottom:8px;color:#fecaca;">Syncro readiness checklist</div><div style="opacity:.88;margin-bottom:6px;">This client still needs the following before Syncro sync will succeed:</div><div style="display:flex;gap:8px;flex-wrap:wrap;"><?php foreach ($syncroReadiness['missing'] as $label): ?><span style="display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.08);font-size:12px;"><?= accounting_h((string)$label) ?></span><?php endforeach; ?></div><div style="margin-top:10px;font-size:12px;opacity:.78;">Fill in the client core info plus at least one full location, then retry Syncro sync after the signed agreement starts onboarding.</div></div><?php endif; ?>
+<?php if (in_array($currentStatus, ['ONBOARDING','SIGNED_PENDING_ONBOARDING'], true)): ?><div class="card" style="padding:14px;margin-bottom:16px;border:1px solid rgba(14,165,233,.28);background:rgba(3,105,161,.18);"><div style="font-weight:800;margin-bottom:8px;color:#e0f2fe;">Onboarding is now the billing gate</div><div style="opacity:.88;line-height:1.5;">The signed agreement has been stored, Syncro can be pushed during onboarding, and billing will not begin until the onboarding checklist is complete and the contract is marked go-live.</div></div><?php endif; ?>
+
+<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:16px;">
+  <div class="card" style="padding:16px;"><div style="font-size:13px;opacity:.78;">Monthly recurring total</div><div style="font-size:24px;font-weight:800;">$<?= number_format($monthlyRecurringTotal, 2) ?></div></div>
+  <div class="card" style="padding:16px;"><div style="font-size:13px;opacity:.78;">Onboarding progress</div><div style="font-size:24px;font-weight:800;"><?= (int)($onboardingProgress['percent'] ?? 0) ?>%</div><div style="font-size:12px;opacity:.68;margin-top:4px;"><?= (int)($onboardingProgress['completed'] ?? 0) ?> of <?= (int)($onboardingProgress['required'] ?? 0) ?> required tasks complete</div></div>
+  <div class="card" style="padding:16px;"><div style="font-size:13px;opacity:.78;">Billing start</div><div style="font-size:24px;font-weight:800;"><?= accounting_h((string)($contract['billing_start_date'] ?: 'Go-live pending')) ?></div></div>
+  <div class="card" style="padding:16px;"><div style="font-size:13px;opacity:.78;">Linked services</div><div style="font-size:24px;font-weight:800;"><?= count($clientServices) ?></div></div>
+</div>
+
+<div style="display:grid;grid-template-columns:1.05fr 1.45fr;gap:16px;align-items:start;">
+  <div class="card" style="padding:16px;">
+    <h2 style="margin:0 0 12px;font-size:19px;">Agreement details</h2>
+    <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;">
+      <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Service package</div><div><?= accounting_h((string)($servicePackage['name'] ?? $contract['sla_level'] ?: '-')) ?></div></div>
+      <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Billing cycle</div><div><?= accounting_h((string)$contract['billing_cycle']) ?></div></div>
+      <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Productivity platform</div><div><?= accounting_h((string)($productivitySelection['platform_name'] ?? 'No productivity platform selected')) ?></div></div>
+      <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">License level</div><div><?= accounting_h((string)($productivitySelection['license_name'] ?? 'None selected')) ?></div></div>
+      <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Covered workstations</div><div><?= number_format((float)($contract['covered_devices'] ?? 0), 0) ?></div></div>
+      <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Covered users / seats</div><div><?= number_format((float)($contract['covered_users'] ?? 0), 0) ?></div></div>
+      <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Covered servers</div><div><?= $coveredServers > 0 ? number_format($coveredServers, 0) : '0' ?></div></div>
+      <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Primary contact</div><div><?= accounting_h(trim((string)($contract['first_name'] ?? '') . ' ' . (string)($contract['last_name'] ?? ''))) ?: '—' ?></div></div>
+      <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Contact email</div><div><?= accounting_h((string)($contract['contact_email'] ?: $contract['client_email'] ?: '—')) ?></div></div>
+      <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Signature status</div><div><?= accounting_h($signatureStatusLabel) ?></div></div>
+      <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Syncro status</div><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><?php $syncStatus = strtoupper((string)($contract['syncro_sync_status'] ?? 'PENDING')); echo syncro_status_badge_html($syncStatus, !empty($contract['syncro_customer_id']) ? (int)$contract['syncro_customer_id'] : null); ?></div><?php if (!empty($contract['syncro_last_sync_at'])): ?><div style="font-size:12px;opacity:.62;margin-top:4px;">Last sync <?= accounting_h((string)$contract['syncro_last_sync_at']) ?></div><?php endif; ?><?php if (!empty($contract['syncro_last_error'])): ?><div style="font-size:12px;color:#fecaca;margin-top:6px;line-height:1.45;">Last error: <?= accounting_h((string)$contract['syncro_last_error']) ?></div><?php endif; ?></div>
+      <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Onboarding started</div><div><?= accounting_h((string)($contract['onboarding_started_at'] ?? '—')) ?></div></div>
+      <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Go-live</div><div><?= accounting_h((string)($contract['go_live_at'] ?? '—')) ?></div></div>
+      <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Billing start date</div><div><?= accounting_h((string)($contract['billing_start_date'] ?? '—')) ?></div></div>
+      <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Auto renew</div><div><?= !empty($contract['auto_renew']) ? 'Yes' : 'No' ?></div></div>
+    </div>
+    <?php if (!empty($contract['notes'])): ?><div style="margin-top:14px;"><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Notes / scope</div><div><?= nl2br(accounting_h((string)$contract['notes'])) ?></div></div><?php endif; ?>
+    <?php if (!empty($contract['signed_document_path'])): ?><div style="margin-top:14px;display:flex;gap:12px;flex-wrap:wrap;"><a href="<?= accounting_h(BASE_URL) . '/' . accounting_h((string)$contract['signed_document_path']) ?>" target="_blank">Open signed copy</a><?php if (!empty($contract['audit_document_path'])): ?><a href="<?= accounting_h(BASE_URL) . '/' . accounting_h((string)$contract['audit_document_path']) ?>" target="_blank">Open audit trail</a><?php endif; ?></div><?php elseif (!empty($contract['audit_document_path'])): ?><div style="margin-top:14px;"><a href="<?= accounting_h(BASE_URL) . '/' . accounting_h((string)$contract['audit_document_path']) ?>" target="_blank">Open audit trail</a></div><?php endif; ?>
+  </div>
+
+  <div class="card" style="padding:16px;overflow:auto;">
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:12px;margin-bottom:12px;">
+      <div><h2 style="margin:0;font-size:19px;">Service schedule</h2><div style="opacity:.75;">Order form summary, selected platform licensing, and optional add-ons.</div></div>
+    </div>
+
+    <div style="padding:14px;border-radius:14px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);display:grid;gap:14px;">
+      <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap;">
+        <div>
+          <div style="font-size:18px;font-weight:800;"><?= accounting_h((string)($servicePackage['name'] ?? $contract['sla_level'] ?: 'Service Package')) ?></div>
+          <div style="opacity:.72;font-size:13px;margin-top:4px;"><?= accounting_h((string)($servicePackage['description'] ?? $contract['notes'] ?? '')) ?></div>
+        </div>
+        <div style="text-align:right;min-width:180px;">
+          <div style="font-size:18px;font-weight:800;">$<?= number_format($monthlyRecurringTotal, 2) ?></div>
+          <div style="opacity:.68;font-size:12px;">Current monthly recurring total</div>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;">
+        <div style="padding:10px 12px;border-radius:12px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);"><div style="font-size:12px;opacity:.68;">Productivity lane</div><div style="font-weight:700;margin-top:4px;"><?= accounting_h($productivitySummary) ?></div></div>
+        <div style="padding:10px 12px;border-radius:12px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);"><div style="font-size:12px;opacity:.68;">Covered workstations</div><div style="font-weight:700;margin-top:4px;"><?= number_format((float)($contract['covered_devices'] ?? 0), 0) ?></div></div>
+        <div style="padding:10px 12px;border-radius:12px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);"><div style="font-size:12px;opacity:.68;">Covered users / seats</div><div style="font-weight:700;margin-top:4px;"><?= number_format((float)($contract['covered_users'] ?? 0), 0) ?></div></div>
+        <div style="padding:10px 12px;border-radius:12px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);"><div style="font-size:12px;opacity:.68;">Covered servers</div><div style="font-weight:700;margin-top:4px;"><?= $coveredServers > 0 ? number_format($coveredServers, 0) : '0' ?></div></div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start;">
+        <div>
+          <div style="font-size:12px;letter-spacing:.04em;text-transform:uppercase;opacity:.7;margin-bottom:8px;">Included with this package</div>
+          <?php if ($includedServices): ?>
+            <?php foreach ($includedServices as $label): ?>
+              <div style="padding:6px 9px;border-radius:10px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.16);margin-bottom:6px;line-height:1.28"><?= accounting_h((string)$label) ?></div>
+            <?php endforeach; ?>
+          <?php else: ?>
+            <div style="opacity:.65;">No included services listed.</div>
+          <?php endif; ?>
+        </div>
+        <div>
+          <div style="font-size:12px;letter-spacing:.04em;text-transform:uppercase;opacity:.7;margin-bottom:8px;">Optional add-ons selected</div>
+          <?php if ($selectedAddons): ?>
+            <?php foreach ($selectedAddons as $svc): ?>
+              <div style="padding:6px 9px;border-radius:10px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.16);margin-bottom:6px;display:flex;justify-content:space-between;gap:10px;align-items:center;line-height:1.28">
+                <span><?= accounting_h((string)($svc['service_name'] ?: $svc['description'])) ?></span>
+                <div style="text-align:right;white-space:nowrap;">
+                  <strong>$<?= number_format((float)$svc['quantity'] * (float)$svc['unit_price'], 2) ?></strong>
+                  <div style="opacity:.68;font-size:12px;"><?= accounting_h(accounting_pricing_model_label((string)($svc['billing_type'] ?? 'FIXED'), true)) ?></div>
+                </div>
+              </div>
+            <?php endforeach; ?>
+          <?php else: ?>
+            <div style="opacity:.65;">No add-ons selected.</div>
+          <?php endif; ?>
+        </div>
+      </div>
+
+      <div>
+        <div style="font-size:12px;letter-spacing:.04em;text-transform:uppercase;opacity:.7;margin-bottom:8px;">Not included unless selected</div>
+        <?php if ($notIncluded): ?>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <?php foreach ($notIncluded as $label): ?>
+              <span style="display:inline-flex;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);font-size:12px;"><?= accounting_h((string)$label) ?></span>
+            <?php endforeach; ?>
+          </div>
+        <?php else: ?>
+          <div style="opacity:.65;">Nothing else is currently excluded from the selected package lane.</div>
+        <?php endif; ?>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div style="display:grid;grid-template-columns:1.25fr 1fr;gap:16px;align-items:start;margin-top:16px;">
+  <div class="card" style="padding:16px;overflow:auto;">
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:12px;margin-bottom:12px;">
+      <div><h2 style="margin:0;font-size:19px;">Linked client services</h2><div style="opacity:.75;">These drive recurring billing and invoice generation.</div></div>
+    </div>
+    <?php if (!$clientServices): ?><div style="opacity:.72;">No client services linked yet.</div><?php else: ?>
+    <table style="width:100%;border-collapse:collapse;">
+      <thead><tr style="text-align:left;border-bottom:1px solid rgba(255,255,255,.10)"><th style="padding:10px 8px;">Description</th><th class="date" style="padding:10px 8px;">Next bill</th><th class="money" style="padding:10px 8px;">Value</th><th class="status" style="padding:10px 8px;">Status</th><th style="padding:10px 8px;">Open</th></tr></thead>
+      <tbody><?php foreach ($clientServices as $svc): ?><tr style="border-bottom:1px solid rgba(255,255,255,.06)"><td style="padding:10px 8px;"><strong><?= accounting_h((string)$svc['description']) ?></strong><div style="opacity:.65;font-size:12px;"><?= accounting_h((string)($svc['item_code'] ?: $svc['item_name'])) ?></div></td><td class="date" style="padding:10px 8px;"><?= accounting_h((string)$svc['next_bill_date']) ?></td><td class="money" style="padding:10px 8px;">$<?= number_format((float)$svc['quantity'] * (float)$svc['unit_price'], 2) ?></td><td class="status" style="padding:10px 8px;"><?= accounting_client_service_status_badge_html((string)$svc['status']) ?></td><td style="padding:10px 8px;"><a href="<?= accounting_h(BASE_URL) ?>/clients/service_view.php?id=<?= (int)$svc['client_service_id'] ?>">Open</a></td></tr><?php endforeach; ?></tbody>
+    </table>
+    <?php endif; ?>
+  </div>
+
+  <div style="display:grid;gap:16px;">
+    <div class="card" style="padding:16px;">
+      <h2 style="margin:0 0 12px;font-size:19px;">Contract actions</h2>
+      <div style="padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);font-size:13px;line-height:1.55;margin-bottom:14px;">
+        <strong>Simple lane:</strong> build the order form, send the packet for signature, upload the signed PDF to start onboarding and Syncro setup, then mark go-live to activate billing.
+      </div>
+      <?php if (!in_array($currentStatus, ['ACTIVE','EXPIRED','CANCELLED'], true)): ?>
+      <form method="post" style="display:grid;gap:10px;margin-bottom:14px;">
+        <?= csrf_field() ?>
+        <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
+        <input type="hidden" name="action" value="mark_pending_signature">
+        <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Mark sent to signer</button>
+      </form>
+      <?php endif; ?>
+      <form method="post" style="display:grid;gap:10px;margin-bottom:14px;">
+        <?= csrf_field() ?>
+        <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
+        <input type="hidden" name="action" value="set_status">
+        <label>Status</label>
+        <select name="contract_status" style="width:100%;padding:10px;"><?php foreach (accounting_contract_status_options() as $value => $label): ?><?php $disableActive = $value === 'ACTIVE' && (!$hasSignedCopy || empty($onboardingProgress['all_complete'])) && $currentStatus !== 'ACTIVE'; ?><option value="<?= accounting_h($value) ?>" <?= $currentStatus === $value ? 'selected' : '' ?> <?= $disableActive ? 'disabled' : '' ?>><?= accounting_h($label) ?></option><?php endforeach; ?></select>
+        <div style="font-size:12px;opacity:.72;line-height:1.45;">Upload the signed PDF to move into onboarding. Active is the go-live state and starts billing only after the required onboarding tasks are complete.</div>
+        <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Update status</button>
+      </form>
+      <form method="post" enctype="multipart/form-data" style="display:grid;gap:10px;">
+        <?= csrf_field() ?>
+        <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
+        <input type="hidden" name="action" value="upload_signed">
+        <label>Upload signed PDF</label>
+        <input type="file" name="signed_pdf" accept="application/pdf">
+        <div style="font-size:12px;opacity:.72;line-height:1.45;">Use this after BoldSign or any other signer sends the completed PDF back. Uploading here stores the signed copy, starts onboarding, and pushes the client toward Syncro.</div>
+        <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Upload signed PDF and start onboarding</button>
+      </form>
+      <form method="post" enctype="multipart/form-data" style="display:grid;gap:10px;margin-top:14px;">
+        <?= csrf_field() ?>
+        <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
+        <input type="hidden" name="action" value="upload_audit">
+        <label>Upload audit trail PDF</label>
+        <input type="file" name="audit_pdf" accept="application/pdf">
+        <div style="font-size:12px;opacity:.72;line-height:1.45;">BoldSign's certificate / audit trail is stored separately from the signed agreement so you keep both artifacts.</div>
+        <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Upload audit trail PDF</button>
+      </form>
+      <?php if ($canCompleteOnboarding): ?>
+      <form method="post" style="display:grid;gap:10px;margin-top:14px;">
+        <?= csrf_field() ?>
+        <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
+        <input type="hidden" name="action" value="complete_onboarding">
+        <button type="submit" class="btn btn-primary" style="width:auto;padding:10px 14px;">Mark onboarding complete and go live</button>
+      </form>
+      <?php endif; ?>
+    </div>
+
+    <div class="card" style="padding:16px;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:12px;margin-bottom:12px;">
+        <div><h2 style="margin:0;font-size:19px;">Onboarding checklist</h2><div style="opacity:.75;">Billing begins only after the required checklist items are done and the contract is marked go-live.</div></div>
+        <div style="text-align:right;"><div style="font-size:26px;font-weight:800;"><?= (int)($onboardingProgress['percent'] ?? 0) ?>%</div><div style="opacity:.68;font-size:12px;"><?= (int)($onboardingProgress['completed'] ?? 0) ?> / <?= (int)($onboardingProgress['required'] ?? 0) ?> required</div></div>
+      </div>
+      <?php if (!$hasSignedCopy && !in_array($currentStatus, ['ONBOARDING','SIGNED_PENDING_ONBOARDING','ACTIVE'], true)): ?>
+        <div style="opacity:.72;line-height:1.55;">Upload the signed agreement to start onboarding. That will create the checklist, push the organization to Syncro, and hold billing until go-live.</div>
+      <?php elseif (!$onboardingTasks): ?>
+        <div style="opacity:.72;line-height:1.55;">Onboarding checklist will appear here once the contract enters onboarding.</div>
+      <?php else: ?>
+        <div style="display:grid;gap:10px;">
+        <?php foreach ($onboardingTasks as $task): ?>
+          <div style="padding:10px 12px;border-radius:12px;border:1px solid <?= !empty($task['is_completed']) ? 'rgba(34,197,94,.24)' : 'rgba(255,255,255,.08)' ?>;background:<?= !empty($task['is_completed']) ? 'rgba(34,197,94,.08)' : 'rgba(255,255,255,.03)' ?>;display:flex;justify-content:space-between;gap:12px;align-items:flex-start;">
+            <div>
+              <div style="font-weight:700;"><?= accounting_h((string)$task['task_name']) ?><?php if (!empty($task['is_required'])): ?><span style="opacity:.58;font-weight:500;"> · Required</span><?php endif; ?></div>
+              <?php if (!empty($task['task_detail'])): ?><div style="font-size:12px;opacity:.72;margin-top:4px;line-height:1.45;"><?= accounting_h((string)$task['task_detail']) ?></div><?php endif; ?>
+              <?php if (!empty($task['completed_at'])): ?><div style="font-size:12px;opacity:.58;margin-top:6px;">Completed <?= accounting_h((string)$task['completed_at']) ?></div><?php endif; ?>
+            </div>
+            <form method="post" style="margin:0;display:flex;align-items:center;">
+              <?= csrf_field() ?>
+              <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
+              <input type="hidden" name="action" value="toggle_task">
+              <input type="hidden" name="task_id" value="<?= (int)$task['task_id'] ?>">
+              <input type="hidden" name="complete" value="<?= !empty($task['is_completed']) ? '0' : '1' ?>">
+              <button type="submit" class="btn btn-secondary" style="width:auto;padding:8px 12px;"><?= !empty($task['is_completed']) ? 'Undo' : 'Complete' ?></button>
+            </form>
+          </div>
+        <?php endforeach; ?>
+        </div>
+      <?php endif; ?>
+    </div>
+
+    <div class="card" style="padding:16px;overflow:auto;">
+      <h2 style="margin:0 0 12px;font-size:19px;">Invoice history</h2>
+      <?php if (!$invoices): ?><div style="opacity:.72;">No invoices generated from this contract yet.</div><?php else: ?><table style="width:100%;border-collapse:collapse;"><thead><tr style="text-align:left;border-bottom:1px solid rgba(255,255,255,.10)"><th style="padding:10px 8px;">Invoice</th><th class="money" style="padding:10px 8px;">Amount</th><th class="status" style="padding:10px 8px;">Status</th></tr></thead><tbody><?php foreach ($invoices as $inv): ?><tr style="border-bottom:1px solid rgba(255,255,255,.06)"><td style="padding:10px 8px;"><a href="<?= accounting_h(BASE_URL) ?>/accounting/invoice_view.php?id=<?= (int)$inv['invoice_id'] ?>">📄 <?= accounting_h((string)$inv['invoice_number']) ?></a><div style="opacity:.65;font-size:12px;"><?= accounting_h((string)$inv['invoice_date']) ?></div></td><td class="money" style="padding:10px 8px;">$<?= number_format((float)$inv['total_amount'], 2) ?></td><td class="status" style="padding:10px 8px;"><?= accounting_invoice_status_badge_html((string)$inv['status']) ?></td></tr><?php endforeach; ?></tbody></table><?php endif; ?>
+    </div>
+  </div>
+</div>
+<?php page_footer(); ?>
