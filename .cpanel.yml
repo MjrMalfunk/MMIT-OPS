@@ -9,6 +9,7 @@ deployment:
               --exclude='inc/config.php' \
               --exclude='vendor/' \
               --exclude='storage/' \
+              --exclude='storage/onedrive/' \
               --exclude='uploads/' \
               --exclude='logs/' \
               --exclude='cache/' \
@@ -22,13 +23,15 @@ deployment:
               --exclude='*.docx' \
               --exclude='*.rtf' \
               --exclude='*.odt' \
-              --exclude='*contract*' \
-              --exclude='*receipt*'
+              --exclude='uploads/contracts/' \
+              --exclude='signed-contracts/' \
+              --exclude='audit-trails/' \
+              --exclude='receipts/'
       else
         git ls-files -z \
           | while IFS= read -r -d '' f; do
               case "$f" in
-                inc/config.php|vendor/*|storage/*|uploads/*|logs/*|cache/*|tmp/*|error_log|*.log|*.sql|*.zip|*.pdf|*.doc|*.docx|*.rtf|*.odt|*contract*|*receipt*)
+                inc/config.php|vendor/*|storage/*|storage/onedrive/*|uploads/*|uploads/contracts/*|signed-contracts/*|audit-trails/*|receipts/*|logs/*|cache/*|tmp/*|error_log|*.log|*.sql|*.zip|*.pdf|*.doc|*.docx|*.rtf|*.odt)
                   continue
                   ;;
               esac
