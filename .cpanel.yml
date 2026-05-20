@@ -1,0 +1,38 @@
+deployment:
+  tasks:
+    - export DEPLOYPATH=/home/mjrmstlj/ops.midwestmanagedit.com
+    - /bin/mkdir -p "$DEPLOYPATH"
+    - |
+      if command -v rsync >/dev/null 2>&1; then
+        git ls-files -z \
+          | rsync -a --from0 --files-from=- ./ "$DEPLOYPATH"/ \
+              --exclude='inc/config.php' \
+              --exclude='vendor/' \
+              --exclude='storage/' \
+              --exclude='uploads/' \
+              --exclude='logs/' \
+              --exclude='cache/' \
+              --exclude='tmp/' \
+              --exclude='error_log' \
+              --exclude='*.log' \
+              --exclude='*.sql' \
+              --exclude='*.zip' \
+              --exclude='*.pdf' \
+              --exclude='*.doc' \
+              --exclude='*.docx' \
+              --exclude='*.rtf' \
+              --exclude='*.odt' \
+              --exclude='*contract*' \
+              --exclude='*receipt*'
+      else
+        git ls-files -z \
+          | while IFS= read -r -d '' f; do
+              case "$f" in
+                inc/config.php|vendor/*|storage/*|uploads/*|logs/*|cache/*|tmp/*|error_log|*.log|*.sql|*.zip|*.pdf|*.doc|*.docx|*.rtf|*.odt|*contract*|*receipt*)
+                  continue
+                  ;;
+              esac
+              /bin/mkdir -p "$DEPLOYPATH/$(dirname "$f")"
+              /bin/cp -p "$f" "$DEPLOYPATH/$f"
+            done
+      fi

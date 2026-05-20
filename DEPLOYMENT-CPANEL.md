@@ -66,3 +66,11 @@ This document captures what this repository expects when deploying to cPanel hos
    - `https://ops.midwestmanagedit.com/payments/webhook_stripe.php`
 5. Configure cron with account-specific absolute paths.
 6. Run smoke checks: login, client list, invoice list, payment page, webhook health page.
+## 8) cPanel Git deployment layout
+
+- Clone this repository **outside** the live web root, for example:
+  - `/home/mjrmstlj/repositories/MMIT-OPS`
+- Configure cPanel Git deployment to use this repo checkout as the source.
+- Deployment then publishes into the live OPS web root:
+  - `/home/mjrmstlj/ops.midwestmanagedit.com`
+- The included `.cpanel.yml` deploys tracked source files while preserving server-only/runtime artifacts (for example `inc/config.php`, `vendor/`, `storage/`, uploads/log/cache/tmp data, and generated document/log/archive files).
