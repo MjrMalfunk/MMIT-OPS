@@ -1,0 +1,7 @@
+{
+    "require": {
+        "web-auth/webauthn-lib": "^4.9",
+        "chillerlan/php-qrcode": "^5",
+        "dompdf/dompdf": "^3.1"
+    }
+}
