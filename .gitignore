@@ -22,7 +22,6 @@ error_log
 # Uploads and private business documents
 /uploads/
 /receipts/
-/contracts/
 /signed-contracts/
 /audit-trails/
 /exports/
@@ -43,3 +42,7 @@ error_log
 Thumbs.db
 .vscode/
 .idea/
+
+# Local cloud sync artifacts
+/storage/onedrive/*
+!/storage/onedrive/README.txt
