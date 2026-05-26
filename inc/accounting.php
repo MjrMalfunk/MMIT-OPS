@@ -3401,6 +3401,7 @@ function accounting_render_invoice_pdf_bytes(array $invoice, array $lines, array
     }
 
     $companyName = 'Midwest Managed IT';
+    $companyLegalName = 'LnK Consulting, LLC dba Midwest Managed IT';
     $companyEmail = 'billing@midwestmanagedit.com';
 
     $clientName = trim((string)($invoice['dba_name'] ?: $invoice['legal_name'] ?: 'Client'));
@@ -3538,7 +3539,8 @@ function accounting_render_invoice_pdf_bytes(array $invoice, array $lines, array
     .logo-wrap { width: 52%; text-align: left; }
     .logo-block { display: inline-block; width: 320px; text-align: center; }
     .logo-image img { display: block; margin: 0 auto; max-width: 300px; height: auto; }
-    .logo-email { margin-top: 10px; text-align: left; padding-left: 10px; font-size: 10px; color: #4b5563; }
+    .logo-legal { margin-top: 8px; text-align: left; padding-left: 10px; font-size: 9.5px; color: #334155; }
+    .logo-email { margin-top: 4px; text-align: left; padding-left: 10px; font-size: 10px; color: #4b5563; }
     .company-fallback { font-size: 24px; font-weight: 700; color: #10233f; }
     .invoice-wrap { width: 48%; text-align: right; }
     .invoice-title { font-size: 28px; font-weight: 800; color: #10233f; letter-spacing: 0.8px; margin: 0; }
@@ -3590,7 +3592,7 @@ function accounting_render_invoice_pdf_bytes(array $invoice, array $lines, array
     <div class="page-shell">
     <table class="header">
         <tr>
-            <td class="logo-wrap"><div class="logo-block"><div class="logo-image">' . $logoHtml . '</div><div class="logo-email">' . htmlspecialchars($companyEmail) . '</div></div></td>
+            <td class="logo-wrap"><div class="logo-block"><div class="logo-image">' . $logoHtml . '</div><div class="logo-legal">' . htmlspecialchars($companyLegalName) . '</div><div class="logo-email">' . htmlspecialchars($companyEmail) . '</div></div></td>
             <td class="invoice-wrap">
                 <div class="invoice-title">INVOICE</div>
                 <div class="invoice-number">#' . htmlspecialchars($invoiceNumber) . '</div>
@@ -3653,7 +3655,7 @@ function accounting_render_invoice_pdf_bytes(array $invoice, array $lines, array
         </tr>
     </table>
 
-    <div class="footer">Midwest Managed IT | billing@midwestmanagedit.com | Thank you for your business and prompt payment.</div>
+    <div class="footer">LnK Consulting, LLC dba Midwest Managed IT | billing@midwestmanagedit.com | Thank you for your business and prompt payment.</div>
     </div>
 </body>
 </html>';
@@ -4301,15 +4303,15 @@ Provider may also suspend services immediately if Client’s nonpayment, interfe
 Client shall reimburse Provider for reasonable costs of collection, including court costs and reasonable attorney fees, incurred in collecting overdue undisputed amounts to the extent permitted by law.
 
 10. Term; Renewal; Termination
-This Agreement begins on the Effective Date of the first Order Form and continues until terminated in accordance with this Agreement. Each Order Form begins on its own start date and continues through its stated Initial Service Term.
-After the Initial Service Term, an Order Form renews automatically for successive one-month renewal terms unless either Party gives at least thirty (30) days’ written notice of non-renewal before the end of the then-current term.
+This Agreement begins on the Effective Date of the first Order Form and continues until terminated in accordance with this Agreement. Each Order Form begins on its own start date and continues through its stated Initial Service Term. Unless a signed Order Form expressly states a different minimum, the Initial Service Term for Managed Services is six (6) months.
+After the Initial Service Term, an Order Form renews automatically on a month-to-month basis unless either Party gives at least thirty (30) days' written notice of cancellation or non-renewal before the requested end date.
 Either Party may terminate for material breach if the breach is not cured within thirty (30) days after written notice, except that nonpayment, repeated security noncooperation, abusive conduct, or unauthorized tampering with managed systems may be subject to a shorter cure period of ten (10) days.
 If Client terminates an Order Form without cause before the end of the Initial Service Term, Client shall pay: (a) all accrued but unpaid fees, (b) any non-cancelable third-party charges or pass-through costs committed for Client, and (c) as liquidated damages and not as a penalty, fifty percent (50%) of the remaining unpaid monthly recurring charges for the balance of the Initial Service Term. The parties agree this formula is intended as a reasonable pre-estimate of Provider’s loss, recognizing that actual damages would be difficult to calculate at the time of contracting.
 
 11. Third-Party Services; Procurement; Vendor Dependencies
 Provider may recommend or resell Third-Party Services, but unless expressly stated otherwise in a signed writing, Provider is not the manufacturer, publisher, licensor, carrier, or utility for those services.
 Provider is not responsible for outages, defects, price increases, feature changes, data loss, security incidents, support delays, policy changes, or end-of-life decisions caused by internet providers, utilities, cloud vendors, backup vendors, payment processors, Microsoft, Google, Huntress, or other third-party platforms.
-When Provider acts as a procurement facilitator, Client remains bound by the third-party vendor’s end user terms, usage restrictions, and service limitations.
+When Provider acts as a procurement facilitator, Client remains bound by the third-party vendor’s end user terms, usage restrictions, and service limitations. Client remains financially responsible for approved third-party commitments, licenses, backup services, security tools, productivity platforms, and other pass-through costs that survive cancellation or have non-cancelable vendor terms.
 
 12. Confidentiality
 Each Party receiving Confidential Information from the other Party shall use that information only for performance of this Agreement, protect it with reasonable care, and not disclose it except to employees, contractors, advisers, insurers, or financing sources with a legitimate need to know and equivalent confidentiality obligations.
@@ -5999,7 +6001,7 @@ function accounting_render_contract_pdf_bytes(array $contract, array $services):
         ['Covered users / seats', $coveredUsers > 0 ? number_format($coveredUsers, 0) : '—'],
         ['Covered servers', $coveredServers > 0 ? number_format($coveredServers, 0) : '0'],
         ['Start date', $startDate !== '' ? $startDate : '—'],
-        ['End date', $endDate !== '' ? $endDate : 'Month-to-month'],
+        ['End date', $endDate !== '' ? $endDate : 'Month-to-month after initial term'],
         ['Renewal', $autoRenew ? 'Auto-renews after initial term unless non-renewed in writing' : 'No auto-renew'],
         ['Status', strtoupper($status)],
     ];
@@ -6063,7 +6065,7 @@ function accounting_render_contract_pdf_bytes(array $contract, array $services):
 
     $agreementNotes = $notes !== ''
         ? nl2br(htmlspecialchars($notes))
-        : 'This packet is generated from the selected Midwest Managed IT service level, covered quantities, and any chosen add-ons. Pricing and scope follow the service schedule and legal terms below.';
+        : 'This packet is generated from the selected Midwest Managed IT service level, covered quantities, and any chosen add-ons. Pricing and scope follow the service schedule and legal terms below. Onboarding and setup work begins once approved and is non-refundable after work starts.';
 
     $msaHtml = accounting_contract_packet_template_html(accounting_contract_template_body('MSA'));
     $slaHtml = accounting_contract_packet_template_html(accounting_contract_template_body('SLA'));
@@ -6147,7 +6149,7 @@ function accounting_render_contract_pdf_bytes(array $contract, array $services):
             </td>
             <td>
                 <div class="sig-line">
-                    <div class="sig-party">Midwest Managed IT</div>
+                    <div class="sig-party">LnK Consulting, LLC dba Midwest Managed IT</div>
                     <div class="sig-row">Printed Name: ____________________________</div>
                     <div class="sig-gap"></div>
                     <div class="sig-row">Signature: _______________________________</div>
@@ -6662,7 +6664,7 @@ function accounting_create_contract_bundle(array $data, int $userId = 0): array 
     $package = $packages[$packageCode] ?? null;
     $packagePricingModel = strtoupper(trim((string)($package['pricing_model'] ?? 'FIXED')));
     $selectedAddons = array_values(array_unique(array_map('intval', (array)($data['addon_item_ids'] ?? []))));
-    $termMonths = (int)($data['term_months'] ?? ($package['term_months'] ?? 12));
+    $termMonths = (int)($data['term_months'] ?? ($package['term_months'] ?? 6));
     $startDate = trim((string)($data['start_date'] ?? date('Y-m-d')));
     $quantity = round((float)($data['quantity'] ?? 1), 2);
     $coveredUsers = round((float)($data['covered_users'] ?? 0), 2);
