@@ -19,10 +19,15 @@ if ($configOverride !== '') {
     $cfg = $configOverride;
     $missingMessage = 'Missing OPS config override file.';
 } elseif ($host === 'ops-test.midwestmanagedit.com') {
-    $cfg = '/home/mjrmstlj/private/ops-secrets.staging.php';
+    $cfg = '/home/mjrmstlj/private/ops/secrets.staging.php';
     $missingMessage = 'Missing OPS staging config.';
 } else {
-    $cfg = '/home/mjrmstlj/private/ops-secrets.php';
+    $cfg = '/home/mjrmstlj/private/ops/secrets.php';
+    // Deprecated fallback for production only while migrating legacy top-level path.
+    // Staging must never fall back to production or legacy production config.
+    if (!file_exists($cfg) && file_exists('/home/mjrmstlj/private/ops-secrets.php')) {
+        $cfg = '/home/mjrmstlj/private/ops-secrets.php';
+    }
     $missingMessage = 'Missing OPS config.';
 }
 
