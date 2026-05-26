@@ -1,13 +1,17 @@
 # cPanel Deployment Readiness Notes (MMIT-OPS)
 
 This document captures what this repository expects when deploying to cPanel hosting
-(including `ops.midwestmanagedit.com`).
+(including `ops.midwestmanagedit.com` and `ops-test.midwestmanagedit.com`).
 
 ## 1) Required server-only files and secrets
 
-- **Required:** `inc/config.php` (not in repo).
-  - The app hard-fails with HTTP 500 if this file is missing.
-  - Create it by copying `inc/config.sample.php` and filling secrets.
+- **Required production OPS config:** `/home/mjrmstlj/private/ops-secrets.php` (not in repo).
+- **Required staging OPS config:** `/home/mjrmstlj/private/ops-secrets.staging.php` (not in repo).
+- The app selects config by host:
+  - `ops.midwestmanagedit.com` → `/home/mjrmstlj/private/ops-secrets.php`
+  - `ops-test.midwestmanagedit.com` → `/home/mjrmstlj/private/ops-secrets.staging.php`
+- If the selected file is missing, OPS hard-fails with HTTP 500 (no staging→production fallback).
+- Optional explicit override is still supported via `OPS_CONFIG_FILE` (define or environment variable).
 - Keep `APP_ENC_KEY_B64` set to a real 32-byte base64 key before production use.
 
 ## 2) Writable paths expected by the app
@@ -55,11 +59,11 @@ This document captures what this repository expects when deploying to cPanel hos
 - Confirm these paths are correct for the hosting account:
   - absolute cron script path
   - writable directory ownership for `storage/` and mail log target
-  - DB host/user/password/dbname in `inc/config.php`
+  - DB host/user/password/dbname in `/home/mjrmstlj/private/ops-secrets.php` (production) or `/home/mjrmstlj/private/ops-secrets.staging.php` (staging)
 
 ## 7) Quick preflight checklist
 
-1. Create `inc/config.php` from sample and populate all required secrets.
+1. Confirm `/home/mjrmstlj/private/ops-secrets.php` exists for production and `/home/mjrmstlj/private/ops-secrets.staging.php` exists for staging.
 2. Apply DB schema + all referenced SQL migrations.
 3. Verify `storage/onedrive/` exists and is writable by PHP.
 4. Verify Stripe webhook endpoint URL points to:
@@ -73,4 +77,20 @@ This document captures what this repository expects when deploying to cPanel hos
 - Configure cPanel Git deployment to use this repo checkout as the source.
 - Deployment then publishes into the live OPS web root:
   - `/home/mjrmstlj/ops.midwestmanagedit.com`
-- The included `.cpanel.yml` deploys tracked source files while preserving server-only/runtime artifacts (for example `inc/config.php`, `vendor/`, `storage/`, uploads/log/cache/tmp data, and generated document/log/archive files).
+- The included `.cpanel.yml` deploys tracked source files while preserving server-only/runtime artifacts (for example `inc/config.php` compatibility exclusions, `vendor/`, `storage/`, uploads/log/cache/tmp data, and generated document/log/archive files).
+
+
+## 9) OPS production vs staging host/docroot mapping
+
+- Production OPS host: `ops.midwestmanagedit.com`
+- Staging OPS host: `ops-test.midwestmanagedit.com`
+- Production OPS docroot: `/home/mjrmstlj/ops.midwestmanagedit.com`
+- Staging OPS docroot: `/home/mjrmstlj/ops-test.midwestmanagedit.com`
+- Private config root (must stay outside all web docroots): `/home/mjrmstlj/private`
+
+### Manual staging file creation
+
+1. On the cPanel server, create `/home/mjrmstlj/private/ops-secrets.staging.php` beside `/home/mjrmstlj/private/ops-secrets.php`.
+2. Populate staging-only credentials/keys and `BASE_URL=https://ops-test.midwestmanagedit.com`.
+3. Do **not** place secrets under either OPS docroot.
+4. Smoke test login, MFA/passkeys, Stripe, Syncro, OneDrive, Bold Sign, mail, QR, tracking, accounting, and contracts on staging before production release.
