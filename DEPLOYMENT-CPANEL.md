@@ -71,6 +71,26 @@ This document captures what this repository expects when deploying to cPanel hos
    - `https://ops.midwestmanagedit.com/payments/webhook_stripe.php`
 5. Configure cron with account-specific absolute paths.
 6. Run smoke checks: login, client list, invoice list, payment page, webhook health page.
+
+## 7.1) Staging safety constants
+
+Keep these constants aligned to environment in server-only config files (constant format via `define(...)` / `ops_define(...)`):
+
+- `APP_ENV`
+  - Production: `'production'`
+  - Staging: `'staging'`
+  - OPS also treats host `ops-test.midwestmanagedit.com` as staging for safety UI detection.
+- `MAIL_SANDBOX_ENABLED`
+  - `false` in production.
+  - `true` in staging when you want all outbound email redirected.
+- `MAIL_SANDBOX_TO`
+  - Required valid mailbox when `MAIL_SANDBOX_ENABLED=true`.
+  - If missing/invalid while sandbox is enabled, OPS fails safe and does not send mail.
+- `BASE_URL`
+  - Production: `https://ops.midwestmanagedit.com`
+  - Staging: `https://ops-test.midwestmanagedit.com`
+- `SESSION_NAME`
+  - Use distinct values between production and staging to avoid browser cookie collisions across environments.
 ## 8) cPanel Git deployment layout
 
 - Clone this repository **outside** the live web root, for example:
