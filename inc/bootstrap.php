@@ -185,6 +185,16 @@ function request_is_webauthn_flow(): bool {
     return $result;
 }
 
+function ops_is_staging_env(): bool {
+    $appEnv = defined('APP_ENV') ? strtolower(trim((string) APP_ENV)) : '';
+    if ($appEnv === 'staging') {
+        return true;
+    }
+    $host = strtolower(trim((string)($_SERVER['HTTP_HOST'] ?? '')));
+    $host = preg_replace('/:\d+$/', '', $host);
+    return $host === 'ops-test.midwestmanagedit.com';
+}
+
 // Rolling session id rotation (mitigates fixation/window hijack)
 // Skip regeneration during WebAuthn request pairs so the browser does not lose
 // the session cookie between the begin and finish calls.

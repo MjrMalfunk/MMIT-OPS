@@ -162,6 +162,25 @@ body.light-mode .theme-toggle-icon {
   margin: 10px 0 16px;
 }
 
+.ops-staging-banner {
+  margin: 8px 0 14px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(251, 191, 36, 0.42);
+  background: rgba(251, 191, 36, 0.18);
+  color: #ffefbf;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-align: center;
+}
+
+body.light-mode .ops-staging-banner {
+  background: rgba(245, 158, 11, 0.18);
+  border-color: rgba(217, 119, 6, 0.42);
+  color: #8a4309;
+}
+
 /* Shared control styling */
 input,
 select,

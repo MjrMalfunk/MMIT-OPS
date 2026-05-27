@@ -226,14 +226,31 @@ function ops_mail_apply_sandbox(array $prepared): array
 {
     $prepared['original_to'] = $prepared['to'];
     $prepared['effective_to'] = $prepared['to'];
+    $prepared['sandbox_note'] = '';
 
     if (ops_mail_sandbox_enabled()) {
         $sandboxTo = ops_mail_sandbox_to();
-        if ($sandboxTo !== '' && filter_var($sandboxTo, FILTER_VALIDATE_EMAIL)) {
-            $prepared['effective_to'] = $sandboxTo;
-            if (!preg_match('/^\[TEST\]/', $prepared['subject'])) {
-                $prepared['subject'] = '[TEST] ' . $prepared['subject'];
-            }
+        if ($sandboxTo === '' || !filter_var($sandboxTo, FILTER_VALIDATE_EMAIL)) {
+            $prepared['sandbox_error'] = 'MAIL_SANDBOX_ENABLED is true but MAIL_SANDBOX_TO is missing or invalid. Email was not sent.';
+            return $prepared;
+        }
+
+        $prepared['effective_to'] = $sandboxTo;
+        $prepared['sandbox_note'] = 'STAGING EMAIL - original recipient was ' . $prepared['original_to'];
+        if (!preg_match('/^\[TEST\]/', $prepared['subject'])) {
+            $prepared['subject'] = '[TEST] ' . $prepared['subject'];
+        }
+
+        if (stripos($prepared['subject'], 'STAGING EMAIL - original recipient was') === false) {
+            $prepared['subject'] .= ' | ' . $prepared['sandbox_note'];
+        }
+
+        if (trim((string) $prepared['text_body']) !== '') {
+            $prepared['text_body'] = $prepared['sandbox_note'] . "\n\n" . $prepared['text_body'];
+        }
+        if (trim((string) $prepared['html_body']) !== '') {
+            $safeNote = htmlspecialchars($prepared['sandbox_note'], ENT_QUOTES, 'UTF-8');
+            $prepared['html_body'] = '<p><strong>' . $safeNote . '</strong></p>' . $prepared['html_body'];
         }
     }
 
@@ -622,6 +639,20 @@ function ops_mail_send(array $message): array
     }
 
     $prepared = ops_mail_apply_sandbox($prepared);
+    if (!empty($prepared['sandbox_error'])) {
+        $msg = (string) $prepared['sandbox_error'];
+        ops_mail_log($msg);
+        return [
+            'ok' => false,
+            'errors' => [$msg],
+            'error' => $msg,
+            'to' => $prepared['effective_to'],
+            'original_to' => $prepared['original_to'],
+            'subject' => $prepared['subject'],
+            'sender_email' => $prepared['profile']['email'],
+            'sender_channel' => $prepared['profile']['channel'],
+        ];
+    }
     $transports = [];
     foreach ([ops_mail_primary_transport(), ops_mail_fallback_transport()] as $transport) {
         $transport = strtolower(trim((string) $transport));

@@ -4,7 +4,7 @@ declare(strict_types=1);
 // MITT Ops local/site configuration.
 // Fill in the database user/password for your hosting account.
 
-define('APP_ENV', 'prod');
+define('APP_ENV', 'production');
 define('APP_NAME', 'MITT Ops');
 define('BASE_URL', 'https://ops.midwestmanagedit.com');
 
@@ -102,7 +102,7 @@ define('MAIL_SENDER_DEFAULT_REPLY_TO_EMAIL', 'billing@midwestmanagedit.com');
 
 // Sandbox redirect. Leave OFF in production unless you intentionally want all mail redirected.
 define('MAIL_SANDBOX_ENABLED', false);
-define('MAIL_SANDBOX_TO', '');
+define('MAIL_SANDBOX_TO', ''); // Required valid email when MAIL_SANDBOX_ENABLED=true, otherwise mail send will fail safe.
 
 // Microsoft Graph app-only mail. Reuse the same app registration used by the portal mailer.
 define('MAIL_GRAPH_TENANT_ID', ONEDRIVE_TENANT_ID);
