@@ -2,10 +2,38 @@
 declare(strict_types=1);
 
 // --- Load config ---
-$cfg = __DIR__ . '/config.php';
-if (!file_exists($cfg)) {
+$host = strtolower(trim((string)($_SERVER['HTTP_HOST'] ?? '')));
+$host = preg_replace('/:\d+$/', '', $host);
+
+$configOverride = '';
+if (defined('OPS_CONFIG_FILE') && is_string(OPS_CONFIG_FILE) && OPS_CONFIG_FILE !== '') {
+    $configOverride = OPS_CONFIG_FILE;
+} else {
+    $envOverride = getenv('OPS_CONFIG_FILE');
+    if (is_string($envOverride) && $envOverride !== '') {
+        $configOverride = $envOverride;
+    }
+}
+
+if ($configOverride !== '') {
+    $cfg = $configOverride;
+    $missingMessage = 'Missing OPS config override file.';
+} elseif ($host === 'ops-test.midwestmanagedit.com') {
+    $cfg = '/home/mjrmstlj/private/ops/secrets.staging.php';
+    $missingMessage = 'Missing OPS staging config.';
+} else {
+    $cfg = '/home/mjrmstlj/private/ops/secrets.php';
+    // Deprecated fallback for production only while migrating legacy top-level path.
+    // Staging must never fall back to production or legacy production config.
+    if (!file_exists($cfg) && file_exists('/home/mjrmstlj/private/ops-secrets.php')) {
+        $cfg = '/home/mjrmstlj/private/ops-secrets.php';
+    }
+    $missingMessage = 'Missing OPS config.';
+}
+
+if (!is_string($cfg) || $cfg === '' || !file_exists($cfg)) {
     http_response_code(500);
-    echo "Missing inc/config.php. Copy inc/config.sample.php to inc/config.php and set values.";
+    echo $missingMessage;
     exit;
 }
 require_once $cfg;
@@ -157,6 +185,16 @@ function request_is_webauthn_flow(): bool {
     return $result;
 }
 
+function ops_is_staging_env(): bool {
+    $appEnv = defined('APP_ENV') ? strtolower(trim((string) APP_ENV)) : '';
+    if ($appEnv === 'staging') {
+        return true;
+    }
+    $host = strtolower(trim((string)($_SERVER['HTTP_HOST'] ?? '')));
+    $host = preg_replace('/:\d+$/', '', $host);
+    return $host === 'ops-test.midwestmanagedit.com';
+}
+
 // Rolling session id rotation (mitigates fixation/window hijack)
 // Skip regeneration during WebAuthn request pairs so the browser does not lose
 // the session cookie between the begin and finish calls.
@@ -178,16 +216,3 @@ require_once __DIR__ . '/auth.php';
 // Basic headers
 header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
 header('Pragma: no-cache');
-header('Expires: 0');
-header('X-Frame-Options: DENY');
-header('X-Content-Type-Options: nosniff');
-header('Referrer-Policy: strict-origin-when-cross-origin');
-// NOTE: HSTS can lock you in; enable only after you're confident HTTPS is solid.
-// header('Strict-Transport-Security: max-age=31536000; includeSubDomains; preload');
-
-
-
-// Enforce security enrollment policy (password requires TOTP; passkey counts as strong auth)
-if (function_exists('enforce_security_enrollment_policy')) {
-    enforce_security_enrollment_policy();
-}
