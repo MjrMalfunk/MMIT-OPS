@@ -28,6 +28,12 @@ function page_header(string $title, string $activeNav = '', bool $showNav = true
         <?php render_pills($activeNav); ?>
       </div>
     <?php endif; ?>
+      <?php if (function_exists('ops_is_staging_env') && ops_is_staging_env()): ?>
+        <div class="staging-banner" role="status" aria-label="Staging environment">
+          STAGING - OPS TEST
+        </div>
+      <?php endif; ?>
+
 
     <div class="glass">
 <?php
