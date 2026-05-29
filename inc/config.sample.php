@@ -67,6 +67,9 @@ define('STRIPE_CHECKOUT_CANCEL_URL', BASE_URL . '/payments/pay.php?cancelled=1')
 
 
 // Syncro integration
+// OPS LIVE (APP_ENV=production / ops.midwestmanagedit.com) may push customer records to Syncro.
+// OPS TEST/staging (APP_ENV=staging or ops-test.midwestmanagedit.com) must not push to Syncro;
+// inc/syncro.php blocks POST, PUT, PATCH, and DELETE centrally before any external API call.
 define('SYNCRO_SUBDOMAIN', 'midwestmanagedit');
 define('SYNCRO_API_KEY', '');
 define('SYNCRO_BASE_URL', ''); // Optional override. Leave blank to use https://<subdomain>.syncromsp.com/api/v1/

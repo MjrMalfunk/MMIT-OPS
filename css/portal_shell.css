@@ -937,6 +937,7 @@ input, select, textarea { padding: 10px 12px; }
 .client-pill { display:inline-flex; align-items:center; justify-content:center; min-height:26px; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:700; border:1px solid rgba(148,163,184,.18); background:rgba(255,255,255,.05); color:#e9eef7; }
 .client-pill.client-pill--synced { background:rgba(34,197,94,.12); border-color:rgba(34,197,94,.28); color:#d1fae5; }
 .client-pill.client-pill--pending { background:rgba(245,158,11,.12); border-color:rgba(245,158,11,.28); color:#fde68a; }
+.client-pill.client-pill--staging { background:rgba(14,165,233,.12); border-color:rgba(14,165,233,.28); color:#bae6fd; }
 .client-pill.client-pill--error { background:rgba(248,113,113,.12); border-color:rgba(248,113,113,.28); color:#fee2e2; }
 .client-meta-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px 14px; }
 .client-meta-label { font-size:11px; text-transform:uppercase; letter-spacing:.05em; opacity:.62; }
