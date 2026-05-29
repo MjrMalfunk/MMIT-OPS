@@ -1,41 +1,7 @@
+---
 deployment:
   tasks:
-    - export DEPLOYPATH=/home/mjrmstlj/ops.midwestmanagedit.com
-    - /bin/mkdir -p "$DEPLOYPATH"
-    - |
-      if command -v rsync >/dev/null 2>&1; then
-        git ls-files -z \
-          | rsync -a --from0 --files-from=- ./ "$DEPLOYPATH"/ \
-              --exclude='inc/config.php' \
-              --exclude='vendor/' \
-              --exclude='storage/' \
-              --exclude='storage/onedrive/' \
-              --exclude='uploads/' \
-              --exclude='logs/' \
-              --exclude='cache/' \
-              --exclude='tmp/' \
-              --exclude='error_log' \
-              --exclude='*.log' \
-              --exclude='*.sql' \
-              --exclude='*.zip' \
-              --exclude='*.pdf' \
-              --exclude='*.doc' \
-              --exclude='*.docx' \
-              --exclude='*.rtf' \
-              --exclude='*.odt' \
-              --exclude='uploads/contracts/' \
-              --exclude='signed-contracts/' \
-              --exclude='audit-trails/' \
-              --exclude='receipts/'
-      else
-        git ls-files -z \
-          | while IFS= read -r -d '' f; do
-              case "$f" in
-                inc/config.php|vendor/*|storage/*|storage/onedrive/*|uploads/*|uploads/contracts/*|signed-contracts/*|audit-trails/*|receipts/*|logs/*|cache/*|tmp/*|error_log|*.log|*.sql|*.zip|*.pdf|*.doc|*.docx|*.rtf|*.odt)
-                  continue
-                  ;;
-              esac
-              /bin/mkdir -p "$DEPLOYPATH/$(dirname "$f")"
-              /bin/cp -p "$f" "$DEPLOYPATH/$f"
-            done
-      fi
+    - export REPOPATH="$(git rev-parse --show-toplevel)/"
+    - export BRANCH="$(git -C "$REPOPATH" rev-parse --abbrev-ref HEAD)"
+    - if [ "$BRANCH" = "main" ]; then export DEPLOYPATH=/home/mjrmstlj/ops.midwestmanagedit.com/; elif [ "$BRANCH" = "staging" ]; then export DEPLOYPATH=/home/mjrmstlj/ops-test.midwestmanagedit.com/; else echo "Refusing deployment from branch $BRANCH. Only main and staging are deployable."; exit 1; fi
+    - /bin/rsync -rlptD --exclude=.git/ --exclude=.cpanel.yml --exclude=.gitignore --exclude=.env --exclude=.env.* --exclude=private/ --exclude=storage/ --exclude=uploads/ --exclude=logs/ --exclude=log/ --exclude=cache/ --exclude=tmp/ --exclude=backups/ --exclude=backup/ --exclude=error_log --exclude=*.log --exclude=*.zip --exclude=config.php --exclude=config.local.php --exclude=includes/private-config.php --exclude=includes/private-config.local.php "$REPOPATH" "$DEPLOYPATH"
