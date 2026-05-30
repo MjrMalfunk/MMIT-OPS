@@ -44,6 +44,8 @@ page_header('Clients', 'clients');
         $syncClass = 'client-pill';
         if ($syncStatus === 'SYNCED') {
             $syncClass .= ' client-pill--synced';
+        } elseif ($syncStatus === 'STAGING_BLOCKED') {
+            $syncClass .= ' client-pill--staging';
         } elseif (in_array($syncStatus, ['ERROR','CONFLICT','MANUAL_REVIEW'], true)) {
             $syncClass .= ' client-pill--error';
         } else {

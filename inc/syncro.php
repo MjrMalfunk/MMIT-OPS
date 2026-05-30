@@ -58,8 +58,82 @@ function syncro_flatten_errors(mixed $value, string $prefix = ''): array
     return $errors;
 }
 
+
+function syncro_is_staging_mode(): bool
+{
+    if (function_exists('ops_is_staging_env') && ops_is_staging_env()) {
+        return true;
+    }
+
+    $appEnv = defined('APP_ENV') ? strtolower(trim((string)APP_ENV)) : '';
+    if (in_array($appEnv, ['staging', 'test', 'testing'], true)) {
+        return true;
+    }
+
+    $hosts = [];
+    foreach (['HTTP_HOST', 'SERVER_NAME'] as $key) {
+        $host = strtolower(trim((string)($_SERVER[$key] ?? '')));
+        $host = preg_replace('/:\d+$/', '', $host) ?? $host;
+        if ($host !== '') {
+            $hosts[] = $host;
+        }
+    }
+
+    if (defined('BASE_URL')) {
+        $baseHost = parse_url((string)BASE_URL, PHP_URL_HOST);
+        if (is_string($baseHost) && $baseHost !== '') {
+            $hosts[] = strtolower($baseHost);
+        }
+    }
+
+    return in_array('ops-test.midwestmanagedit.com', array_unique($hosts), true);
+}
+
+function syncro_is_write_method(string $method): bool
+{
+    return in_array(strtoupper(trim($method)), ['POST', 'PUT', 'PATCH', 'DELETE'], true);
+}
+
+function syncro_staging_blocked_result(): array
+{
+    $message = 'Staging mode: Syncro write skipped.';
+    return [
+        'ok' => false,
+        'skipped' => true,
+        'staging_blocked' => true,
+        'status' => 'STAGING_BLOCKED',
+        'errors' => [$message],
+        'message' => $message,
+    ];
+}
+
+function syncro_block_staging_write_if_needed(string $method, string $path): ?array
+{
+    $method = strtoupper(trim($method));
+    if (!syncro_is_staging_mode() || !syncro_is_write_method($method)) {
+        return null;
+    }
+
+    // OPS LIVE (ops.midwestmanagedit.com) may push customers/assets to Syncro.
+    // OPS TEST/staging (ops-test.midwestmanagedit.com) must never write to Syncro;
+    // block external writes here so UI, cron, and onboarding paths are all protected.
+    syncro_debug_log('staging_write_blocked', [
+        'method' => $method,
+        'path' => ltrim($path, '/'),
+        'status' => 'STAGING_BLOCKED',
+    ]);
+
+    return syncro_staging_blocked_result();
+}
+
 function syncro_api_request(string $method, string $path, array $query = [], ?array $payload = null): array
 {
+    $method = strtoupper($method);
+    $stagingBlock = syncro_block_staging_write_if_needed($method, $path);
+    if ($stagingBlock !== null) {
+        return $stagingBlock;
+    }
+
     if (!syncro_is_configured()) {
         return ['ok' => false, 'errors' => ['Syncro integration is not configured yet.']];
     }
@@ -71,7 +145,6 @@ function syncro_api_request(string $method, string $path, array $query = [], ?ar
 
     $ch = curl_init($url);
     $headers = ['Accept: application/json'];
-    $method = strtoupper($method);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_CUSTOMREQUEST => $method,
@@ -437,6 +510,7 @@ function syncro_status_badge_html(?string $status, ?int $syncroCustomerId = null
         'SYNCED' => ['bg' => 'rgba(34,197,94,.18)', 'border' => 'rgba(34,197,94,.28)', 'color' => '#bbf7d0', 'label' => 'SYNCED'],
         'CONFLICT' => ['bg' => 'rgba(245,158,11,.20)', 'border' => 'rgba(245,158,11,.32)', 'color' => '#fde68a', 'label' => 'CONFLICT'],
         'MANUAL_REVIEW' => ['bg' => 'rgba(168,85,247,.20)', 'border' => 'rgba(168,85,247,.30)', 'color' => '#e9d5ff', 'label' => 'MANUAL REVIEW'],
+        'STAGING_BLOCKED' => ['bg' => 'rgba(14,165,233,.18)', 'border' => 'rgba(14,165,233,.32)', 'color' => '#bae6fd', 'label' => 'STAGING BLOCKED'],
         'ERROR' => ['bg' => 'rgba(248,113,113,.18)', 'border' => 'rgba(248,113,113,.30)', 'color' => '#fecaca', 'label' => 'ERROR'],
     ];
     $style = $map[$status] ?? $map['PENDING'];
@@ -488,10 +562,19 @@ function syncro_sync_client(int $clientId): array
 {
     if ($clientId <= 0) return ['ok' => false, 'errors' => ['Invalid client for Syncro sync.']];
     if (!syncro_client_columns_ready()) return ['ok' => false, 'errors' => ['Run the Syncro integration SQL migration first.']];
-    if (!syncro_is_configured()) return ['ok' => false, 'errors' => ['Add your Syncro API key to inc/config.php before syncing.']];
 
     $client = client_get_by_id($clientId);
     if (!$client) return ['ok' => false, 'errors' => ['Client record not found.']];
+
+    if (syncro_is_staging_mode()) {
+        $result = syncro_staging_blocked_result();
+        $syncroId = !empty($client['syncro_customer_id']) ? (int)$client['syncro_customer_id'] : null;
+        syncro_debug_log('staging_client_sync_blocked', ['client_id' => $clientId, 'syncro_customer_id' => $syncroId, 'status' => 'STAGING_BLOCKED']);
+        syncro_mark_client($clientId, $syncroId, 'STAGING_BLOCKED', (string)$result['message']);
+        return $result;
+    }
+
+    if (!syncro_is_configured()) return ['ok' => false, 'errors' => ['Add your Syncro API key to inc/config.php before syncing.']];
 
     $validation = syncro_validate_client_readiness($client);
     $payload = $validation['payload'];
