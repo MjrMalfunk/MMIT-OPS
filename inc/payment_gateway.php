@@ -16,6 +16,95 @@ function payment_gateway_default(): string {
     return 'STRIPE';
 }
 
+function payment_gateway_app_environment(): string {
+    $env = strtolower(trim((string)payment_gateway_setting('APP_ENV', 'production')));
+    return $env !== '' ? $env : 'production';
+}
+
+function payment_gateway_stripe_configured_webhook_secret(string $mode = ''): string {
+    $mode = strtolower(trim($mode));
+    if ($mode === 'live') {
+        $secret = trim((string)payment_gateway_setting('STRIPE_LIVE_WEBHOOK_SECRET', ''));
+        if ($secret !== '') {
+            return $secret;
+        }
+    }
+    if (in_array($mode, ['test', 'sandbox'], true)) {
+        $secret = trim((string)payment_gateway_setting('STRIPE_TEST_WEBHOOK_SECRET', ''));
+        if ($secret !== '') {
+            return $secret;
+        }
+    }
+    return trim((string)payment_gateway_setting('STRIPE_WEBHOOK_SECRET', ''));
+}
+
+function payment_gateway_stripe_webhook_secret_for_payload(string $payload): string {
+    $decoded = json_decode($payload, true);
+    if (is_array($decoded) && array_key_exists('livemode', $decoded)) {
+        return payment_gateway_stripe_configured_webhook_secret(!empty($decoded['livemode']) ? 'live' : 'test');
+    }
+    return payment_gateway_stripe_configured_webhook_secret(payment_gateway_stripe_mode());
+}
+
+function payment_gateway_ensure_schema(): void {
+    if (db_table_exists('payment_receipt')) {
+        $paymentColumns = [
+            'processor_checkout_session_id' => "VARCHAR(120) NULL DEFAULT NULL",
+            'processor_receipt_url' => "TEXT NULL DEFAULT NULL",
+            'processor_payment_method_label' => "VARCHAR(80) NULL DEFAULT NULL",
+            'processor_environment' => "VARCHAR(30) NULL DEFAULT NULL",
+        ];
+        foreach ($paymentColumns as $column => $definition) {
+            if (!db_column_exists('payment_receipt', $column)) {
+                try {
+                    db()->exec('ALTER TABLE payment_receipt ADD COLUMN ' . $column . ' ' . $definition);
+                } catch (Throwable $e) {
+                    error_log('Unable to add payment_receipt.' . $column . ': ' . $e->getMessage());
+                }
+            }
+        }
+        foreach ([
+            'idx_payment_receipt_stripe_session' => 'processor_checkout_session_id',
+            'idx_payment_receipt_stripe_intent' => 'processor_payment_intent_id',
+        ] as $index => $column) {
+            if (db_column_exists('payment_receipt', $column)) {
+                try {
+                    db()->exec('ALTER TABLE payment_receipt ADD INDEX ' . $index . ' (' . $column . ')');
+                } catch (Throwable $e) {
+                    // Duplicate index names are harmless across already-upgraded databases.
+                }
+            }
+        }
+    }
+
+    if (!db_table_exists('gateway_webhook_event')) {
+        try {
+            db()->exec("CREATE TABLE IF NOT EXISTS gateway_webhook_event (
+                webhook_event_id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+                provider_name VARCHAR(40) NOT NULL,
+                event_id VARCHAR(190) NOT NULL,
+                event_type VARCHAR(120) NOT NULL,
+                delivery_id VARCHAR(190) NULL DEFAULT NULL,
+                payload_json LONGTEXT NULL DEFAULT NULL,
+                processing_status VARCHAR(30) NOT NULL DEFAULT 'RECEIVED',
+                note TEXT NULL DEFAULT NULL,
+                related_payment_id BIGINT(20) UNSIGNED NULL DEFAULT NULL,
+                related_invoice_id BIGINT(20) UNSIGNED NULL DEFAULT NULL,
+                processed_at DATETIME NULL DEFAULT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (webhook_event_id),
+                UNIQUE KEY uq_gateway_webhook_provider_event (provider_name, event_id),
+                KEY idx_gateway_webhook_status (provider_name, processing_status),
+                KEY idx_gateway_webhook_invoice (related_invoice_id),
+                KEY idx_gateway_webhook_payment (related_payment_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        } catch (Throwable $e) {
+            error_log('Unable to ensure gateway_webhook_event table: ' . $e->getMessage());
+        }
+    }
+}
+
 function payment_gateway_stripe_enabled(): bool {
     return trim((string)payment_gateway_setting('STRIPE_SECRET_KEY', '')) !== '';
 }
@@ -161,8 +250,13 @@ function payment_gateway_stripe_checkout(array $invoice, string $method): array 
         'payment_intent_data[metadata][invoice_id]' => (string)$invoice['invoice_id'],
         'payment_intent_data[metadata][invoice_number]' => (string)$invoice['invoice_number'],
         'payment_intent_data[metadata][client_id]' => (string)$invoice['client_id'],
+        'payment_intent_data[metadata][source]' => 'MMIT_OPS',
+        'payment_intent_data[metadata][environment]' => payment_gateway_app_environment(),
         'metadata[invoice_id]' => (string)$invoice['invoice_id'],
         'metadata[invoice_number]' => (string)$invoice['invoice_number'],
+        'metadata[client_id]' => (string)$invoice['client_id'],
+        'metadata[source]' => 'MMIT_OPS',
+        'metadata[environment]' => payment_gateway_app_environment(),
         'line_items[0][price_data][currency]' => 'usd',
         'line_items[0][price_data][product_data][name]' => 'Invoice ' . (string)$invoice['invoice_number'],
         'line_items[0][price_data][product_data][description]' => 'Payment for ' . ((string)($invoice['dba_name'] ?: $invoice['legal_name'] ?: 'invoice')),
@@ -220,7 +314,7 @@ function payment_gateway_stripe_session(string $sessionId): array {
 }
 
 
-function payment_gateway_invoice_already_recorded(string $processorName, string $processorTxnId = '', string $paymentIntentId = ''): ?int {
+function payment_gateway_invoice_already_recorded(string $processorName, string $processorTxnId = '', string $paymentIntentId = '', string $checkoutSessionId = ''): ?int {
     if (!db_table_exists('payment_receipt')) {
         return null;
     }
@@ -238,6 +332,10 @@ function payment_gateway_invoice_already_recorded(string $processorName, string 
         $matchers[] = 'processor_txn_id = ?';
         $params[] = $processorTxnId;
     }
+    if ($checkoutSessionId !== '' && db_column_exists('payment_receipt', 'processor_checkout_session_id')) {
+        $matchers[] = 'processor_checkout_session_id = ?';
+        $params[] = $checkoutSessionId;
+    }
     if ($matchers === []) {
         return null;
     }
@@ -249,6 +347,7 @@ function payment_gateway_invoice_already_recorded(string $processorName, string 
 }
 
 function payment_gateway_webhook_table_ready(): bool {
+    payment_gateway_ensure_schema();
     return db_table_exists('gateway_webhook_event');
 }
 
@@ -297,11 +396,14 @@ function payment_gateway_read_raw_body(): string {
 }
 
 function payment_gateway_gateway_status(): array {
+    payment_gateway_ensure_schema();
     return [
         'stripe' => [
             'enabled' => payment_gateway_stripe_enabled(),
+            'mode' => payment_gateway_stripe_mode(),
+            'environment' => payment_gateway_app_environment(),
             'secret_key_present' => trim((string)payment_gateway_setting('STRIPE_SECRET_KEY', '')) !== '',
-            'webhook_secret_present' => trim((string)payment_gateway_setting('STRIPE_WEBHOOK_SECRET', '')) !== '',
+            'webhook_secret_present' => payment_gateway_stripe_configured_webhook_secret(payment_gateway_stripe_mode()) !== '',
             'checkout_success_url' => (string)payment_gateway_setting('STRIPE_CHECKOUT_SUCCESS_URL', BASE_URL . '/payments/return.php?gateway=stripe&session_id={CHECKOUT_SESSION_ID}'),
             'webhook_url' => BASE_URL . '/payments/webhook_stripe.php',
         ],
@@ -442,7 +544,7 @@ function payment_gateway_reprocess_webhook_event(int $webhookEventId): array {
 }
 
 function payment_gateway_stripe_verify_signature(string $payload, string $signatureHeader): bool {
-    $secret = trim((string)payment_gateway_setting('STRIPE_WEBHOOK_SECRET', ''));
+    $secret = payment_gateway_stripe_webhook_secret_for_payload($payload);
     if ($secret === '' || $signatureHeader === '') {
         return false;
     }
@@ -485,15 +587,32 @@ function payment_gateway_find_payment_by_processor(string $processorName, string
 }
 
 function payment_gateway_record_stripe_invoice_payment(array $invoice, array $session): array {
+    payment_gateway_ensure_schema();
+
     $paymentStatus = strtoupper((string)($session['payment_status'] ?? ''));
     $sessionStatus = strtoupper((string)($session['status'] ?? ''));
+    $sessionId = trim((string)($session['id'] ?? ''));
     $paymentIntent = $session['payment_intent'] ?? [];
-    $paymentIntentId = is_array($paymentIntent) ? (string)($paymentIntent['id'] ?? '') : (string)$paymentIntent;
+    $paymentIntentId = is_array($paymentIntent) ? trim((string)($paymentIntent['id'] ?? '')) : trim((string)$paymentIntent);
+    $charge = [];
     $chargeId = '';
     if (is_array($paymentIntent) && !empty($paymentIntent['latest_charge'])) {
-        $chargeId = (string)$paymentIntent['latest_charge'];
+        if (is_array($paymentIntent['latest_charge'])) {
+            $charge = $paymentIntent['latest_charge'];
+            $chargeId = trim((string)($charge['id'] ?? ''));
+        } else {
+            $chargeId = trim((string)$paymentIntent['latest_charge']);
+        }
     }
-    $existing = payment_gateway_invoice_already_recorded('STRIPE', $chargeId !== '' ? $chargeId : (string)($session['id'] ?? ''), $paymentIntentId);
+    if ($charge === [] && $chargeId !== '') {
+        try {
+            $charge = payment_gateway_stripe_retrieve_charge($chargeId);
+        } catch (Throwable $e) {
+            // Receipt and method details are helpful but should not block local reconciliation.
+        }
+    }
+
+    $existing = payment_gateway_invoice_already_recorded('STRIPE', $chargeId !== '' ? $chargeId : $sessionId, $paymentIntentId, $sessionId);
     if ($existing !== null) {
         return ['ok' => true, 'payment_id' => $existing, 'message' => 'Payment already recorded.'];
     }
@@ -501,36 +620,45 @@ function payment_gateway_record_stripe_invoice_payment(array $invoice, array $se
         return ['ok' => false, 'deferred' => true, 'errors' => ['Stripe reports this payment as ' . strtolower($paymentStatus ?: $sessionStatus ?: 'pending') . '. It has not been posted into the invoice ledger yet.']];
     }
 
-    $amountTotal = ((int)($session['amount_total'] ?? 0)) / 100;
+    $amountTotal = round(((int)($session['amount_total'] ?? 0)) / 100, 2);
+    $balanceDue = round((float)($invoice['balance_due'] ?? 0), 2);
+    $amountToApply = min($amountTotal, $balanceDue);
+    if ($amountToApply <= 0) {
+        return ['ok' => false, 'ignored' => true, 'errors' => ['Nothing remains to apply locally for this Stripe payment.']];
+    }
     $methodTypes = $session['payment_method_types'] ?? [];
-    $method = in_array('us_bank_account', $methodTypes, true) ? 'ACH' : 'CARD';
+    $method = in_array('us_bank_account', is_array($methodTypes) ? $methodTypes : [], true) ? 'ACH' : 'CARD';
+    if ($charge !== []) {
+        $method = payment_gateway_stripe_payment_method_from_charge($charge);
+    }
+    $created = (int)($session['created'] ?? (is_array($paymentIntent) ? ($paymentIntent['created'] ?? 0) : 0) ?: ($charge['created'] ?? time()));
+    $receiptUrl = is_array($charge) ? trim((string)($charge['receipt_url'] ?? '')) : '';
+    $methodLabel = is_array($charge) ? payment_gateway_stripe_payment_method_label($charge) : (in_array('us_bank_account', is_array($methodTypes) ? $methodTypes : [], true) ? 'us_bank_account' : 'card');
+
     $result = accounting_record_invoice_payment((int)$invoice['invoice_id'], [
-        'payment_date' => date('Y-m-d'),
+        'payment_date' => date('Y-m-d', $created > 0 ? $created : time()),
         'payment_method' => $method,
-        'gross_amount' => $amountTotal,
+        'gross_amount' => $amountToApply,
         'fee_amount' => 0.00,
         'deposit_account_id' => payment_gateway_default_deposit_account_id(),
         'fee_expense_account_id' => payment_gateway_default_fee_expense_account_id(),
-        'reference_number' => (string)($session['id'] ?? ''),
-        'memo' => 'Stripe Checkout session ' . (string)($session['id'] ?? ''),
+        'reference_number' => $sessionId !== '' ? $sessionId : ($paymentIntentId !== '' ? $paymentIntentId : (string)($invoice['invoice_number'] ?? '')),
+        'memo' => 'Stripe Checkout payment ' . ($sessionId !== '' ? $sessionId : $paymentIntentId),
         'processor_name' => 'STRIPE',
-        'processor_txn_id' => $chargeId !== '' ? $chargeId : (string)($session['id'] ?? ''),
+        'processor_txn_id' => $chargeId !== '' ? $chargeId : ($sessionId !== '' ? $sessionId : $paymentIntentId),
         'payment_status' => 'POSTED',
     ], 0);
-    if (!empty($result['ok']) && db_column_exists('payment_receipt', 'processor_payment_intent_id')) {
-        $fields = ['processor_payment_intent_id' => $paymentIntentId, 'processor_charge_id' => $chargeId];
-        $sets = []; $params = [];
-        foreach ($fields as $col => $val) {
-            if ($val !== '' && db_column_exists('payment_receipt', $col)) {
-                $sets[] = $col . ' = ?';
-                $params[] = $val;
-            }
-        }
-        if ($sets !== []) {
-            $params[] = (int)$result['payment_id'];
-            $st = db()->prepare('UPDATE payment_receipt SET ' . implode(', ', $sets) . ' WHERE payment_id = ?');
-            $st->execute($params);
-        }
+    if (!empty($result['ok'])) {
+        payment_gateway_stripe_update_local_payment((int)$result['payment_id'], [
+            'processor_checkout_session_id' => $sessionId !== '' && str_starts_with($sessionId, 'cs_') ? $sessionId : null,
+            'processor_payment_intent_id' => $paymentIntentId !== '' ? $paymentIntentId : null,
+            'processor_charge_id' => $chargeId !== '' ? $chargeId : null,
+            'processor_customer_id' => trim((string)($session['customer'] ?? ($charge['customer'] ?? ''))) ?: null,
+            'processor_receipt_url' => $receiptUrl !== '' ? $receiptUrl : null,
+            'processor_payment_method_label' => $methodLabel !== '' ? $methodLabel : null,
+            'processor_environment' => payment_gateway_stripe_mode(),
+            'settled_at' => date('Y-m-d H:i:s', $created > 0 ? $created : time()),
+        ]);
     }
     return $result;
 }
