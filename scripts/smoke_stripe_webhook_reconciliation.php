@@ -44,3 +44,14 @@ smoke_assert(payment_gateway_stripe_metadata_invoice_id(['metadata' => ['local_i
 smoke_assert(payment_gateway_stripe_metadata_invoice_id(['metadata' => [], 'payment_intent' => ['metadata' => ['invoice_id' => '789']]]) === 789, 'nested PaymentIntent invoice metadata is extracted');
 smoke_assert(payment_gateway_stripe_payment_method_label(['payment_method_details' => ['card' => ['brand' => 'visa', 'last4' => '4242'], 'type' => 'card']]) === 'VISA •••• 4242', 'card payment method label includes brand and last4');
 
+
+smoke_assert(payment_gateway_stripe_checkout_payment_method_types(['balance_due' => 1500], 'CARD') === ['card'], 'card checkout keeps card-only Stripe method list');
+smoke_assert(payment_gateway_stripe_checkout_payment_method_types(['balance_due' => 1500], 'ACH') === ['us_bank_account', 'card'], 'staging ACH checkout offers bank first with card fallback');
+smoke_assert(payment_gateway_invoice_prefers_ach(['balance_due' => 2500, 'source_system' => 'PORTAL']) === true, 'large staging invoice prefers ACH');
+smoke_assert(payment_gateway_invoice_prefers_ach(['balance_due' => 100, 'source_system' => 'RECURRING_BATCH']) === true, 'recurring managed service invoice prefers ACH');
+smoke_assert(payment_gateway_stripe_pending_status_from_session(['status' => 'complete', 'payment_status' => 'paid']) === 'POSTED', 'card success state posts immediately');
+smoke_assert(payment_gateway_stripe_pending_status_from_session(['status' => 'complete', 'payment_status' => 'unpaid', 'payment_intent' => ['status' => 'processing']]) === 'PENDING', 'ACH processing state remains pending');
+smoke_assert(payment_gateway_stripe_charge_fee_amount(['balance_transaction' => ['fee' => 175, 'net' => 9825]]) === 1.75, 'Stripe balance transaction fee is extracted');
+smoke_assert(payment_gateway_stripe_charge_net_amount(['balance_transaction' => ['fee' => 175, 'net' => 9825]]) === 98.25, 'Stripe balance transaction net deposit is extracted');
+smoke_assert(payment_gateway_stripe_payment_method_from_charge(['payment_method_details' => ['type' => 'us_bank_account']]) === 'ACH', 'ACH/bank charge records ACH payment method');
+smoke_assert(function_exists('payment_gateway_invoice_already_recorded'), 'duplicate webhook idempotency matcher is available for replayed processor ids');
