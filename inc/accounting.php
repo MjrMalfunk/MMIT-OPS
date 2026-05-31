@@ -6607,17 +6607,40 @@ function accounting_contract_upload_contract_file(int $contractId, array $file, 
     return ['ok' => true, 'relative_path' => 'uploads/contracts/' . $targetName];
 }
 
+function accounting_contract_complete_signed_copy(int $contractId, string $signedDocumentReference, array $options = []): array {
+    $signedDocumentReference = trim($signedDocumentReference);
+    if ($contractId <= 0) return ['ok' => false, 'errors' => ['Invalid contract.']];
+    if ($signedDocumentReference === '') return ['ok' => false, 'errors' => ['Signed document reference is required before onboarding can start.']];
+
+    $signedAt = trim((string)($options['signed_at'] ?? ''));
+    $completedBy = trim((string)($options['signed_by'] ?? ''));
+    if ($completedBy === '') {
+        $completedBy = trim((string)(current_user()['full_name'] ?? current_user()['email'] ?? 'Uploaded signed copy'));
+    }
+
+    $meta = [
+        'signed_document_path' => $signedDocumentReference,
+        'signed_date' => $signedAt !== '' ? $signedAt : date('Y-m-d H:i:s'),
+        'signed_by' => $completedBy,
+        'signed_ip' => (string)($options['signed_ip'] ?? ($_SERVER['REMOTE_ADDR'] ?? '')),
+        'onboarding_started_at' => date('Y-m-d H:i:s'),
+    ];
+    $auditReference = trim((string)($options['audit_document_reference'] ?? ''));
+    if ($auditReference !== '') {
+        $meta['audit_document_path'] = $auditReference;
+    }
+
+    return accounting_contract_status_update($contractId, 'ONBOARDING', (int)($options['user_id'] ?? (current_user()['user_id'] ?? 0)), $meta);
+}
+
 function accounting_contract_upload_signed_copy(int $contractId, array $file): array {
     $stored = accounting_contract_upload_contract_file($contractId, $file, 'signed');
     if (empty($stored['ok'])) return $stored;
-    $meta = [
-        'signed_document_path' => (string)$stored['relative_path'],
-        'signed_date' => date('Y-m-d H:i:s'),
+    return accounting_contract_complete_signed_copy($contractId, (string)$stored['relative_path'], [
         'signed_by' => trim((string)(current_user()['full_name'] ?? current_user()['email'] ?? 'Uploaded signed copy')),
         'signed_ip' => (string)($_SERVER['REMOTE_ADDR'] ?? ''),
-        'onboarding_started_at' => date('Y-m-d H:i:s'),
-    ];
-    return accounting_contract_status_update($contractId, 'ONBOARDING', (int)(current_user()['user_id'] ?? 0), $meta);
+        'user_id' => (int)(current_user()['user_id'] ?? 0),
+    ]);
 }
 
 function accounting_contract_upload_audit_copy(int $contractId, array $file): array {
