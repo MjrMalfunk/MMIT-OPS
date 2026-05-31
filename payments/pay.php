@@ -6,11 +6,9 @@ require_once __DIR__ . '/../inc/accounting.php';
 require_once __DIR__ . '/../inc/payment_gateway.php';
 
 $invoiceNumber = trim((string)($_GET['invoice'] ?? $_POST['invoice'] ?? ''));
-$method = strtoupper(trim((string)($_GET['method'] ?? $_POST['method'] ?? 'ACH')));
-if (!in_array($method, ['ACH', 'CARD'], true)) {
-    $method = 'ACH';
-}
 $invoice = $invoiceNumber !== '' ? accounting_invoice_lookup_by_number($invoiceNumber) : null;
+$requestedMethod = strtoupper(trim((string)($_GET['method'] ?? $_POST['method'] ?? '')));
+$method = in_array($requestedMethod, ['ACH', 'CARD'], true) ? $requestedMethod : payment_gateway_default_method_for_invoice($invoice);
 $errors = [];
 $selectedGateway = payment_gateway_pick($method, (string)($_POST['gateway'] ?? $_GET['gateway'] ?? ''));
 $availableGateways = payment_gateway_available_for_method($method);
@@ -119,7 +117,7 @@ page_header('Pay invoice', '', false);
       <h2 style="margin:0 0 12px;font-size:18px;">What happens next</h2>
       <div style="display:grid;gap:10px;opacity:.82;line-height:1.55;">
         <div>Card payments through Stripe return immediately and can be posted back to the invoice automatically.</div>
-        <div>Stripe webhooks reconcile gateway events server-to-server. Bank settlement timing still depends on the processor.</div>
+        <div>ACH/bank payments may show as pending while Stripe waits for bank settlement; invoices are marked paid only after Stripe confirms success.</div>
         <div>Keep this invoice number handy: <strong><?= $invoice ? accounting_h((string)$invoice['invoice_number']) : '—' ?></strong></div>
       </div>
     </div>

@@ -243,8 +243,9 @@ function accounting_payment_method_badge_html(string $method): string {
         'OTHER' => ['bg' => 'rgba(148,163,184,.18)', 'border' => 'rgba(148,163,184,.28)', 'color' => '#cbd5e1'],
     ];
     $style = $map[$method] ?? $map['OTHER'];
+    $label = $method === 'ACH' ? 'ACH / BANK' : $method;
     return '<span class="status-badge" style="display:inline-flex;align-items:center;padding:5px 9px;border-radius:999px;font-size:12px;font-weight:700;letter-spacing:.02em;background:'
-        . $style['bg'] . ';border:1px solid ' . $style['border'] . ';color:' . $style['color'] . ';">' . accounting_h($method) . '</span>';
+        . $style['bg'] . ';border:1px solid ' . $style['border'] . ';color:' . $style['color'] . ';">' . accounting_h($label) . '</span>';
 }
 
 function accounting_payment_status_badge_html(string $status): string {
@@ -2266,14 +2267,14 @@ function accounting_record_invoice_payment(int $invoiceId, array $data, int $use
     }
 
     $netAmount = round($grossAmount - $feeAmount, 2);
-    $appliedAmount = $grossAmount;
-    $unappliedAmount = 0.00;
+    $appliedAmount = $paymentStatus === 'PENDING' ? 0.00 : $grossAmount;
+    $unappliedAmount = $paymentStatus === 'PENDING' ? $grossAmount : 0.00;
 
     $errors = [];
     if ($grossAmount <= 0) $errors[] = 'Gross amount must be greater than zero.';
     if ($feeAmount < 0) $errors[] = 'Fee amount cannot be negative.';
     if ($netAmount < 0) $errors[] = 'Fee amount cannot exceed gross amount.';
-    if ($appliedAmount - (float)$invoice['balance_due'] > 0.00001) $errors[] = 'Gross amount cannot exceed the invoice balance.';
+    if ($paymentStatus !== 'PENDING' && $appliedAmount - (float)$invoice['balance_due'] > 0.00001) $errors[] = 'Gross amount cannot exceed the invoice balance.';
     if ($depositAccountId <= 0) $errors[] = 'Choose a deposit account.';
     if ($feeAmount > 0 && $feeExpenseAccountId <= 0) $errors[] = 'Choose a fee expense account when a processing fee is entered.';
     if ($paymentDate === '') $errors[] = 'Payment date is required.';
@@ -2341,18 +2342,119 @@ function accounting_record_invoice_payment(int $invoiceId, array $data, int $use
             $line->execute([$journalId, $lineNumber++, (int)$invoice['ar_account_id'], (int)$invoice['client_id'], 0, $appliedAmount, 'Accounts receivable settlement']);
         }
 
-        $newBalance = round((float)$invoice['balance_due'] - $appliedAmount, 2);
-        $newStatus = $newBalance <= 0.00001 ? 'PAID' : 'PARTIALLY_PAID';
-        $st = $pdo->prepare('UPDATE customer_invoice SET balance_due = ?, status = ? WHERE invoice_id = ?');
-        $st->execute([$newBalance <= 0 ? 0 : $newBalance, $newStatus, $invoiceId]);
+        if ($paymentStatus === 'POSTED') {
+            $newBalance = round((float)$invoice['balance_due'] - $appliedAmount, 2);
+            $newStatus = $newBalance <= 0.00001 ? 'PAID' : 'PARTIALLY_PAID';
+            $st = $pdo->prepare('UPDATE customer_invoice SET balance_due = ?, status = ? WHERE invoice_id = ?');
+            $st->execute([$newBalance <= 0 ? 0 : $newBalance, $newStatus, $invoiceId]);
+            $message = $newStatus === 'PAID' ? 'Payment recorded and invoice marked paid.' : 'Partial payment recorded.';
+        } else {
+            $message = 'Payment is pending processor settlement and has not been applied to A/R yet.';
+        }
         $pdo->commit();
-        return ['ok' => true, 'payment_id' => $paymentId, 'message' => $newStatus === 'PAID' ? 'Payment recorded and invoice marked paid.' : 'Partial payment recorded.'];
+        return ['ok' => true, 'payment_id' => $paymentId, 'message' => $message];
     } catch (Throwable $e) {
         if ($pdo->inTransaction()) $pdo->rollBack();
         return ['ok' => false, 'errors' => ['Failed to record payment: ' . $e->getMessage()]];
     }
 }
 
+
+function accounting_post_pending_invoice_payment(int $paymentId, int $invoiceId, array $data = [], int $userId = 0): array {
+    $payment = accounting_get_payment($paymentId);
+    if (!$payment) {
+        return ['ok' => false, 'errors' => ['Pending payment not found.']];
+    }
+    $invoice = accounting_get_invoice($invoiceId);
+    if (!$invoice) {
+        return ['ok' => false, 'errors' => ['Invoice not found.']];
+    }
+    if (strtoupper(trim((string)($payment['payment_status'] ?? ''))) === 'POSTED') {
+        return ['ok' => true, 'payment_id' => $paymentId, 'message' => 'Payment already posted.'];
+    }
+    if (strtoupper(trim((string)($payment['payment_status'] ?? ''))) !== 'PENDING') {
+        return ['ok' => false, 'errors' => ['Only pending payments can be finalized.']];
+    }
+    if (!accounting_invoice_can_receive_payment($invoice)) {
+        return ['ok' => false, 'errors' => ['Invoice is not open for payment posting.']];
+    }
+
+    $grossAmount = round((float)($data['gross_amount'] ?? $payment['gross_amount'] ?? $payment['amount_received'] ?? 0), 2);
+    $feeAmount = round((float)($data['fee_amount'] ?? $payment['fee_amount'] ?? 0), 2);
+    $netAmount = round($grossAmount - $feeAmount, 2);
+    $amountToApply = min($grossAmount, round((float)($invoice['balance_due'] ?? 0), 2));
+    $paymentDate = trim((string)($data['payment_date'] ?? '')) ?: date('Y-m-d');
+    $reference = trim((string)($data['reference_number'] ?? $payment['reference_number'] ?? $invoice['invoice_number'] ?? ''));
+    $memo = trim((string)($data['memo'] ?? $payment['memo'] ?? ''));
+    $depositAccountId = (int)($data['deposit_account_id'] ?? $payment['deposit_account_id'] ?? 0);
+    $feeExpenseAccountId = (int)($data['fee_expense_account_id'] ?? $payment['fee_expense_account_id'] ?? 0);
+    $effectiveUserId = $userId > 0 ? $userId : null;
+
+    $errors = [];
+    if ($grossAmount <= 0) $errors[] = 'Gross amount must be greater than zero.';
+    if ($feeAmount < 0) $errors[] = 'Fee amount cannot be negative.';
+    if ($netAmount < 0) $errors[] = 'Fee amount cannot exceed gross amount.';
+    if ($amountToApply <= 0) $errors[] = 'Nothing remains to apply locally.';
+    if ($depositAccountId <= 0) $errors[] = 'Choose a deposit account.';
+    if ($feeAmount > 0 && $feeExpenseAccountId <= 0) $errors[] = 'Choose a fee expense account when a processing fee is entered.';
+    if ($errors) return ['ok' => false, 'errors' => $errors];
+
+    $pdo = db();
+    $pdo->beginTransaction();
+    try {
+        $fields = ['payment_date = ?', 'amount_received = ?', 'payment_status = ?'];
+        $params = [$paymentDate, $grossAmount, 'POSTED'];
+        foreach ([
+            'gross_amount' => $grossAmount,
+            'fee_amount' => $feeAmount,
+            'net_amount' => $netAmount,
+            'applied_amount' => $amountToApply,
+            'unapplied_amount' => 0.00,
+            'fee_expense_account_id' => $feeExpenseAccountId > 0 ? $feeExpenseAccountId : null,
+            'reference_number' => $reference !== '' ? $reference : null,
+            'memo' => $memo !== '' ? $memo : null,
+            'settled_at' => trim((string)($data['settled_at'] ?? '')) ?: date('Y-m-d H:i:s'),
+        ] as $column => $value) {
+            if (db_column_exists('payment_receipt', $column)) {
+                $fields[] = $column . ' = ?';
+                $params[] = $value;
+            }
+        }
+        $params[] = $paymentId;
+        $st = $pdo->prepare('UPDATE payment_receipt SET ' . implode(', ', $fields) . ' WHERE payment_id = ?');
+        $st->execute($params);
+
+        $st = $pdo->prepare('UPDATE payment_invoice_apply SET amount_applied = ? WHERE payment_id = ? AND invoice_id = ?');
+        $st->execute([$amountToApply, $paymentId, $invoiceId]);
+        if ($st->rowCount() === 0) {
+            $st = $pdo->prepare('INSERT INTO payment_invoice_apply (payment_id, invoice_id, amount_applied) VALUES (?, ?, ?)');
+            $st->execute([$paymentId, $invoiceId, $amountToApply]);
+        }
+
+        $memoText = 'Payment for ' . $invoice['invoice_number'];
+        $st = $pdo->prepare("INSERT INTO gl_journal (journal_date, status, source_type, source_id, reference_number, memo, posted_by) VALUES (?, 'POSTED', 'PAYMENT', ?, ?, ?, ?)");
+        $st->execute([$paymentDate, $paymentId, $reference !== '' ? $reference : $invoice['invoice_number'], $memoText, $effectiveUserId]);
+        $journalId = (int)$pdo->lastInsertId();
+
+        $line = $pdo->prepare('INSERT INTO gl_journal_line (journal_id, line_number, account_id, client_id, debit_amount, credit_amount, line_memo) VALUES (?, ?, ?, ?, ?, ?, ?)');
+        $lineNumber = 1;
+        $line->execute([$journalId, $lineNumber++, $depositAccountId, (int)$invoice['client_id'], $netAmount, 0, 'Customer payment deposit']);
+        if ($feeAmount > 0 && $feeExpenseAccountId > 0) {
+            $line->execute([$journalId, $lineNumber++, $feeExpenseAccountId, (int)$invoice['client_id'], $feeAmount, 0, 'Merchant processing fee']);
+        }
+        $line->execute([$journalId, $lineNumber++, (int)$invoice['ar_account_id'], (int)$invoice['client_id'], 0, $amountToApply, 'Accounts receivable settlement']);
+
+        $newBalance = round((float)$invoice['balance_due'] - $amountToApply, 2);
+        $newStatus = $newBalance <= 0.00001 ? 'PAID' : 'PARTIALLY_PAID';
+        $st = $pdo->prepare('UPDATE customer_invoice SET balance_due = ?, status = ? WHERE invoice_id = ?');
+        $st->execute([$newBalance <= 0 ? 0 : $newBalance, $newStatus, $invoiceId]);
+        $pdo->commit();
+        return ['ok' => true, 'payment_id' => $paymentId, 'message' => $newStatus === 'PAID' ? 'Pending payment settled and invoice marked paid.' : 'Pending payment settled and applied.'];
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        return ['ok' => false, 'errors' => ['Failed to finalize pending payment: ' . $e->getMessage()]];
+    }
+}
 
 function accounting_bank_reconciliation_ready(): bool {
     return db_table_exists('bank_reconciliation') && db_table_exists('bank_reconciliation_item');

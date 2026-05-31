@@ -31,7 +31,8 @@ try {
         if (!empty($result['ok'])) {
             $message = (string)($result['message'] ?? 'Payment received.');
             $paymentId = (int)($result['payment_id'] ?? 0);
-            $statusLabel = 'Paid';
+            $payment = $paymentId > 0 ? accounting_get_payment($paymentId) : null;
+            $statusLabel = strtoupper(trim((string)($payment['payment_status'] ?? ''))) === 'PENDING' ? 'Processing' : 'Paid';
             $invoice = accounting_get_invoice((int)$invoice['invoice_id']) ?: $invoice;
         } else {
             $errors = $result['errors'] ?? ['Stripe returned a non-final payment state.'];
