@@ -144,6 +144,17 @@ function esignatures_contract_placeholder_values(array $contract, float $monthly
     ];
 }
 
+function esignatures_placeholder_fields_payload(array $placeholders): array {
+    $fields = [];
+    foreach ($placeholders as $key => $value) {
+        $fields[] = [
+            'placeholder_key' => (string)$key,
+            'replace_with_text' => (string)$value,
+        ];
+    }
+    return $fields;
+}
+
 function esignatures_validate_contract_for_send(array $contract, array $placeholders): array {
     $errors = [];
     $signerName = trim((string)$placeholders['client_name']);
@@ -171,7 +182,7 @@ function esignatures_build_payload(array $contract, float $monthlyAmount): array
             'name' => $placeholders['client_name'],
             'email' => $signerEmail,
         ]],
-        'placeholder_fields' => $placeholders,
+        'placeholder_fields' => esignatures_placeholder_fields_payload($placeholders),
     ];
     if (esignatures_test_mode()) {
         $payload['test'] = 'yes';
@@ -268,8 +279,9 @@ function esignatures_send_test_contract(int $contractId, ?callable $transport = 
     if (!$contract) return ['ok' => false, 'errors' => ['Contract not found.']];
 
     $monthlyAmount = esignatures_find_monthly_amount($contractId, $contract);
+    $placeholders = esignatures_contract_placeholder_values($contract, $monthlyAmount);
+    $errors = esignatures_validate_contract_for_send($contract, $placeholders);
     $payload = esignatures_build_payload($contract, $monthlyAmount);
-    $errors = esignatures_validate_contract_for_send($contract, (array)$payload['placeholder_fields']);
     if ($errors !== []) {
         esignatures_log('validation_failed', ['contract_id' => $contractId, 'errors' => $errors]);
         return ['ok' => false, 'errors' => $errors];
