@@ -64,6 +64,17 @@ function esignatures_send_url(): string {
     return esignatures_base_url() . '/contracts?token=' . rawurlencode(esignatures_config_string('ESIGNATURES_API_TOKEN'));
 }
 
+function esignatures_webhook_url(): string {
+    $configured = esignatures_config_string('ESIGNATURES_WEBHOOK_URL');
+    if ($configured !== '') {
+        return $configured;
+    }
+    if (esignatures_is_staging_mode()) {
+        return 'https://ops-test.midwestmanagedit.com/webhooks/esignatures.php';
+    }
+    return '';
+}
+
 function esignatures_sanitize_log_context(mixed $value): mixed {
     if (is_array($value)) {
         $sanitized = [];
@@ -221,6 +232,10 @@ function esignatures_build_payload(array $contract, float $monthlyAmount): array
         'placeholder_fields' => esignatures_placeholder_fields_payload($placeholders),
         'metadata' => esignatures_metadata_payload($contract),
     ];
+    $webhookUrl = esignatures_webhook_url();
+    if ($webhookUrl !== '') {
+        $payload['custom_webhook_url'] = $webhookUrl;
+    }
     if (esignatures_test_mode()) {
         $payload['test'] = 'yes';
     }

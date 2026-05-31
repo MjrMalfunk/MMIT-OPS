@@ -9,6 +9,7 @@ define('ESIGNATURES_API_TOKEN', 'smoke-token');
 define('ESIGNATURES_TEMPLATE_ID', 'smoke-template');
 define('ESIGNATURES_TEST_MODE', true);
 define('ESIGNATURES_BASE_URL', 'https://esignatures.com/api');
+define('ESIGNATURES_WEBHOOK_URL', 'https://ops-test.midwestmanagedit.com/webhooks/esignatures.php');
 define('SYNCRO_API_KEY', 'smoke-syncro-key');
 define('SYNCRO_SUBDOMAIN', 'smoke-subdomain');
 
