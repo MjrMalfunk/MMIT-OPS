@@ -38,8 +38,14 @@ $webhookMatchesProvider = str_contains($esignaturesSource, 'WHERE provider_contr
 $webhookMatchesMetadata = str_contains($esignaturesSource, "metadata['contract_id']") && str_contains($esignaturesSource, "metadata['client_id']");
 $manualUploadUsesSharedHelper = str_contains($accountingSource, 'function accounting_contract_upload_signed_copy')
     && str_contains($accountingSource, 'accounting_contract_complete_signed_copy($contractId');
-$esignaturesCompletionUsesSharedHelper = str_contains($esignaturesSource, 'function esignatures_complete_ops_contract')
-    && str_contains($esignaturesSource, 'accounting_contract_complete_signed_copy((int)$send');
+$esignaturesCompletionUsesSharedHelper = (bool)preg_match(
+    '/function\s+esignatures_complete_ops_contract\s*\([^)]*\)\s*:\s*array\s*\{.*?accounting_contract_complete_signed_copy\s*\(/s',
+    $esignaturesSource
+);
+$signedPendingDocumentsFlowExists = (bool)preg_match(
+    '/function\s+esignatures_mark_signed_pending_documents\s*\([^)]*\)\s*:\s*array\s*\{.*?SIGNED_PENDING_DOCUMENTS/s',
+    $esignaturesSource
+);
 $syncroWriteBlocked = syncro_block_staging_write_if_needed('POST', 'customers') !== null;
 
 $checks = [
@@ -50,6 +56,7 @@ $checks = [
     'webhook mapping supports metadata contract_id/client_id' => $webhookMatchesMetadata,
     'manual upload path delegates to shared signed completion helper' => $manualUploadUsesSharedHelper,
     'eSignatures completion delegates to shared signed completion helper' => $esignaturesCompletionUsesSharedHelper,
+    'eSignatures signed-pending-documents flow is available' => $signedPendingDocumentsFlowExists,
     'staging Syncro write attempts are blocked before external API calls' => $syncroWriteBlocked,
 ];
 
