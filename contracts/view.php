@@ -73,6 +73,35 @@ $canRetrySyncro = $hasSignedCopy || in_array($currentStatus, ['ONBOARDING', 'SIG
 $canCompleteOnboarding = in_array($currentStatus, ['ONBOARDING', 'SIGNED_PENDING_ONBOARDING'], true) && !empty($onboardingProgress['all_complete']);
 $esignaturesLatestSend = esignatures_latest_send($contractId);
 $showEsignaturesTestButton = esignatures_is_enabled() && esignatures_test_mode();
+$signedDocumentHref = '';
+if (!empty($contract['signed_document_path'])) {
+    $signedDocumentValue = trim((string)$contract['signed_document_path']);
+    $signedDocumentHref = preg_match('/^https?:\/\//i', $signedDocumentValue) ? $signedDocumentValue : (BASE_URL . '/' . ltrim($signedDocumentValue, '/'));
+}
+$auditDocumentHref = '';
+if (!empty($contract['audit_document_path'])) {
+    $auditDocumentValue = trim((string)$contract['audit_document_path']);
+    $auditDocumentHref = preg_match('/^https?:\/\//i', $auditDocumentValue) ? $auditDocumentValue : (BASE_URL . '/' . ltrim($auditDocumentValue, '/'));
+}
+$esignaturesStatusMessages = [];
+if ($esignaturesLatestSend) {
+    $esignaturesStatusMessages[] = 'Sent via eSignatures TEST';
+    $providerStatus = strtolower(trim((string)($esignaturesLatestSend['provider_status'] ?? $esignaturesLatestSend['status'] ?? '')));
+    if ($providerStatus === '' || in_array($providerStatus, ['sent', 'pending', 'pending_signature'], true) || str_contains($providerStatus, 'pending')) {
+        $esignaturesStatusMessages[] = 'Pending Signature';
+    }
+    if (!empty($esignaturesLatestSend['signed_at']) || str_contains($providerStatus, 'signed') || str_contains($providerStatus, 'completed') || str_contains($providerStatus, 'finalized')) {
+        $esignaturesStatusMessages[] = 'Signed by eSignatures';
+    }
+    if ($hasSignedCopy) {
+        $esignaturesStatusMessages[] = 'Signed document archived';
+    } elseif (!empty($esignaturesLatestSend['signed_document_url'])) {
+        $esignaturesStatusMessages[] = 'Signed document available from eSignatures; download manually if OPS cannot archive it automatically.';
+    }
+    if (in_array($currentStatus, ['ONBOARDING', 'SIGNED_PENDING_ONBOARDING', 'ACTIVE'], true)) {
+        $esignaturesStatusMessages[] = 'Onboarding ready';
+    }
+}
 $signatureStatusLabel = 'Not signed yet';
 if (!empty($contract['signed_date'])) {
     $signatureStatusLabel = 'Signed ' . (string)$contract['signed_date'];
@@ -187,6 +216,7 @@ page_header((string)$contract['contract_number'], 'contracts');
 <?php if ($errors): ?><div class="flash-error"><?php foreach ($errors as $e): ?><div><?= accounting_h((string)$e) ?></div><?php endforeach; ?></div><?php endif; ?>
 <?php if (!empty($syncroReadiness['missing'])): ?><div class="card" style="padding:14px;margin-bottom:16px;border:1px solid rgba(248,113,113,.28);background:rgba(127,29,29,.20);"><div style="font-weight:800;margin-bottom:8px;color:#fecaca;">Syncro readiness checklist</div><div style="opacity:.88;margin-bottom:6px;">This client still needs the following before Syncro sync will succeed:</div><div style="display:flex;gap:8px;flex-wrap:wrap;"><?php foreach ($syncroReadiness['missing'] as $label): ?><span style="display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.08);font-size:12px;"><?= accounting_h((string)$label) ?></span><?php endforeach; ?></div><div style="margin-top:10px;font-size:12px;opacity:.78;">Fill in the client core info plus at least one full location, then retry Syncro sync after the signed agreement starts onboarding.</div></div><?php endif; ?>
 <?php if (in_array($currentStatus, ['ONBOARDING','SIGNED_PENDING_ONBOARDING'], true)): ?><div class="card" style="padding:14px;margin-bottom:16px;border:1px solid rgba(14,165,233,.28);background:rgba(3,105,161,.18);"><div style="font-weight:800;margin-bottom:8px;color:#e0f2fe;">Onboarding is now the billing gate</div><div style="opacity:.88;line-height:1.5;">The signed agreement has been stored, Syncro can be pushed during onboarding, and billing will not begin until the onboarding checklist is complete and the contract is marked go-live.</div></div><?php endif; ?>
+<?php if ($esignaturesStatusMessages): ?><div class="card" style="padding:14px;margin-bottom:16px;border:1px solid rgba(139,92,246,.28);background:rgba(76,29,149,.18);"><div style="font-weight:800;margin-bottom:8px;color:#ede9fe;">eSignatures status</div><div style="display:flex;gap:8px;flex-wrap:wrap;"><?php foreach (array_values(array_unique($esignaturesStatusMessages)) as $esignaturesStatusMessage): ?><span style="display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.10);font-size:12px;"><?= accounting_h($esignaturesStatusMessage) ?></span><?php endforeach; ?></div><?php if (!empty($esignaturesLatestSend['last_webhook_at'])): ?><div style="font-size:12px;opacity:.68;margin-top:8px;">Last eSignatures webhook <?= accounting_h((string)$esignaturesLatestSend['last_webhook_at']) ?></div><?php endif; ?></div><?php endif; ?>
 
 <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:16px;">
   <div class="card" style="padding:16px;"><div style="font-size:13px;opacity:.78;">Monthly recurring total</div><div style="font-size:24px;font-weight:800;">$<?= number_format($monthlyRecurringTotal, 2) ?></div></div>
@@ -216,7 +246,7 @@ page_header((string)$contract['contract_number'], 'contracts');
       <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Auto renew</div><div><?= !empty($contract['auto_renew']) ? 'Yes' : 'No' ?></div></div>
     </div>
     <?php if (!empty($contract['notes'])): ?><div style="margin-top:14px;"><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Notes / scope</div><div><?= nl2br(accounting_h((string)$contract['notes'])) ?></div></div><?php endif; ?>
-    <?php if (!empty($contract['signed_document_path'])): ?><div style="margin-top:14px;display:flex;gap:12px;flex-wrap:wrap;"><a href="<?= accounting_h(BASE_URL) . '/' . accounting_h((string)$contract['signed_document_path']) ?>" target="_blank">Open signed copy</a><?php if (!empty($contract['audit_document_path'])): ?><a href="<?= accounting_h(BASE_URL) . '/' . accounting_h((string)$contract['audit_document_path']) ?>" target="_blank">Open audit trail</a><?php endif; ?></div><?php elseif (!empty($contract['audit_document_path'])): ?><div style="margin-top:14px;"><a href="<?= accounting_h(BASE_URL) . '/' . accounting_h((string)$contract['audit_document_path']) ?>" target="_blank">Open audit trail</a></div><?php endif; ?>
+    <?php if ($signedDocumentHref !== ''): ?><div style="margin-top:14px;display:flex;gap:12px;flex-wrap:wrap;"><a href="<?= accounting_h($signedDocumentHref) ?>" target="_blank" rel="noopener noreferrer">Open signed copy</a><?php if ($auditDocumentHref !== ''): ?><a href="<?= accounting_h($auditDocumentHref) ?>" target="_blank" rel="noopener noreferrer">Open audit trail</a><?php endif; ?></div><?php elseif ($auditDocumentHref !== ''): ?><div style="margin-top:14px;"><a href="<?= accounting_h($auditDocumentHref) ?>" target="_blank" rel="noopener noreferrer">Open audit trail</a></div><?php endif; ?>
   </div>
 
   <div class="card" style="padding:16px;overflow:auto;">

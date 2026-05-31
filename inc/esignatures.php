@@ -101,24 +101,56 @@ function esignatures_latest_send(int $contractId): ?array {
 }
 
 function esignatures_storage_ready(): bool {
-    if (db_table_exists('esignatures_contract_send')) return true;
-    db()->exec("CREATE TABLE IF NOT EXISTS esignatures_contract_send (
-        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-        contract_id BIGINT UNSIGNED NOT NULL,
-        esignatures_contract_id VARCHAR(191) NULL,
-        status VARCHAR(64) NULL,
-        test_mode TINYINT(1) NOT NULL DEFAULT 1,
-        request_payload_json LONGTEXT NULL,
-        response_json LONGTEXT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        PRIMARY KEY (id),
-        KEY idx_esignatures_contract_send_contract (contract_id),
-        KEY idx_esignatures_contract_send_remote (esignatures_contract_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-    return db_table_exists('esignatures_contract_send');
-}
+    if (!db_table_exists('esignatures_contract_send')) {
+        db()->exec("CREATE TABLE IF NOT EXISTS esignatures_contract_send (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            contract_id BIGINT UNSIGNED NOT NULL,
+            esignatures_contract_id VARCHAR(191) NULL,
+            provider_contract_id VARCHAR(191) NULL,
+            status VARCHAR(64) NULL,
+            provider_status VARCHAR(64) NULL,
+            test_mode TINYINT(1) NOT NULL DEFAULT 1,
+            request_payload_json LONGTEXT NULL,
+            response_json LONGTEXT NULL,
+            signed_document_path VARCHAR(500) NULL,
+            signed_document_url VARCHAR(1000) NULL,
+            audit_trail_json LONGTEXT NULL,
+            audit_trail_path VARCHAR(500) NULL,
+            sent_at DATETIME NULL,
+            viewed_at DATETIME NULL,
+            signed_at DATETIME NULL,
+            last_webhook_at DATETIME NULL,
+            completion_result_json LONGTEXT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            KEY idx_esignatures_contract_send_contract (contract_id),
+            KEY idx_esignatures_contract_send_remote (esignatures_contract_id),
+            KEY idx_esignatures_contract_send_provider (provider_contract_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+    }
+    if (!db_table_exists('esignatures_contract_send')) return false;
 
+    $columns = [
+        'provider_contract_id' => 'VARCHAR(191) NULL',
+        'provider_status' => 'VARCHAR(64) NULL',
+        'signed_document_path' => 'VARCHAR(500) NULL',
+        'signed_document_url' => 'VARCHAR(1000) NULL',
+        'audit_trail_json' => 'LONGTEXT NULL',
+        'audit_trail_path' => 'VARCHAR(500) NULL',
+        'sent_at' => 'DATETIME NULL',
+        'viewed_at' => 'DATETIME NULL',
+        'signed_at' => 'DATETIME NULL',
+        'last_webhook_at' => 'DATETIME NULL',
+        'completion_result_json' => 'LONGTEXT NULL',
+    ];
+    foreach ($columns as $column => $definition) {
+        if (!db_column_exists('esignatures_contract_send', $column)) {
+            db()->exec('ALTER TABLE esignatures_contract_send ADD COLUMN ' . $column . ' ' . $definition);
+        }
+    }
+    return true;
+}
 function esignatures_find_monthly_amount(int $contractId, array $contract): float {
     if ($contractId <= 0 || !db_table_exists('contract_service')) {
         return (float)($contract['base_amount'] ?? 0);
@@ -183,6 +215,10 @@ function esignatures_build_payload(array $contract, float $monthlyAmount): array
             'email' => $signerEmail,
         ]],
         'placeholder_fields' => esignatures_placeholder_fields_payload($placeholders),
+        'metadata' => [
+            'contract_id' => (int)($contract['contract_id'] ?? 0),
+            'client_id' => (int)($contract['client_id'] ?? 0),
+        ],
     ];
     if (esignatures_test_mode()) {
         $payload['test'] = 'yes';
@@ -252,19 +288,22 @@ function esignatures_http_post_json(string $url, array $payload): array {
 
 function esignatures_record_send(int $contractId, array $payload, array $response, array $decoded): void {
     if ($contractId <= 0 || !esignatures_storage_ready()) return;
+    $providerContractId = esignatures_extract_contract_id($decoded) ?: null;
+    $providerStatus = esignatures_extract_status($decoded) ?: null;
     $payloadJson = json_encode($payload, JSON_UNESCAPED_SLASHES);
     $responseJson = json_encode($decoded !== [] ? $decoded : ['raw_body' => (string)($response['raw_body'] ?? '')], JSON_UNESCAPED_SLASHES);
-    db()->prepare('INSERT INTO esignatures_contract_send (contract_id, esignatures_contract_id, status, test_mode, request_payload_json, response_json) VALUES (?, ?, ?, ?, ?, ?)')
+    db()->prepare('INSERT INTO esignatures_contract_send (contract_id, esignatures_contract_id, provider_contract_id, status, provider_status, test_mode, request_payload_json, response_json, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())')
         ->execute([
             $contractId,
-            esignatures_extract_contract_id($decoded) ?: null,
-            esignatures_extract_status($decoded) ?: null,
+            $providerContractId,
+            $providerContractId,
+            $providerStatus,
+            $providerStatus,
             esignatures_test_mode() ? 1 : 0,
             is_string($payloadJson) ? $payloadJson : null,
             is_string($responseJson) ? $responseJson : null,
         ]);
 }
-
 function esignatures_send_test_contract(int $contractId, ?callable $transport = null): array {
     if (!esignatures_is_enabled()) {
         return ['ok' => false, 'errors' => ['eSignatures is not enabled/configured for this OPS environment.']];
@@ -321,6 +360,186 @@ function esignatures_send_test_contract(int $contractId, ?callable $transport = 
     ];
 }
 
+function esignatures_deep_get(array $payload, array $path): mixed {
+    $value = $payload;
+    foreach ($path as $key) {
+        if (!is_array($value) || !array_key_exists($key, $value)) return null;
+        $value = $value[$key];
+    }
+    return $value;
+}
+
+function esignatures_first_scalar(array $payload, array $paths): string {
+    foreach ($paths as $path) {
+        $value = is_array($path) ? esignatures_deep_get($payload, $path) : ($payload[$path] ?? null);
+        if (is_scalar($value)) {
+            $text = trim((string)$value);
+            if ($text !== '') return $text;
+        }
+    }
+    return '';
+}
+
+function esignatures_extract_metadata(array $payload): array {
+    foreach ([['metadata'], ['data', 'metadata'], ['contract', 'metadata'], ['custom_fields'], ['data', 'custom_fields']] as $path) {
+        $value = esignatures_deep_get($payload, $path);
+        if (is_array($value)) return $value;
+    }
+    return [];
+}
+
+function esignatures_extract_event_status(array $payload): string {
+    $status = esignatures_first_scalar($payload, ['status', 'contract_status', ['data', 'status'], ['contract', 'status']]);
+    $event = esignatures_first_scalar($payload, ['event', 'event_type', ['data', 'event'], ['webhook', 'event']]);
+    return strtolower(trim($status !== '' ? $status : $event));
+}
+
+function esignatures_is_signed_status(string $status): bool {
+    $status = strtolower(trim($status));
+    foreach (['signed', 'completed', 'complete', 'finalized', 'executed'] as $needle) {
+        if ($status === $needle || str_contains($status, $needle)) return true;
+    }
+    return false;
+}
+
+function esignatures_extract_datetime(array $payload, array $paths): string {
+    $value = esignatures_first_scalar($payload, $paths);
+    if ($value === '') return '';
+    $ts = strtotime($value);
+    return $ts ? date('Y-m-d H:i:s', $ts) : $value;
+}
+
+function esignatures_extract_signed_document_reference(array $payload): string {
+    return esignatures_first_scalar($payload, [
+        'signed_document_path', 'signed_pdf_path', 'signed_document_url', 'signed_pdf_url', 'download_url', 'document_url',
+        ['data', 'signed_document_url'], ['data', 'signed_pdf_url'], ['data', 'download_url'], ['data', 'document_url'],
+        ['contract', 'signed_document_url'], ['contract', 'signed_pdf_url'], ['contract', 'download_url'], ['contract', 'document_url'],
+    ]);
+}
+
+function esignatures_extract_audit_reference(array $payload): string {
+    return esignatures_first_scalar($payload, [
+        'audit_trail_path', 'audit_trail_url', 'audit_url', 'certificate_url',
+        ['data', 'audit_trail_path'], ['data', 'audit_trail_url'], ['data', 'audit_url'], ['data', 'certificate_url'],
+        ['contract', 'audit_trail_path'], ['contract', 'audit_trail_url'], ['contract', 'audit_url'], ['contract', 'certificate_url'],
+    ]);
+}
+
+function esignatures_find_send_for_webhook(array $payload): ?array {
+    if (!esignatures_storage_ready()) return null;
+    $providerContractId = esignatures_extract_contract_id($payload);
+    if ($providerContractId !== '') {
+        $st = db()->prepare('SELECT * FROM esignatures_contract_send WHERE provider_contract_id = ? OR esignatures_contract_id = ? ORDER BY id DESC LIMIT 1');
+        $st->execute([$providerContractId, $providerContractId]);
+        $row = $st->fetch();
+        if ($row) return $row;
+    }
+
+    $metadata = esignatures_extract_metadata($payload);
+    $contractId = (int)($metadata['contract_id'] ?? $payload['contract_id'] ?? 0);
+    $clientId = (int)($metadata['client_id'] ?? $payload['client_id'] ?? 0);
+    if ($contractId > 0) {
+        $sql = 'SELECT * FROM esignatures_contract_send WHERE contract_id = ?';
+        $params = [$contractId];
+        if ($clientId > 0 && db_table_exists('contract')) {
+            $sql .= ' AND contract_id IN (SELECT contract_id FROM contract WHERE client_id = ?)';
+            $params[] = $clientId;
+        }
+        $sql .= ' ORDER BY id DESC LIMIT 1';
+        $st = db()->prepare($sql);
+        $st->execute($params);
+        $row = $st->fetch();
+        if ($row) return $row;
+    }
+    return null;
+}
+
+function esignatures_update_send_from_webhook(array $send, array $payload): array {
+    $providerContractId = esignatures_extract_contract_id($payload) ?: (string)($send['provider_contract_id'] ?? $send['esignatures_contract_id'] ?? '');
+    $providerStatus = esignatures_extract_status($payload);
+    $signedAt = esignatures_extract_datetime($payload, ['signed_at', 'completed_at', 'finalized_at', ['data', 'signed_at'], ['data', 'completed_at'], ['contract', 'signed_at']]);
+    $viewedAt = esignatures_extract_datetime($payload, ['viewed_at', ['data', 'viewed_at'], ['contract', 'viewed_at']]);
+    $signedReference = esignatures_extract_signed_document_reference($payload);
+    $auditReference = esignatures_extract_audit_reference($payload);
+    $auditJson = '';
+    foreach ([['audit_trail'], ['data', 'audit_trail'], ['contract', 'audit_trail']] as $path) {
+        $value = esignatures_deep_get($payload, $path);
+        if (is_array($value)) {
+            $encoded = json_encode($value, JSON_UNESCAPED_SLASHES);
+            if (is_string($encoded)) $auditJson = $encoded;
+            break;
+        }
+    }
+    $webhookJson = json_encode($payload, JSON_UNESCAPED_SLASHES);
+
+    db()->prepare('UPDATE esignatures_contract_send SET esignatures_contract_id = COALESCE(NULLIF(?, \'\'), esignatures_contract_id), provider_contract_id = COALESCE(NULLIF(?, \'\'), provider_contract_id), status = COALESCE(NULLIF(?, \'\'), status), provider_status = COALESCE(NULLIF(?, \'\'), provider_status), viewed_at = COALESCE(?, viewed_at), signed_at = COALESCE(?, signed_at), signed_document_url = COALESCE(?, signed_document_url), signed_document_path = COALESCE(?, signed_document_path), audit_trail_json = COALESCE(?, audit_trail_json), audit_trail_path = COALESCE(?, audit_trail_path), response_json = ?, last_webhook_at = NOW(), updated_at = NOW() WHERE id = ?')
+        ->execute([
+            $providerContractId,
+            $providerContractId,
+            $providerStatus,
+            $providerStatus,
+            $viewedAt !== '' ? $viewedAt : null,
+            $signedAt !== '' ? $signedAt : null,
+            preg_match('/^https?:\/\//i', $signedReference) ? $signedReference : null,
+            !preg_match('/^https?:\/\//i', $signedReference) ? ($signedReference !== '' ? $signedReference : null) : null,
+            $auditJson !== '' ? $auditJson : null,
+            $auditReference !== '' ? $auditReference : null,
+            is_string($webhookJson) ? $webhookJson : null,
+            (int)$send['id'],
+        ]);
+
+    return [
+        'provider_contract_id' => $providerContractId,
+        'provider_status' => $providerStatus,
+        'signed_at' => $signedAt,
+        'signed_document_reference' => $signedReference,
+        'audit_reference' => $auditReference,
+    ];
+}
+
+function esignatures_complete_ops_contract(array $send, array $webhookInfo): array {
+    $signedReference = trim((string)($webhookInfo['signed_document_reference'] ?? ''));
+    $auditReference = trim((string)($webhookInfo['audit_reference'] ?? ''));
+    if ($signedReference === '') {
+        return ['ok' => false, 'pending_download' => true, 'errors' => ['eSignatures marked the contract signed, but no signed document URL/path was provided. Download and upload the signed PDF manually.']];
+    }
+    if (!function_exists('accounting_contract_complete_signed_copy')) {
+        require_once __DIR__ . '/accounting.php';
+    }
+    $result = accounting_contract_complete_signed_copy((int)$send['contract_id'], $signedReference, [
+        'signed_at' => (string)($webhookInfo['signed_at'] ?? ''),
+        'signed_by' => 'eSignatures',
+        'signed_ip' => '',
+        'audit_document_reference' => $auditReference,
+        'user_id' => 0,
+    ]);
+    $encoded = json_encode($result, JSON_UNESCAPED_SLASHES);
+    if (is_string($encoded)) {
+        db()->prepare('UPDATE esignatures_contract_send SET completion_result_json = ?, updated_at = NOW() WHERE id = ?')->execute([$encoded, (int)$send['id']]);
+    }
+    return $result;
+}
+
+function esignatures_process_webhook_payload(array $payload): array {
+    $send = esignatures_find_send_for_webhook($payload);
+    if (!$send) {
+        esignatures_log('webhook_unmatched', ['provider_contract_id' => esignatures_extract_contract_id($payload), 'metadata' => esignatures_extract_metadata($payload)]);
+        return ['ok' => false, 'matched' => false, 'errors' => ['No matching OPS contract found for eSignatures webhook.']];
+    }
+
+    $info = esignatures_update_send_from_webhook($send, $payload);
+    $status = esignatures_extract_event_status($payload);
+    if (!esignatures_is_signed_status($status)) {
+        return ['ok' => true, 'matched' => true, 'completed' => false, 'message' => 'eSignatures webhook status stored.'];
+    }
+
+    $completion = esignatures_complete_ops_contract($send, $info);
+    if (empty($completion['ok'])) {
+        return ['ok' => false, 'matched' => true, 'completed' => false, 'pending_download' => !empty($completion['pending_download']), 'errors' => $completion['errors'] ?? ['Unable to complete signed eSignatures contract.']];
+    }
+    return ['ok' => true, 'matched' => true, 'completed' => true, 'message' => 'Signed eSignatures contract archived and onboarding started.'];
+}
+
 function esignatures_handle_webhook(): void {
     $raw = file_get_contents('php://input');
     $decoded = is_string($raw) && $raw !== '' ? json_decode($raw, true) : null;
@@ -328,7 +547,23 @@ function esignatures_handle_webhook(): void {
         'remote_addr' => (string)($_SERVER['REMOTE_ADDR'] ?? ''),
         'event' => is_array($decoded) ? ($decoded['event'] ?? $decoded['status'] ?? 'unknown') : 'invalid_json',
     ]);
-    http_response_code(202);
-    header('Content-Type: application/json');
-    echo json_encode(['ok' => true, 'message' => 'eSignatures webhook accepted for future processing.']);
+
+    if (!is_array($decoded)) {
+        http_response_code(400);
+        header('Content-Type: application/json');
+        echo json_encode(['ok' => false, 'error' => 'Invalid JSON webhook payload.']);
+        return;
+    }
+
+    try {
+        $result = esignatures_process_webhook_payload($decoded);
+        http_response_code(!empty($result['matched']) || !empty($result['ok']) ? 202 : 404);
+        header('Content-Type: application/json');
+        echo json_encode($result, JSON_UNESCAPED_SLASHES);
+    } catch (Throwable $e) {
+        esignatures_log('webhook_error', ['error' => $e->getMessage()]);
+        http_response_code(500);
+        header('Content-Type: application/json');
+        echo json_encode(['ok' => false, 'error' => 'Unable to process eSignatures webhook.']);
+    }
 }
