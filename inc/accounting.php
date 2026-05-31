@@ -5582,10 +5582,17 @@ function accounting_contract_default_onboarding_tasks(int $contractId): array {
     if ($hasServerBackup) $backupLabelParts[] = 'server backup coverage';
     if ($hasSaasBackup) $backupLabelParts[] = $platformLabel . ' backup coverage';
     $backupLabel = $backupLabelParts ? implode(', ', $backupLabelParts) : 'backup coverage';
+    $syncroOrgRequired = syncro_is_staging_mode() ? 0 : 1;
 
     $tasks = [
         ['code' => 'PRIMARY_CONTACT_READY', 'name' => 'Primary and billing contacts confirmed', 'detail' => 'Verify the day-to-day contact, billing contact, email addresses, phone numbers, and approval path before service begins.', 'required' => 1, 'sort' => 10],
-        ['code' => 'SYNCRO_ORG_READY', 'name' => 'Syncro organization created', 'detail' => 'Push the client into Syncro and confirm the company record is ready for device deployment, policies, and ticket routing.', 'required' => 1, 'sort' => 20],
+        [
+            'code' => 'SYNCRO_ORG_READY',
+            'name' => $syncroOrgRequired ? 'Syncro organization created' : 'Syncro organization created - Optional in staging',
+            'detail' => $syncroOrgRequired ? 'Push the client into Syncro and confirm the company record is ready for device deployment, policies, and ticket routing.' : 'Live automation check. Syncro writes are intentionally blocked in staging/test so test clients are not sent to Syncro.',
+            'required' => $syncroOrgRequired,
+            'sort' => 20,
+        ],
         ['code' => 'SYNCRO_BASELINE_READY', 'name' => 'Syncro policies and monitoring baseline applied', 'detail' => 'Confirm the core Syncro policy stack, patching lane, alerting, tray workflow, and asset standards are applied for the chosen package.', 'required' => 1, 'sort' => 30],
         ['code' => 'DEVICE_AGENTS_DEPLOYED', 'name' => 'Covered devices checking in', 'detail' => 'Install the Syncro agent on the covered endpoints and verify the contracted workstation or server counts are reporting cleanly.', 'required' => 1, 'sort' => 40],
         ['code' => 'PORTAL_ACCESS_READY', 'name' => 'Client portal and billing access tested', 'detail' => 'Send the client admin invite, confirm the branded portal access lane works, and verify the billing contact can receive invoice mail.', 'required' => 1, 'sort' => 45],
@@ -5745,13 +5752,19 @@ function accounting_contract_set_onboarding_task(int $taskId, bool $complete, in
     $task = $st->fetch();
     if (!$task) return ['ok' => false, 'errors' => ['Onboarding task not found.']];
 
-    if ($complete && strtoupper((string)($task['task_code'] ?? '')) === 'SYNCRO_ORG_READY') {
-        $syncroResult = syncro_contract_activation_sync((int)$task['contract_id']);
-        if (empty($syncroResult['ok']) || !empty($syncroResult['skipped'])) {
-            return ['ok' => false, 'errors' => $syncroResult['errors'] ?? ['Syncro sync is still pending for this contract.']];
-        }
-        if (db_column_exists('contract', 'syncro_pushed_at')) {
-            db()->prepare('UPDATE contract SET syncro_pushed_at = COALESCE(syncro_pushed_at, NOW()), updated_at = CURRENT_TIMESTAMP WHERE contract_id = ?')->execute([(int)$task['contract_id']]);
+    $isSyncroOrgTask = strtoupper((string)($task['task_code'] ?? '')) === 'SYNCRO_ORG_READY';
+    $syncroStagingSkipped = false;
+    if ($complete && $isSyncroOrgTask) {
+        if (syncro_is_staging_mode()) {
+            $syncroStagingSkipped = true;
+        } else {
+            $syncroResult = syncro_contract_activation_sync((int)$task['contract_id']);
+            if (empty($syncroResult['ok']) || !empty($syncroResult['skipped'])) {
+                return ['ok' => false, 'errors' => $syncroResult['errors'] ?? ['Syncro sync is still pending for this contract.']];
+            }
+            if (db_column_exists('contract', 'syncro_pushed_at')) {
+                db()->prepare('UPDATE contract SET syncro_pushed_at = COALESCE(syncro_pushed_at, NOW()), updated_at = CURRENT_TIMESTAMP WHERE contract_id = ?')->execute([(int)$task['contract_id']]);
+            }
         }
     }
 
@@ -5759,8 +5772,8 @@ function accounting_contract_set_onboarding_task(int $taskId, bool $complete, in
         db()->prepare('UPDATE contract_onboarding_task SET is_completed = 1, completed_at = NOW(), completed_by = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?')->execute([$userId ?: null, $taskId]);
         accounting_contract_autocomplete_onboarding_tasks((int)$task['contract_id']);
         $message = (string)$task['task_name'] . ' marked complete.';
-        if (strtoupper((string)($task['task_code'] ?? '')) === 'SYNCRO_ORG_READY') {
-            $message .= ' Syncro organization synced successfully.';
+        if ($isSyncroOrgTask) {
+            $message .= $syncroStagingSkipped ? ' Syncro push skipped because staging/test writes are blocked.' : ' Syncro organization synced successfully.';
         }
     } else {
         db()->prepare('UPDATE contract_onboarding_task SET is_completed = 0, completed_at = NULL, completed_by = NULL, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?')->execute([$taskId]);
