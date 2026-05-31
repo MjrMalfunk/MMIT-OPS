@@ -4,6 +4,7 @@ require_once __DIR__ . '/../inc/bootstrap.php';
 require_once __DIR__ . '/../inc/layout.php';
 require_once __DIR__ . '/../inc/accounting.php';
 require_once __DIR__ . '/../inc/syncro.php';
+require_once __DIR__ . '/../inc/esignatures.php';
 require_login();
 accounting_require_ready();
 csrf_check();
@@ -31,6 +32,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $contractId > 0) {
             'go_live_at' => date('Y-m-d H:i:s'),
             'billing_start_date' => date('Y-m-d'),
         ]);
+    } elseif ($action === 'send_esignatures_test') {
+        $result = esignatures_send_test_contract($contractId);
     } elseif ($action === 'retry_syncro') {
         $result = syncro_retry_contract_sync($contractId);
         if (!empty($result['ok']) && empty($result['skipped'])) {
@@ -68,6 +71,8 @@ $hasSignedCopy = !empty($contract['signed_document_path']);
 $hasAuditCopy = !empty($contract['audit_document_path']);
 $canRetrySyncro = $hasSignedCopy || in_array($currentStatus, ['ONBOARDING', 'SIGNED_PENDING_ONBOARDING', 'ACTIVE'], true);
 $canCompleteOnboarding = in_array($currentStatus, ['ONBOARDING', 'SIGNED_PENDING_ONBOARDING'], true) && !empty($onboardingProgress['all_complete']);
+$esignaturesLatestSend = esignatures_latest_send($contractId);
+$showEsignaturesTestButton = esignatures_is_enabled() && esignatures_test_mode();
 $signatureStatusLabel = 'Not signed yet';
 if (!empty($contract['signed_date'])) {
     $signatureStatusLabel = 'Signed ' . (string)$contract['signed_date'];
@@ -302,6 +307,20 @@ page_header((string)$contract['contract_number'], 'contracts');
       <div style="padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);font-size:13px;line-height:1.55;margin-bottom:14px;">
         <strong>Simple lane:</strong> build the order form, send the packet for signature, upload the signed PDF to start onboarding and Syncro setup, then mark go-live to activate billing.
       </div>
+      <?php if ($esignaturesLatestSend): ?>
+      <div style="padding:10px 12px;border-radius:12px;border:1px solid rgba(34,197,94,.22);background:rgba(34,197,94,.08);font-size:12px;line-height:1.45;margin-bottom:14px;">
+        <strong>eSignatures:</strong> <?= accounting_h((string)($esignaturesLatestSend['status'] ?: 'sent')) ?><?php if (!empty($esignaturesLatestSend['esignatures_contract_id'])): ?> · ID <?= accounting_h((string)$esignaturesLatestSend['esignatures_contract_id']) ?><?php endif; ?><?php if (!empty($esignaturesLatestSend['test_mode'])): ?> · TEST<?php endif; ?>
+      </div>
+      <?php endif; ?>
+      <?php if ($showEsignaturesTestButton && !in_array($currentStatus, ['ACTIVE','EXPIRED','CANCELLED'], true)): ?>
+      <form method="post" style="display:grid;gap:10px;margin-bottom:14px;">
+        <?= csrf_field() ?>
+        <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
+        <input type="hidden" name="action" value="send_esignatures_test">
+        <div style="font-size:12px;opacity:.72;line-height:1.45;">Sends this packet through eSignatures in forced demo/test mode. The manual/BoldSign upload workflow remains available below.</div>
+        <button type="submit" class="btn btn-primary" style="width:auto;padding:10px 14px;">Send via eSignatures TEST</button>
+      </form>
+      <?php endif; ?>
       <?php if (!in_array($currentStatus, ['ACTIVE','EXPIRED','CANCELLED'], true)): ?>
       <form method="post" style="display:grid;gap:10px;margin-bottom:14px;">
         <?= csrf_field() ?>
