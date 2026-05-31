@@ -366,67 +366,80 @@ page_header((string)$contract['contract_number'], 'contracts');
 
   <div style="display:grid;gap:16px;">
     <div class="card" style="padding:16px;">
-      <h2 style="margin:0 0 12px;font-size:19px;">Contract actions</h2>
+      <h2 style="margin:0 0 12px;font-size:19px;">Workflow actions</h2>
       <div style="padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);font-size:13px;line-height:1.55;margin-bottom:14px;">
-        <strong>Simple lane:</strong> build the order form, send the packet for signature, upload the signed PDF to start onboarding and Syncro setup, then mark go-live to activate billing.
+        Automation owns the normal lane: Draft → Pending Signature → Onboarding → Active. Manual status and document recovery tools are collapsed below for old contracts or failed webhook recovery.
       </div>
       <?php if ($esignaturesLatestSend): ?>
       <div style="padding:10px 12px;border-radius:12px;border:1px solid rgba(34,197,94,.22);background:rgba(34,197,94,.08);font-size:12px;line-height:1.45;margin-bottom:14px;">
         <strong>eSignatures:</strong> <?= accounting_h((string)($esignaturesLatestSend['status'] ?: 'sent')) ?><?php if (!empty($esignaturesLatestSend['esignatures_contract_id'])): ?> · ID <?= accounting_h((string)$esignaturesLatestSend['esignatures_contract_id']) ?><?php endif; ?><?php if (!empty($esignaturesLatestSend['test_mode'])): ?> · TEST<?php endif; ?>
       </div>
       <?php endif; ?>
-      <?php if ($showEsignaturesTestButton && !in_array($currentStatus, ['ACTIVE','EXPIRED','CANCELLED'], true)): ?>
+      <?php if ($showEsignaturesTestButton && in_array($currentStatus, ['DRAFT','PENDING_SIGNATURE'], true)): ?>
       <form method="post" style="display:grid;gap:10px;margin-bottom:14px;">
         <?= csrf_field() ?>
         <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
         <input type="hidden" name="action" value="send_esignatures_test">
-        <div style="font-size:12px;opacity:.72;line-height:1.45;">Sends this packet through eSignatures in forced demo/test mode. The manual/BoldSign upload workflow remains available below.</div>
+        <div style="font-size:12px;opacity:.72;line-height:1.45;">Sends this packet through eSignatures in forced demo/test mode. Signed contracts move into onboarding through the automated webhook flow.</div>
         <button type="submit" class="btn btn-primary" style="width:auto;padding:10px 14px;">Send via eSignatures TEST</button>
       </form>
       <?php endif; ?>
-      <?php if (!in_array($currentStatus, ['ACTIVE','EXPIRED','CANCELLED'], true)): ?>
-      <form method="post" style="display:grid;gap:10px;margin-bottom:14px;">
-        <?= csrf_field() ?>
-        <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
-        <input type="hidden" name="action" value="mark_pending_signature">
-        <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Mark sent to signer</button>
-      </form>
-      <?php endif; ?>
-      <form method="post" style="display:grid;gap:10px;margin-bottom:14px;">
-        <?= csrf_field() ?>
-        <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
-        <input type="hidden" name="action" value="set_status">
-        <label>Status</label>
-        <select name="contract_status" style="width:100%;padding:10px;"><?php foreach (accounting_contract_status_options() as $value => $label): ?><?php $disableActive = $value === 'ACTIVE' && (!$hasSignedCopy || empty($onboardingProgress['all_complete'])) && $currentStatus !== 'ACTIVE'; ?><option value="<?= accounting_h($value) ?>" <?= $currentStatus === $value ? 'selected' : '' ?> <?= $disableActive ? 'disabled' : '' ?>><?= accounting_h($label) ?></option><?php endforeach; ?></select>
-        <div style="font-size:12px;opacity:.72;line-height:1.45;">Upload the signed PDF to move into onboarding. Active is the go-live state and starts billing only after the required onboarding tasks are complete.</div>
-        <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Update status</button>
-      </form>
-      <form method="post" enctype="multipart/form-data" style="display:grid;gap:10px;">
-        <?= csrf_field() ?>
-        <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
-        <input type="hidden" name="action" value="upload_signed">
-        <label>Upload signed PDF</label>
-        <input type="file" name="signed_pdf" accept="application/pdf">
-        <div style="font-size:12px;opacity:.72;line-height:1.45;">Use this after BoldSign or any other signer sends the completed PDF back. Uploading here stores the signed copy, starts onboarding, and pushes the client toward Syncro.</div>
-        <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Upload signed PDF and start onboarding</button>
-      </form>
-      <form method="post" enctype="multipart/form-data" style="display:grid;gap:10px;margin-top:14px;">
-        <?= csrf_field() ?>
-        <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
-        <input type="hidden" name="action" value="upload_audit">
-        <label>Upload audit trail PDF</label>
-        <input type="file" name="audit_pdf" accept="application/pdf">
-        <div style="font-size:12px;opacity:.72;line-height:1.45;">BoldSign's certificate / audit trail is stored separately from the signed agreement so you keep both artifacts.</div>
-        <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Upload audit trail PDF</button>
-      </form>
       <?php if ($canCompleteOnboarding): ?>
-      <form method="post" style="display:grid;gap:10px;margin-top:14px;">
+      <form method="post" style="display:grid;gap:10px;margin-bottom:14px;">
         <?= csrf_field() ?>
         <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
         <input type="hidden" name="action" value="complete_onboarding">
+        <div style="font-size:12px;opacity:.72;line-height:1.45;">All required onboarding checklist items are complete. Go-live activates billing and creates a draft invoice for manual review.</div>
         <button type="submit" class="btn btn-primary" style="width:auto;padding:10px 14px;">Mark onboarding complete and go live</button>
       </form>
+      <?php elseif (in_array($currentStatus, ['ONBOARDING','SIGNED_PENDING_ONBOARDING'], true)): ?>
+      <div style="padding:10px 12px;border-radius:12px;border:1px solid rgba(14,165,233,.22);background:rgba(14,165,233,.08);font-size:12px;line-height:1.45;margin-bottom:14px;">
+        Finish the required onboarding checklist below to unlock the go-live action.
+      </div>
+      <?php elseif ($currentStatus === 'ACTIVE'): ?>
+      <div style="padding:10px 12px;border-radius:12px;border:1px solid rgba(34,197,94,.22);background:rgba(34,197,94,.08);font-size:12px;line-height:1.45;margin-bottom:14px;">
+        This contract is active. Invoices remain in draft for review until manually issued.
+      </div>
       <?php endif; ?>
+      <details style="margin-top:8px;border-top:1px solid rgba(255,255,255,.08);padding-top:12px;">
+        <summary style="cursor:pointer;font-weight:800;color:#dbeafe;">Manual recovery tools</summary>
+        <div style="font-size:12px;opacity:.72;line-height:1.45;margin:8px 0 14px;">Use only for legacy contracts or failed webhook/document recovery. These controls are intentionally hidden from the normal automated workflow.</div>
+        <?php if (!in_array($currentStatus, ['ACTIVE','EXPIRED','CANCELLED'], true)): ?>
+        <form method="post" style="display:grid;gap:10px;margin-bottom:14px;">
+          <?= csrf_field() ?>
+          <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
+          <input type="hidden" name="action" value="mark_pending_signature">
+          <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Mark sent to signer</button>
+        </form>
+        <?php endif; ?>
+        <form method="post" style="display:grid;gap:10px;margin-bottom:14px;">
+          <?= csrf_field() ?>
+          <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
+          <input type="hidden" name="action" value="set_status">
+          <label>Status</label>
+          <select name="contract_status" style="width:100%;padding:10px;"><?php foreach (accounting_contract_status_options() as $value => $label): ?><?php $disableActive = $value === 'ACTIVE' && (!$hasSignedCopy || empty($onboardingProgress['all_complete'])) && $currentStatus !== 'ACTIVE'; ?><option value="<?= accounting_h($value) ?>" <?= $currentStatus === $value ? 'selected' : '' ?> <?= $disableActive ? 'disabled' : '' ?>><?= accounting_h($label) ?></option><?php endforeach; ?></select>
+          <div style="font-size:12px;opacity:.72;line-height:1.45;">Fallback status override. Active remains gated by a signed agreement and completed required onboarding tasks.</div>
+          <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Update status</button>
+        </form>
+        <form method="post" enctype="multipart/form-data" style="display:grid;gap:10px;">
+          <?= csrf_field() ?>
+          <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
+          <input type="hidden" name="action" value="upload_signed">
+          <label>Upload signed PDF</label>
+          <input type="file" name="signed_pdf" accept="application/pdf">
+          <div style="font-size:12px;opacity:.72;line-height:1.45;">Fallback only: stores the signed copy, starts onboarding, and pushes the client toward Syncro if automation did not attach the signed document.</div>
+          <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Upload signed PDF and start onboarding</button>
+        </form>
+        <form method="post" enctype="multipart/form-data" style="display:grid;gap:10px;margin-top:14px;">
+          <?= csrf_field() ?>
+          <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
+          <input type="hidden" name="action" value="upload_audit">
+          <label>Upload audit trail PDF</label>
+          <input type="file" name="audit_pdf" accept="application/pdf">
+          <div style="font-size:12px;opacity:.72;line-height:1.45;">Fallback only: stores the certificate / audit trail separately from the signed agreement.</div>
+          <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Upload audit trail PDF</button>
+        </form>
+      </details>
     </div>
 
     <div id="onboarding-checklist" class="card" style="padding:16px;scroll-margin-top:24px;">

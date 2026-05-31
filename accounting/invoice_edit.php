@@ -38,7 +38,7 @@ $form = [
     'status' => (string)($invoice['status'] ?? 'DRAFT'),
     'ar_account_id' => (string)($invoice['ar_account_id'] ?? (accounting_find_account_id_by_code('1100') ?? 0)),
     'memo' => (string)($invoice['memo'] ?? ''),
-    'line_item_id' => array_fill(0, count($lines), '0'),
+    'line_item_id' => array_map(fn($line) => (string)($line['item_id'] ?? '0'), $lines),
     'line_description' => array_map(fn($line) => (string)($line['description'] ?? ''), $lines),
     'line_quantity' => array_map(fn($line) => (string)($line['quantity'] ?? '1'), $lines),
     'line_unit_price' => array_map(fn($line) => (string)($line['unit_price'] ?? '0.00'), $lines),
