@@ -52,11 +52,12 @@ smoke_assert(accounting_invoice_payment_link('INV-1000') === BASE_URL . '/paymen
 smoke_assert(accounting_invoice_payment_link('INV-1000', 'CARD') === BASE_URL . '/payments/pay.php?invoice=INV-1000&method=CARD', 'explicit card payment link preserves intentional card override');
 smoke_assert(accounting_invoice_payment_link('INV-1000', 'ACH') === BASE_URL . '/payments/pay.php?invoice=INV-1000&method=ACH', 'explicit ACH payment link preserves intentional ACH override');
 smoke_assert(accounting_invoice_payment_link('INV-1000', '') === BASE_URL . '/payments/pay.php?invoice=INV-1000', 'blank payment link method omits method parameter');
-smoke_assert(payment_gateway_resolve_requested_method(['balance_due' => 95, 'source_system' => 'PORTAL'], '') === 'CARD', 'small invoice blank method follows configured card default');
+smoke_assert(payment_gateway_resolve_requested_method(['balance_due' => 95, 'source_system' => 'PORTAL'], '') === 'ACH', 'small invoice blank method resolves to ACH-first');
 smoke_assert(payment_gateway_resolve_requested_method(['balance_due' => 1000, 'source_system' => 'PORTAL'], '') === 'ACH', 'large invoice blank method resolves to ACH-first');
-smoke_assert(payment_gateway_resolve_requested_method(['balance_due' => 1000, 'source_system' => 'PORTAL'], 'invalid') === 'ACH', 'invalid payment method falls back to invoice default');
+smoke_assert(payment_gateway_resolve_requested_method(['balance_due' => 95, 'source_system' => 'PORTAL'], 'invalid') === 'ACH', 'invalid payment method falls back to ACH invoice default');
 smoke_assert(payment_gateway_resolve_requested_method(['balance_due' => 1000, 'source_system' => 'PORTAL'], 'card') === 'CARD', 'explicit lower-case card request still resolves to card override');
 smoke_assert(payment_gateway_invoice_prefers_ach(['balance_due' => 2500, 'source_system' => 'PORTAL']) === true, 'large staging invoice prefers ACH');
+smoke_assert(payment_gateway_invoice_prefers_ach(['balance_due' => 95, 'source_system' => 'PORTAL']) === true, 'small staging invoice prefers ACH');
 smoke_assert(payment_gateway_invoice_prefers_ach(['balance_due' => 100, 'source_system' => 'RECURRING_BATCH']) === true, 'recurring managed service invoice prefers ACH');
 smoke_assert(payment_gateway_stripe_pending_status_from_session(['status' => 'complete', 'payment_status' => 'paid']) === 'POSTED', 'card success state posts immediately');
 smoke_assert(payment_gateway_stripe_pending_status_from_session(['status' => 'complete', 'payment_status' => 'unpaid', 'payment_intent' => ['status' => 'processing']]) === 'PENDING', 'ACH processing state remains pending');

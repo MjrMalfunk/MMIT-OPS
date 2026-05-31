@@ -137,12 +137,7 @@ function payment_gateway_invoice_prefers_ach(array $invoice): bool {
         return false;
     }
     $balanceDue = round((float)($invoice['balance_due'] ?? 0), 2);
-    $threshold = (float)payment_gateway_setting('STRIPE_ACH_PREFERRED_MIN_INVOICE_AMOUNT', 1000);
-    $sourceSystem = strtoupper(trim((string)($invoice['source_system'] ?? '')));
-    if ($sourceSystem === 'RECURRING_BATCH') {
-        return true;
-    }
-    return $balanceDue >= $threshold;
+    return $balanceDue > 0;
 }
 
 function payment_gateway_default_method_for_invoice(?array $invoice = null): string {

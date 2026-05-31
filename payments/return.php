@@ -72,7 +72,7 @@ page_header('Payment status', '', false);
 
   <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:18px;">
     <?php if ($invoice): ?>
-      <a href="<?= accounting_h(BASE_URL) ?>/payments/pay.php?invoice=<?= rawurlencode((string)$invoice['invoice_number']) ?>&method=<?= isset($_GET['method']) ? rawurlencode((string)$_GET['method']) : 'CARD' ?>" class="btn btn-secondary" style="text-decoration:none;">Back to payment page</a>
+      <a href="<?= accounting_h(BASE_URL) ?>/payments/pay.php?invoice=<?= rawurlencode((string)$invoice['invoice_number']) ?><?= isset($_GET['method']) ? '&method=' . rawurlencode((string)$_GET['method']) : '' ?>" class="btn btn-secondary" style="text-decoration:none;">Back to payment page</a>
     <?php endif; ?>
     <?php if ($paymentId): ?>
       <a href="<?= accounting_h(BASE_URL) ?>/payments/view.php?id=<?= (int)$paymentId ?>" class="btn btn-secondary" style="text-decoration:none;">Open payment record</a>

@@ -47,8 +47,8 @@ page_header('Pay invoice', '', false);
           <div style="opacity:.78;">Secure online payment for Midwest Managed IT invoices.</div>
         </div>
         <div style="text-align:right;min-width:220px;">
-          <div style="font-size:13px;opacity:.72;">Method</div>
-          <div style="font-size:20px;font-weight:700;"><?= accounting_h($method) ?></div>
+          <div style="font-size:13px;opacity:.72;">Preferred method</div>
+          <div style="font-size:20px;font-weight:700;"><?= $method === 'ACH' ? 'Bank / ACH' : accounting_h($method) ?></div>
         </div>
       </div>
       <?php if ($invoice): ?>
@@ -74,6 +74,11 @@ page_header('Pay invoice', '', false);
   <div style="display:grid;gap:16px;min-width:0;">
     <div class="card">
       <h2 style="margin:0 0 12px;font-size:18px;">Pay now</h2>
+      <?php if ($method === 'ACH'): ?>
+        <div style="opacity:.82;line-height:1.55;margin-bottom:12px;">Bank/ACH payment is preferred for this invoice. Secure Stripe Checkout will present bank payment first, and card remains available as a fallback in checkout.</div>
+      <?php elseif ($method === 'CARD'): ?>
+        <div style="opacity:.82;line-height:1.55;margin-bottom:12px;">This link was opened with a card-only payment request. Remove the method override from the URL to use the preferred bank/ACH flow.</div>
+      <?php endif; ?>
       <?php if (!$invoice): ?>
         <div style="opacity:.78;">A valid invoice is required before checkout can start.</div>
       <?php elseif ((float)$invoice['balance_due'] <= 0): ?>
@@ -116,6 +121,7 @@ page_header('Pay invoice', '', false);
     <div class="card">
       <h2 style="margin:0 0 12px;font-size:18px;">What happens next</h2>
       <div style="display:grid;gap:10px;opacity:.82;line-height:1.55;">
+        <div>Bank/ACH is the preferred payment option and appears first when available; card payments remain available inside secure Stripe Checkout unless this link was explicitly set to card-only.</div>
         <div>Card payments through Stripe return immediately and can be posted back to the invoice automatically.</div>
         <div>ACH/bank payments may show as pending while Stripe waits for bank settlement; invoices are marked paid only after Stripe confirms success.</div>
         <div>Keep this invoice number handy: <strong><?= $invoice ? accounting_h((string)$invoice['invoice_number']) : '—' ?></strong></div>
