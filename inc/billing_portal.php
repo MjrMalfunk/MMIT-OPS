@@ -174,12 +174,8 @@ function billing_portal_invoice_for_email(string $email, int $invoiceId): ?array
 
 function billing_portal_invoice_pay_url(array $invoice): string
 {
-    $hosted = trim((string) ($invoice['stripe_hosted_invoice_url'] ?? ''));
-    if ($hosted !== '') {
-        return $hosted;
-    }
     if (accounting_invoice_can_receive_payment($invoice)) {
-        return accounting_invoice_payment_link((string) ($invoice['invoice_number'] ?? ''));
+        return accounting_invoice_customer_payment_url($invoice);
     }
     return '';
 }

@@ -172,6 +172,14 @@ function accounting_invoice_payment_link(string $invoiceNumber, ?string $method 
     return $url;
 }
 
+function accounting_invoice_customer_payment_url(array $invoice): string {
+    $invoiceNumber = trim((string)($invoice['invoice_number'] ?? ''));
+    if ($invoiceNumber === '') {
+        return '';
+    }
+    return accounting_invoice_payment_link($invoiceNumber);
+}
+
 function accounting_invoice_payment_link_html(array $invoice, string $method): string {
     $invoiceNumber = (string)($invoice['invoice_number'] ?? '');
     if ($invoiceNumber === '') {
@@ -3430,7 +3438,7 @@ function accounting_invoice_email_logo_url(): string {
     return '';
 }
 
-function accounting_render_invoice_email_html(array $invoice, string $messageBody, string $stripeUrl, bool $sandboxMode = false, string $originalTo = ''): string {
+function accounting_render_invoice_email_html(array $invoice, string $messageBody, string $paymentUrl, bool $sandboxMode = false, string $originalTo = ''): string {
     $clientName = trim((string)($invoice['dba_name'] ?: $invoice['legal_name'] ?: 'there'));
     $invoiceNumber = trim((string)($invoice['invoice_number'] ?? 'Invoice'));
     $amountDue = '$' . number_format((float)($invoice['balance_due'] ?? 0), 2);
@@ -3440,7 +3448,7 @@ function accounting_render_invoice_email_html(array $invoice, string $messageBod
     $logoUrl = accounting_invoice_email_logo_url();
     $safeLogoUrl = accounting_h($logoUrl);
     $bodyHtml = accounting_plain_to_html(trim($messageBody));
-    $safeStripeUrl = accounting_h($stripeUrl);
+    $safePaymentUrl = accounting_h($paymentUrl);
     $safeOriginalTo = accounting_h($originalTo);
     $safeSandboxTo = accounting_h(accounting_mail_sandbox_to());
 
@@ -3474,12 +3482,12 @@ function accounting_render_invoice_email_html(array $invoice, string $messageBod
     }
 
     $buttonBlock = '';
-    if ($stripeUrl !== '' && in_array($status, ['ISSUED', 'PARTIALLY_PAID'], true) && (float)($invoice['balance_due'] ?? 0) > 0.0) {
+    if ($paymentUrl !== '' && in_array($status, ['ISSUED', 'PARTIALLY_PAID'], true) && (float)($invoice['balance_due'] ?? 0) > 0.0) {
         $buttonBlock = '<tr><td style="padding:0 0 20px 0;">'
             . '<table role="presentation" cellspacing="0" cellpadding="0" border="0"><tr><td style="border-radius:12px;background:#1d4ed8;">'
-            . '<a href="' . $safeStripeUrl . '" style="display:inline-block;padding:14px 22px;font-family:Arial,sans-serif;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:12px;">View &amp; Pay Invoice</a>'
+            . '<a href="' . $safePaymentUrl . '" style="display:inline-block;padding:14px 22px;font-family:Arial,sans-serif;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:12px;">View &amp; Pay Invoice</a>'
             . '</td></tr></table>'
-            . '<div style="margin-top:12px;color:#6b7280;font-size:12px;line-height:1.5;">Prefer the full link? <a href="' . $safeStripeUrl . '" style="color:#1d4ed8;text-decoration:none;word-break:break-all;">' . $safeStripeUrl . '</a></div>'
+            . '<div style="margin-top:12px;color:#6b7280;font-size:12px;line-height:1.5;">Prefer the full link? <a href="' . $safePaymentUrl . '" style="color:#1d4ed8;text-decoration:none;word-break:break-all;">' . $safePaymentUrl . '</a></div>'
             . '</td></tr>';
     }
 
@@ -3516,14 +3524,14 @@ function accounting_render_invoice_email_html(array $invoice, string $messageBod
         . '<tr><td style="padding:0 0 20px 0;">'
         . '<div style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:16px;padding:16px 18px;color:#334155;font-size:13px;line-height:1.65;">'
         . '<strong style="display:block;font-size:13px;color:#10233f;margin-bottom:6px;">Included with this email</strong>'
-        . 'A PDF copy of the invoice is attached for your records. Customers paying through Stripe can also download the invoice and receipt from the secure payment page after payment.'
+        . 'A PDF copy of the invoice is attached for your records. Customers can review payment options from the secure OPS payment page before continuing to checkout.'
         . '</div>'
         . '</td></tr>'
         . '<tr><td style="font-size:12px;line-height:1.65;color:#64748b;padding-top:4px;">Questions? Reply to this email or contact <a href="mailto:billing@midwestmanagedit.com" style="color:#1d4ed8;text-decoration:none;">billing@midwestmanagedit.com</a>.</td></tr>'
         . '</table>'
         . '</td></tr>'
         . '</table>'
-        . '<div style="padding:14px 12px 0 12px;text-align:center;font-size:11px;line-height:1.6;color:#64748b;">Midwest Managed IT · Secure invoice delivery powered by your portal and Stripe-hosted payment pages.</div>'
+        . '<div style="padding:14px 12px 0 12px;text-align:center;font-size:11px;line-height:1.6;color:#64748b;">Midwest Managed IT · Secure invoice delivery powered by the OPS payment portal.</div>'
         . '</td></tr></table>'
         . '</td></tr></table>'
         . '</body></html>';
@@ -3640,8 +3648,8 @@ function accounting_render_invoice_pdf_bytes(array $invoice, array $lines, array
         $paymentText = (string)$paymentSnapshot['detail_text'];
     } elseif (!empty($paymentSnapshot['has_payments'])) {
         $paymentText = (string)$paymentSnapshot['detail_text'];
-    } elseif (accounting_invoice_has_stripe_payment_page($invoice)) {
-        $paymentText = 'Pay securely online through Stripe: ' . htmlspecialchars(accounting_invoice_stripe_payment_url($invoice));
+    } elseif (accounting_invoice_customer_payment_url($invoice) !== '') {
+        $paymentText = 'Pay securely online through the Midwest Managed IT payment portal: ' . htmlspecialchars(accounting_invoice_customer_payment_url($invoice));
     }
 
     $watermarkHtml = '';
@@ -3876,23 +3884,14 @@ function accounting_send_invoice_email(int $invoiceId, array $data, int $userId)
         return ['ok' => false, 'errors' => array_merge($errors, $stripeWarnings)];
     }
 
-    $stripeUrl = accounting_invoice_stripe_payment_url($invoice);
+    $paymentLink = accounting_invoice_customer_payment_url($invoice);
     $plainBody = trim($body);
-    if ($stripeUrl !== '' && stripos($plainBody, $stripeUrl) === false) {
+    if ($paymentLink !== '' && (float)($invoice['balance_due'] ?? 0) > 0.00001 && stripos($plainBody, $paymentLink) === false) {
         $plainBody = rtrim($plainBody) . "
-
-Secure payment link:
-" . $stripeUrl . "
-";
-    } elseif ($stripeUrl === '' && (float)($invoice['balance_due'] ?? 0) > 0.00001) {
-        $paymentLink = accounting_invoice_payment_link((string)$invoice['invoice_number']);
-        if (stripos($plainBody, $paymentLink) === false) {
-            $plainBody = rtrim($plainBody) . "
 
 Secure payment link:
 " . $paymentLink . "
 ";
-        }
     }
 
     $lines = accounting_invoice_lines($invoiceId);
@@ -3906,7 +3905,7 @@ Secure payment link:
     }
 
     $plainBody = str_replace(["\r\n", "\r"], "\n", $plainBody);
-    $htmlBody = accounting_render_invoice_email_html($invoice, $htmlEmailBody, $stripeUrl, accounting_mail_sandbox_enabled(), $originalTo);
+    $htmlBody = accounting_render_invoice_email_html($invoice, $htmlEmailBody, $paymentLink, accounting_mail_sandbox_enabled(), $originalTo);
 
     $sendResult = ops_mail_send([
         'sender_channel' => 'billing',
