@@ -16,6 +16,8 @@ require_once __DIR__ . '/../inc/esignatures.php';
 $contract = [
     'first_name' => 'Demo',
     'last_name' => 'Signer',
+    'contract_id' => 9,
+    'client_id' => 7,
     'contact_email' => 'demo.signer@example.test',
     'client_email' => '',
     'dba_name' => 'Demo Company',
@@ -31,6 +33,10 @@ $liveDisabled = esignatures_is_enabled() === false;
 $_SERVER['HTTP_HOST'] = 'ops-test.midwestmanagedit.com';
 $payload = esignatures_build_payload($contract, 199.99);
 $stagingPayloadHasTestYes = ($payload['test'] ?? null) === 'yes';
+$metadata = $payload['metadata'] ?? null;
+$metadataIsString = is_string($metadata);
+$metadataContainsIds = is_string($metadata) && str_contains($metadata, 'contract_id=9') && str_contains($metadata, 'client_id=7');
+$metadataLengthUnderLimit = is_string($metadata) && strlen($metadata) < 200;
 $placeholderFields = $payload['placeholder_fields'] ?? null;
 $placeholderFieldsIsList = is_array($placeholderFields) && array_keys($placeholderFields) === range(0, count($placeholderFields) - 1);
 $placeholderFieldsByKey = [];
@@ -58,6 +64,9 @@ $tokenNotLogged = is_string($encoded) && !str_contains($encoded, ESIGNATURES_API
 
 $checks = [
     'staging payload includes test yes' => $stagingPayloadHasTestYes,
+    'metadata is a compact string' => $metadataIsString,
+    'metadata contains contract_id and client_id' => $metadataContainsIds,
+    'metadata length is under eSignatures limit' => $metadataLengthUnderLimit,
     'placeholder_fields is a list' => $placeholderFieldsIsList,
     'placeholder_fields entries use placeholder_key and replace_with_text' => $placeholderFieldsHaveExpectedEntries,
     'API token is not logged' => $tokenNotLogged,

@@ -187,6 +187,10 @@ function esignatures_placeholder_fields_payload(array $placeholders): array {
     return $fields;
 }
 
+function esignatures_metadata_payload(array $contract): string {
+    return 'contract_id=' . (int)($contract['contract_id'] ?? 0) . ';client_id=' . (int)($contract['client_id'] ?? 0);
+}
+
 function esignatures_validate_contract_for_send(array $contract, array $placeholders): array {
     $errors = [];
     $signerName = trim((string)$placeholders['client_name']);
@@ -215,10 +219,7 @@ function esignatures_build_payload(array $contract, float $monthlyAmount): array
             'email' => $signerEmail,
         ]],
         'placeholder_fields' => esignatures_placeholder_fields_payload($placeholders),
-        'metadata' => [
-            'contract_id' => (int)($contract['contract_id'] ?? 0),
-            'client_id' => (int)($contract['client_id'] ?? 0),
-        ],
+        'metadata' => esignatures_metadata_payload($contract),
     ];
     if (esignatures_test_mode()) {
         $payload['test'] = 'yes';
@@ -380,10 +381,35 @@ function esignatures_first_scalar(array $payload, array $paths): string {
     return '';
 }
 
+function esignatures_parse_metadata_string(string $metadata): array {
+    $metadata = trim($metadata);
+    if ($metadata === '') return [];
+
+    $decodedJson = json_decode($metadata, true);
+    if (is_array($decodedJson)) {
+        return $decodedJson;
+    }
+
+    $parsed = [];
+    foreach (explode(';', $metadata) as $part) {
+        $part = trim($part);
+        if ($part === '' || !str_contains($part, '=')) continue;
+        [$key, $value] = explode('=', $part, 2);
+        $key = trim($key);
+        if ($key === '') continue;
+        $parsed[$key] = trim($value);
+    }
+    return $parsed;
+}
+
 function esignatures_extract_metadata(array $payload): array {
     foreach ([['metadata'], ['data', 'metadata'], ['contract', 'metadata'], ['custom_fields'], ['data', 'custom_fields']] as $path) {
         $value = esignatures_deep_get($payload, $path);
         if (is_array($value)) return $value;
+        if (is_scalar($value)) {
+            $metadata = esignatures_parse_metadata_string((string)$value);
+            if ($metadata !== []) return $metadata;
+        }
     }
     return [];
 }
