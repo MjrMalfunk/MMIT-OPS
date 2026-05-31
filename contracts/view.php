@@ -12,10 +12,32 @@ csrf_check();
 $contractId = (int)($_GET['id'] ?? $_POST['contract_id'] ?? 0);
 $message = null;
 $errors = [];
+$flash = $_SESSION['contract_view_flash'] ?? null;
+if (is_array($flash) && (int)($flash['contract_id'] ?? 0) === $contractId) {
+    $message = isset($flash['message']) ? (string)$flash['message'] : null;
+    $errors = array_map('strval', (array)($flash['errors'] ?? []));
+    unset($_SESSION['contract_view_flash']);
+}
+
+function contract_view_redirect_after_post(int $contractId, string $anchor, array $result): void {
+    $anchor = preg_replace('/[^A-Za-z0-9_-]/', '', $anchor) ?: 'onboarding-checklist';
+    $_SESSION['contract_view_flash'] = [
+        'contract_id' => $contractId,
+        'message' => !empty($result['ok']) ? (string)($result['message'] ?? 'Contract updated.') : null,
+        'errors' => !empty($result['ok']) ? [] : array_values(array_map('strval', (array)($result['errors'] ?? ['Unable to update contract.']))),
+    ];
+    header('Location: ' . BASE_URL . '/contracts/view.php?id=' . $contractId . '#' . $anchor, true, 303);
+    exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $contractId > 0) {
     $action = (string)($_POST['action'] ?? '');
+    $redirectAnchor = null;
     if ($action === 'set_status') {
         $status = (string)($_POST['contract_status'] ?? 'DRAFT');
+        if (strtoupper(trim($status)) === 'ACTIVE') {
+            $redirectAnchor = 'onboarding-checklist';
+        }
         $result = accounting_contract_status_update($contractId, $status, (int)(current_user()['user_id'] ?? 0));
     } elseif ($action === 'mark_pending_signature') {
         $result = accounting_contract_status_update($contractId, 'PENDING_SIGNATURE', (int)(current_user()['user_id'] ?? 0));
@@ -25,9 +47,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $contractId > 0) {
         $result = accounting_contract_upload_audit_copy($contractId, $_FILES['audit_pdf'] ?? []);
     } elseif ($action === 'toggle_task') {
         $taskId = (int)($_POST['task_id'] ?? 0);
+        $redirectAnchor = $taskId > 0 ? ('checklist-item-' . $taskId) : 'onboarding-checklist';
         $complete = !empty($_POST['complete']);
         $result = accounting_contract_set_onboarding_task($taskId, $complete, (int)(current_user()['user_id'] ?? 0));
     } elseif ($action === 'complete_onboarding') {
+        $redirectAnchor = 'onboarding-checklist';
         $result = accounting_contract_status_update($contractId, 'ACTIVE', (int)(current_user()['user_id'] ?? 0), [
             'go_live_at' => date('Y-m-d H:i:s'),
             'billing_start_date' => date('Y-m-d'),
@@ -41,6 +65,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $contractId > 0) {
         }
     } else {
         $result = ['ok' => false, 'errors' => ['Unknown action.']];
+    }
+    if ($redirectAnchor !== null) {
+        contract_view_redirect_after_post($contractId, $redirectAnchor, $result);
     }
     if (!empty($result['ok'])) {
         $message = (string)($result['message'] ?? 'Contract updated.');
@@ -402,7 +429,7 @@ page_header((string)$contract['contract_number'], 'contracts');
       <?php endif; ?>
     </div>
 
-    <div class="card" style="padding:16px;">
+    <div id="onboarding-checklist" class="card" style="padding:16px;scroll-margin-top:24px;">
       <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:12px;margin-bottom:12px;">
         <div><h2 style="margin:0;font-size:19px;">Onboarding checklist</h2><div style="opacity:.75;">Billing begins only after the required checklist items are done and the contract is marked go-live.</div></div>
         <div style="text-align:right;"><div style="font-size:26px;font-weight:800;"><?= (int)($onboardingProgress['percent'] ?? 0) ?>%</div><div style="opacity:.68;font-size:12px;"><?= (int)($onboardingProgress['completed'] ?? 0) ?> / <?= (int)($onboardingProgress['required'] ?? 0) ?> required</div></div>
@@ -414,7 +441,7 @@ page_header((string)$contract['contract_number'], 'contracts');
       <?php else: ?>
         <div style="display:grid;gap:10px;">
         <?php foreach ($onboardingTasks as $task): ?>
-          <div style="padding:10px 12px;border-radius:12px;border:1px solid <?= !empty($task['is_completed']) ? 'rgba(34,197,94,.24)' : 'rgba(255,255,255,.08)' ?>;background:<?= !empty($task['is_completed']) ? 'rgba(34,197,94,.08)' : 'rgba(255,255,255,.03)' ?>;display:flex;justify-content:space-between;gap:12px;align-items:flex-start;">
+          <div id="checklist-item-<?= (int)$task['task_id'] ?>" style="padding:10px 12px;border-radius:12px;border:1px solid <?= !empty($task['is_completed']) ? 'rgba(34,197,94,.24)' : 'rgba(255,255,255,.08)' ?>;background:<?= !empty($task['is_completed']) ? 'rgba(34,197,94,.08)' : 'rgba(255,255,255,.03)' ?>;display:flex;justify-content:space-between;gap:12px;align-items:flex-start;scroll-margin-top:24px;">
             <div>
               <div style="font-weight:700;"><?= accounting_h((string)$task['task_name']) ?><?php if (!empty($task['is_required'])): ?><span style="opacity:.58;font-weight:500;"> · Required</span><?php endif; ?></div>
               <?php if (!empty($task['task_detail'])): ?><div style="font-size:12px;opacity:.72;margin-top:4px;line-height:1.45;"><?= accounting_h((string)$task['task_detail']) ?></div><?php endif; ?>
