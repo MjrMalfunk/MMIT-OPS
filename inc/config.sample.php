@@ -60,7 +60,9 @@ define('PAYMENT_DEFAULT_FEE_EXPENSE_ACCOUNT_CODE', '5070');
 
 define('STRIPE_SECRET_KEY', '');
 define('STRIPE_PUBLISHABLE_KEY', '');
-define('STRIPE_WEBHOOK_SECRET', '');
+define('STRIPE_WEBHOOK_SECRET', ''); // Fallback signing secret if mode-specific secrets are not set.
+define('STRIPE_TEST_WEBHOOK_SECRET', ''); // Use with sk_test_* / sandbox webhooks.
+define('STRIPE_LIVE_WEBHOOK_SECRET', ''); // Use with sk_live_* / production webhooks.
 // Stripe webhook endpoint: BASE_URL . '/payments/webhook_stripe.php'
 define('STRIPE_CHECKOUT_SUCCESS_URL', BASE_URL . '/payments/return.php?gateway=stripe&session_id={CHECKOUT_SESSION_ID}');
 define('STRIPE_CHECKOUT_CANCEL_URL', BASE_URL . '/payments/pay.php?cancelled=1');

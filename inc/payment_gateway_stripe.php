@@ -553,6 +553,48 @@ function payment_gateway_stripe_create_refund(array $payment, ?float $amount = n
     return $resp['json'];
 }
 
+function payment_gateway_stripe_metadata_invoice_id(array $object): int {
+    $metadata = is_array($object['metadata'] ?? null) ? $object['metadata'] : [];
+    foreach (['invoice_id', 'local_invoice_id'] as $key) {
+        $invoiceId = (int)($metadata[$key] ?? 0);
+        if ($invoiceId > 0) {
+            return $invoiceId;
+        }
+    }
+    $paymentIntent = $object['payment_intent'] ?? null;
+    if (is_array($paymentIntent)) {
+        $nested = is_array($paymentIntent['metadata'] ?? null) ? $paymentIntent['metadata'] : [];
+        foreach (['invoice_id', 'local_invoice_id'] as $key) {
+            $invoiceId = (int)($nested[$key] ?? 0);
+            if ($invoiceId > 0) {
+                return $invoiceId;
+            }
+        }
+    }
+    return 0;
+}
+
+function payment_gateway_stripe_payment_method_label(array $charge): string {
+    $details = is_array($charge['payment_method_details'] ?? null) ? $charge['payment_method_details'] : [];
+    $type = strtolower(trim((string)($details['type'] ?? '')));
+    if ($type === '') {
+        return '';
+    }
+    if ($type === 'card') {
+        $card = is_array($details['card'] ?? null) ? $details['card'] : [];
+        $brand = trim((string)($card['brand'] ?? 'card'));
+        $last4 = trim((string)($card['last4'] ?? ''));
+        return $last4 !== '' ? strtoupper($brand) . ' •••• ' . $last4 : $brand;
+    }
+    if ($type === 'us_bank_account') {
+        $bank = is_array($details['us_bank_account'] ?? null) ? $details['us_bank_account'] : [];
+        $bankName = trim((string)($bank['bank_name'] ?? 'bank account'));
+        $last4 = trim((string)($bank['last4'] ?? ''));
+        return $last4 !== '' ? $bankName . ' •••• ' . $last4 : $bankName;
+    }
+    return $type;
+}
+
 function payment_gateway_stripe_payment_method_from_charge(array $charge): string {
     $type = strtolower(trim((string)($charge['payment_method_details']['type'] ?? '')));
     if ($type === 'us_bank_account' || $type === 'ach_debit') {
@@ -600,6 +642,9 @@ function payment_gateway_stripe_record_charge_payment(array $invoice, array $cha
             'processor_payment_intent_id' => $paymentIntentId !== '' ? $paymentIntentId : null,
             'processor_charge_id' => $chargeId !== '' ? $chargeId : null,
             'processor_customer_id' => trim((string)($charge['customer'] ?? '')) ?: null,
+            'processor_receipt_url' => trim((string)($charge['receipt_url'] ?? '')) ?: null,
+            'processor_payment_method_label' => payment_gateway_stripe_payment_method_label($charge) ?: null,
+            'processor_environment' => payment_gateway_stripe_mode(),
             'settled_at' => date('Y-m-d H:i:s', (int)($charge['created'] ?? time())),
         ]);
     }
@@ -651,6 +696,7 @@ function payment_gateway_stripe_record_invoice_fallback_payment(array $invoice, 
             'processor_customer_id' => $processorCustomerId !== '' ? $processorCustomerId : null,
             'processor_payment_intent_id' => trim((string)($refs['payment_intent_id'] ?? '')) !== '' ? trim((string)$refs['payment_intent_id']) : null,
             'processor_charge_id' => trim((string)($refs['charge_id'] ?? '')) !== '' ? trim((string)$refs['charge_id']) : null,
+            'processor_environment' => payment_gateway_stripe_mode(),
             'settled_at' => date('Y-m-d H:i:s', strtotime($paymentDate . ' 12:00:00')),
         ]);
     }
@@ -658,6 +704,8 @@ function payment_gateway_stripe_record_invoice_fallback_payment(array $invoice, 
 }
 
 function payment_gateway_process_stripe_event(array $decoded): array {
+    payment_gateway_ensure_schema();
+
     $eventId = trim((string)($decoded['id'] ?? ''));
     $eventType = trim((string)($decoded['type'] ?? 'unknown'));
     $object = $decoded['data']['object'] ?? [];
@@ -673,9 +721,9 @@ function payment_gateway_process_stripe_event(array $decoded): array {
     try {
         if ($eventType === 'checkout.session.completed') {
             $session = is_array($object) ? $object : [];
-            $invoiceId = (int)($session['metadata']['invoice_id'] ?? 0);
+            $invoiceId = payment_gateway_stripe_metadata_invoice_id($session);
             if ($invoiceId <= 0) {
-                $mark('IGNORED', 'Stripe checkout session missing invoice metadata.');
+                $mark('FAILED', 'Unmatched Stripe checkout session: missing invoice metadata.');
                 return ['ok' => false, 'ignored' => true, 'errors' => ['Stripe checkout session missing invoice metadata.']];
             }
             $invoice = accounting_get_invoice($invoiceId);
@@ -696,9 +744,9 @@ function payment_gateway_process_stripe_event(array $decoded): array {
 
         if ($eventType === 'payment_intent.succeeded') {
             $intent = is_array($object) ? $object : [];
-            $invoiceId = (int)($intent['metadata']['invoice_id'] ?? 0);
+            $invoiceId = payment_gateway_stripe_metadata_invoice_id($intent);
             if ($invoiceId <= 0) {
-                $mark('IGNORED', 'PaymentIntent missing invoice metadata.');
+                $mark('FAILED', 'Unmatched Stripe PaymentIntent: missing invoice metadata.');
                 return ['ok' => false, 'ignored' => true, 'errors' => ['PaymentIntent missing invoice metadata.']];
             }
             $invoice = accounting_get_invoice($invoiceId);
@@ -728,11 +776,11 @@ function payment_gateway_process_stripe_event(array $decoded): array {
 
         if ($eventType === 'charge.succeeded') {
             $charge = is_array($object) ? $object : [];
-            $localInvoiceId = (int)($charge['metadata']['invoice_id'] ?? $charge['metadata']['local_invoice_id'] ?? 0);
+            $localInvoiceId = payment_gateway_stripe_metadata_invoice_id($charge);
             $stripeInvoiceId = trim((string)($charge['invoice'] ?? ''));
             $invoice = payment_gateway_stripe_find_local_invoice($localInvoiceId > 0 ? $localInvoiceId : null, $stripeInvoiceId);
             if (!$invoice) {
-                $mark('IGNORED', 'No local invoice matched the Stripe charge.');
+                $mark('FAILED', 'Unmatched Stripe charge: no local invoice matched.');
                 return ['ok' => false, 'ignored' => true, 'errors' => ['No local invoice matched the Stripe charge.']];
             }
             if (!is_array($charge['balance_transaction'] ?? null) && !empty($charge['id'])) {
@@ -757,7 +805,7 @@ function payment_gateway_process_stripe_event(array $decoded): array {
             $localInvoiceId = (int)($stripeInvoice['metadata']['local_invoice_id'] ?? $stripeInvoice['metadata']['invoice_id'] ?? 0);
             $invoice = payment_gateway_stripe_find_local_invoice($localInvoiceId > 0 ? $localInvoiceId : null, (string)($stripeInvoice['id'] ?? ''));
             if (!$invoice) {
-                $mark('IGNORED', 'No local invoice matched the Stripe invoice.paid event.');
+                $mark('FAILED', 'Unmatched Stripe invoice.paid event: no local invoice matched.');
                 return ['ok' => false, 'ignored' => true, 'errors' => ['No local invoice matched the Stripe invoice.paid event.']];
             }
             payment_gateway_stripe_store_invoice_sync((int)$invoice['invoice_id'], [
