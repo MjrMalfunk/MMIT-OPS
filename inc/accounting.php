@@ -163,13 +163,13 @@ function accounting_invoice_lookup_by_number(string $invoiceNumber): ?array {
     return accounting_get_invoice((int)$id);
 }
 
-function accounting_invoice_payment_link(string $invoiceNumber, string $method): string {
-    $method = strtoupper(trim($method));
-    $allowed = ['ACH', 'CARD'];
-    if (!in_array($method, $allowed, true)) {
-        $method = 'ACH';
+function accounting_invoice_payment_link(string $invoiceNumber, ?string $method = null): string {
+    $url = BASE_URL . '/payments/pay.php?invoice=' . rawurlencode($invoiceNumber);
+    $method = strtoupper(trim((string)$method));
+    if (in_array($method, ['ACH', 'CARD'], true)) {
+        $url .= '&method=' . rawurlencode($method);
     }
-    return BASE_URL . '/payments/pay.php?invoice=' . rawurlencode($invoiceNumber) . '&method=' . rawurlencode($method);
+    return $url;
 }
 
 function accounting_invoice_payment_link_html(array $invoice, string $method): string {
@@ -3885,14 +3885,12 @@ Secure payment link:
 " . $stripeUrl . "
 ";
     } elseif ($stripeUrl === '' && (float)($invoice['balance_due'] ?? 0) > 0.00001) {
-        $achLink = accounting_invoice_payment_link((string)$invoice['invoice_number'], 'ACH');
-        $cardLink = accounting_invoice_payment_link((string)$invoice['invoice_number'], 'CARD');
-        if (stripos($plainBody, $achLink) === false && stripos($plainBody, $cardLink) === false) {
+        $paymentLink = accounting_invoice_payment_link((string)$invoice['invoice_number']);
+        if (stripos($plainBody, $paymentLink) === false) {
             $plainBody = rtrim($plainBody) . "
 
-Payment options:
-Pay by ACH: " . $achLink . "
-Pay by Card: " . $cardLink . "
+Secure payment link:
+" . $paymentLink . "
 ";
         }
     }
