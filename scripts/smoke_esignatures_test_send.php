@@ -8,6 +8,7 @@ define('ESIGNATURES_API_TOKEN', 'smoke-token-must-not-log');
 define('ESIGNATURES_TEMPLATE_ID', '20086199-7b34-44a3-b0bd-08010540cda2');
 define('ESIGNATURES_TEST_MODE', false);
 define('ESIGNATURES_BASE_URL', 'https://esignatures.com/api');
+define('ESIGNATURES_WEBHOOK_URL', 'https://ops-test.midwestmanagedit.com/webhooks/esignatures.php');
 
 define('APP_ENV', 'production');
 
@@ -33,6 +34,9 @@ $liveDisabled = esignatures_is_enabled() === false;
 $_SERVER['HTTP_HOST'] = 'ops-test.midwestmanagedit.com';
 $payload = esignatures_build_payload($contract, 199.99);
 $stagingPayloadHasTestYes = ($payload['test'] ?? null) === 'yes';
+$customWebhookUrl = $payload['custom_webhook_url'] ?? null;
+$customWebhookUrlIsConfigured = $customWebhookUrl === 'https://ops-test.midwestmanagedit.com/webhooks/esignatures.php';
+$customWebhookUrlPointsToEndpoint = is_string($customWebhookUrl) && str_ends_with($customWebhookUrl, '/webhooks/esignatures.php');
 $metadata = $payload['metadata'] ?? null;
 $metadataIsString = is_string($metadata);
 $metadataContainsIds = is_string($metadata) && str_contains($metadata, 'contract_id=9') && str_contains($metadata, 'client_id=7');
@@ -64,6 +68,8 @@ $tokenNotLogged = is_string($encoded) && !str_contains($encoded, ESIGNATURES_API
 
 $checks = [
     'staging payload includes test yes' => $stagingPayloadHasTestYes,
+    'send payload includes configured custom_webhook_url' => $customWebhookUrlIsConfigured,
+    'custom_webhook_url points to /webhooks/esignatures.php' => $customWebhookUrlPointsToEndpoint,
     'metadata is a compact string' => $metadataIsString,
     'metadata contains contract_id and client_id' => $metadataContainsIds,
     'metadata length is under eSignatures limit' => $metadataLengthUnderLimit,

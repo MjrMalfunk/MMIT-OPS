@@ -74,6 +74,9 @@ define('ESIGNATURES_API_TOKEN', '');
 define('ESIGNATURES_TEMPLATE_ID', '20086199-7b34-44a3-b0bd-08010540cda2');
 define('ESIGNATURES_TEST_MODE', false);
 define('ESIGNATURES_BASE_URL', 'https://esignatures.com/api');
+// Staging/test should point eSignatures contract completion events at OPS TEST.
+// Leave blank in live unless the production eSignatures webhook has been registered and verified.
+define('ESIGNATURES_WEBHOOK_URL', '');
 
 // Syncro integration
 // OPS LIVE (APP_ENV=production / ops.midwestmanagedit.com) may push customer records to Syncro.
