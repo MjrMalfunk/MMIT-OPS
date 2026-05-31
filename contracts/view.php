@@ -127,7 +127,7 @@ if ($esignaturesLatestSend) {
     } elseif ($currentStatus === 'SIGNED_PENDING_DOCUMENTS' || (string)($esignaturesLatestSend['status'] ?? '') === 'signed_pending_documents') {
         $esignaturesStatusMessages[] = 'eSignatures confirmed this contract was signed, but OPS has not retrieved the signed PDF/audit trail yet.';
     } elseif (!empty($esignaturesLatestSend['signed_document_url'])) {
-        $esignaturesStatusMessages[] = 'Signed document available from eSignatures; download manually if OPS cannot archive it automatically.';
+        $esignaturesStatusMessages[] = 'Signed document available from eSignatures; archive recovery is available from the manual recovery tools if automation cannot attach it.';
     }
     if (in_array($currentStatus, ['ONBOARDING', 'SIGNED_PENDING_ONBOARDING', 'ACTIVE'], true)) {
         $esignaturesStatusMessages[] = 'Onboarding ready';
@@ -147,9 +147,6 @@ if (!empty($contract['signed_date'])) {
     $signatureStatusLabel = 'Signed copy uploaded';
 }
 
-$legalReferenceRelative = 'assets/contracts/legal-contract-reference.pdf';
-$legalReferenceAbsolute = dirname(__DIR__) . '/' . $legalReferenceRelative;
-$hasLegalReference = is_file($legalReferenceAbsolute) && is_readable($legalReferenceAbsolute);
 
 $monthlyRecurringTotal = 0.0;
 $baseServiceCode = '';
@@ -229,8 +226,6 @@ page_header((string)$contract['contract_number'], 'contracts');
     <div style="opacity:.68;font-size:13px;">Client: <a href="<?= accounting_h(BASE_URL) ?>/clients/view.php?client_id=<?= (int)$contract['client_id'] ?>"><?= accounting_h((string)($contract['dba_name'] ?: $contract['legal_name'])) ?></a></div>
   </div>
   <div style="display:flex;gap:10px;flex-wrap:wrap;">
-    <a class="btn btn-secondary" style="width:auto;padding:10px 14px;" href="<?= accounting_h(BASE_URL) ?>/contracts/pdf.php?id=<?= (int)$contract['contract_id'] ?>" target="_blank">Agreement packet PDF</a>
-    <?php if ($hasLegalReference): ?><a class="btn btn-secondary" style="width:auto;padding:10px 14px;" href="<?= accounting_h(BASE_URL) . '/' . accounting_h($legalReferenceRelative) ?>" target="_blank">Legal reference PDF</a><?php endif; ?>
     <?php if (!empty($contract['syncro_customer_id']) && defined('SYNCRO_SUBDOMAIN') && SYNCRO_SUBDOMAIN !== ''): ?><a class="btn btn-secondary" style="width:auto;padding:10px 14px;" href="https://<?= accounting_h(syncro_normalize_subdomain((string)SYNCRO_SUBDOMAIN)) ?>.syncromsp.com/customers/<?= (int)$contract['syncro_customer_id'] ?>" target="_blank">Open in Syncro</a><?php endif; ?>
     <?php if ($canRetrySyncro): ?>
     <form method="post" style="margin:0;">
@@ -239,7 +234,7 @@ page_header((string)$contract['contract_number'], 'contracts');
       <button class="btn btn-secondary" style="width:auto;padding:10px 14px;" type="submit">Retry Syncro sync</button>
     </form>
     <?php else: ?>
-      <span class="btn btn-secondary" style="width:auto;padding:10px 14px;opacity:.62;cursor:not-allowed;" title="Upload the signed agreement to start onboarding and unlock Syncro push.">Retry Syncro sync</span>
+      <span class="btn btn-secondary" style="width:auto;padding:10px 14px;opacity:.62;cursor:not-allowed;" title="eSignatures must archive the signed agreement before Syncro sync is available.">Retry Syncro sync</span>
     <?php endif; ?>
     <a class="btn btn-secondary" style="width:auto;padding:10px 14px;" href="<?= accounting_h(BASE_URL) ?>/contracts/index.php">Back to contracts</a>
   </div>
@@ -368,7 +363,7 @@ page_header((string)$contract['contract_number'], 'contracts');
     <div class="card" style="padding:16px;">
       <h2 style="margin:0 0 12px;font-size:19px;">Workflow actions</h2>
       <div style="padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);font-size:13px;line-height:1.55;margin-bottom:14px;">
-        Automation owns the normal lane: Draft → Pending Signature → Onboarding → Active. Manual status and document recovery tools are collapsed below for old contracts or failed webhook recovery.
+        eSignatures owns the normal lane: Draft → Pending Signature → Onboarding → Active. Manual status and document recovery tools are collapsed below for old contracts or failed webhook recovery.
       </div>
       <?php if ($esignaturesLatestSend): ?>
       <div style="padding:10px 12px;border-radius:12px;border:1px solid rgba(34,197,94,.22);background:rgba(34,197,94,.08);font-size:12px;line-height:1.45;margin-bottom:14px;">
@@ -402,7 +397,7 @@ page_header((string)$contract['contract_number'], 'contracts');
       </div>
       <?php endif; ?>
       <details style="margin-top:8px;border-top:1px solid rgba(255,255,255,.08);padding-top:12px;">
-        <summary style="cursor:pointer;font-weight:800;color:#dbeafe;">Manual recovery tools</summary>
+        <summary style="cursor:pointer;font-weight:800;color:#dbeafe;">Legacy/manual upload fallback</summary>
         <div style="font-size:12px;opacity:.72;line-height:1.45;margin:8px 0 14px;">Use only for legacy contracts or failed webhook/document recovery. These controls are intentionally hidden from the normal automated workflow.</div>
         <?php if (!in_array($currentStatus, ['ACTIVE','EXPIRED','CANCELLED'], true)): ?>
         <form method="post" style="display:grid;gap:10px;margin-bottom:14px;">
@@ -448,7 +443,7 @@ page_header((string)$contract['contract_number'], 'contracts');
         <div style="text-align:right;"><div style="font-size:26px;font-weight:800;"><?= (int)($onboardingProgress['percent'] ?? 0) ?>%</div><div style="opacity:.68;font-size:12px;"><?= (int)($onboardingProgress['completed'] ?? 0) ?> / <?= (int)($onboardingProgress['required'] ?? 0) ?> required</div></div>
       </div>
       <?php if (!$hasSignedCopy && !in_array($currentStatus, ['ONBOARDING','SIGNED_PENDING_ONBOARDING','ACTIVE'], true)): ?>
-        <div style="opacity:.72;line-height:1.55;">Upload the signed agreement to start onboarding. That will create the checklist, push the organization to Syncro, and hold billing until go-live.</div>
+        <div style="opacity:.72;line-height:1.55;">eSignatures completion starts onboarding automatically. Once the signed agreement is archived, OPS creates the checklist, can push the organization to Syncro, and holds billing until go-live.</div>
       <?php elseif (!$onboardingTasks): ?>
         <div style="opacity:.72;line-height:1.55;">Onboarding checklist will appear here once the contract enters onboarding.</div>
       <?php else: ?>
