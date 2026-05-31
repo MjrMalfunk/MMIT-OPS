@@ -115,6 +115,7 @@ Keep these constants aligned to environment in server-only config files (constan
 2. Populate staging-only credentials/keys and `BASE_URL=https://ops-test.midwestmanagedit.com`.
 3. Do **not** place secrets under either OPS docroot.
 4. Smoke test login, MFA/passkeys, Stripe, Syncro, OneDrive, Bold Sign, mail, QR, tracking, accounting, and contracts on staging before production release.
+   - Syncro staging safety: OPS LIVE (`ops.midwestmanagedit.com`) may push customer records to Syncro, but OPS TEST (`ops-test.midwestmanagedit.com`) must not push test customers/assets. The central Syncro layer blocks staging `POST`, `PUT`, `PATCH`, and `DELETE` calls with `STAGING_BLOCKED` before any Syncro API request is made.
 
 
 ### Manual migration to organized private OPS config folder

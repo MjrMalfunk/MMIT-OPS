@@ -213,6 +213,15 @@ accounting_subnav('invoices');
         <?php if (!empty($payment['processor_charge_id'])): ?>
           <div><div style="font-size:13px;opacity:.75;">Charge id</div><div style="word-break:break-all;"><?= accounting_h((string)$payment['processor_charge_id']) ?></div></div>
         <?php endif; ?>
+        <?php if (!empty($payment['processor_checkout_session_id'])): ?>
+          <div><div style="font-size:13px;opacity:.75;">Checkout session</div><div style="word-break:break-all;"><?= accounting_h((string)$payment['processor_checkout_session_id']) ?></div></div>
+        <?php endif; ?>
+        <?php if (!empty($payment['processor_payment_method_label'])): ?>
+          <div><div style="font-size:13px;opacity:.75;">Payment method detail</div><div><?= accounting_h((string)$payment['processor_payment_method_label']) ?></div></div>
+        <?php endif; ?>
+        <?php if (!empty($payment['processor_receipt_url'])): ?>
+          <div><a href="<?= accounting_h((string)$payment['processor_receipt_url']) ?>" target="_blank" rel="noopener" class="btn btn-secondary" style="justify-content:flex-start;text-decoration:none;">Open Stripe receipt</a></div>
+        <?php endif; ?>
         <?php if (!empty($payment['processor_name'])): ?>
           <div><a href="<?= accounting_h(BASE_URL) ?>/payments/gateway_health.php" class="btn btn-secondary" style="justify-content:flex-start;text-decoration:none;">Open gateway health</a></div>
         <?php endif; ?>

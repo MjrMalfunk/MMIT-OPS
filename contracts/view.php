@@ -4,6 +4,7 @@ require_once __DIR__ . '/../inc/bootstrap.php';
 require_once __DIR__ . '/../inc/layout.php';
 require_once __DIR__ . '/../inc/accounting.php';
 require_once __DIR__ . '/../inc/syncro.php';
+require_once __DIR__ . '/../inc/esignatures.php';
 require_login();
 accounting_require_ready();
 csrf_check();
@@ -11,10 +12,32 @@ csrf_check();
 $contractId = (int)($_GET['id'] ?? $_POST['contract_id'] ?? 0);
 $message = null;
 $errors = [];
+$flash = $_SESSION['contract_view_flash'] ?? null;
+if (is_array($flash) && (int)($flash['contract_id'] ?? 0) === $contractId) {
+    $message = isset($flash['message']) ? (string)$flash['message'] : null;
+    $errors = array_map('strval', (array)($flash['errors'] ?? []));
+    unset($_SESSION['contract_view_flash']);
+}
+
+function contract_view_redirect_after_post(int $contractId, string $anchor, array $result): void {
+    $anchor = preg_replace('/[^A-Za-z0-9_-]/', '', $anchor) ?: 'onboarding-checklist';
+    $_SESSION['contract_view_flash'] = [
+        'contract_id' => $contractId,
+        'message' => !empty($result['ok']) ? (string)($result['message'] ?? 'Contract updated.') : null,
+        'errors' => !empty($result['ok']) ? [] : array_values(array_map('strval', (array)($result['errors'] ?? ['Unable to update contract.']))),
+    ];
+    header('Location: ' . BASE_URL . '/contracts/view.php?id=' . $contractId . '#' . $anchor, true, 303);
+    exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $contractId > 0) {
     $action = (string)($_POST['action'] ?? '');
+    $redirectAnchor = null;
     if ($action === 'set_status') {
         $status = (string)($_POST['contract_status'] ?? 'DRAFT');
+        if (strtoupper(trim($status)) === 'ACTIVE') {
+            $redirectAnchor = 'onboarding-checklist';
+        }
         $result = accounting_contract_status_update($contractId, $status, (int)(current_user()['user_id'] ?? 0));
     } elseif ($action === 'mark_pending_signature') {
         $result = accounting_contract_status_update($contractId, 'PENDING_SIGNATURE', (int)(current_user()['user_id'] ?? 0));
@@ -24,13 +47,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $contractId > 0) {
         $result = accounting_contract_upload_audit_copy($contractId, $_FILES['audit_pdf'] ?? []);
     } elseif ($action === 'toggle_task') {
         $taskId = (int)($_POST['task_id'] ?? 0);
+        $redirectAnchor = $taskId > 0 ? ('checklist-item-' . $taskId) : 'onboarding-checklist';
         $complete = !empty($_POST['complete']);
         $result = accounting_contract_set_onboarding_task($taskId, $complete, (int)(current_user()['user_id'] ?? 0));
     } elseif ($action === 'complete_onboarding') {
+        $redirectAnchor = 'onboarding-checklist';
         $result = accounting_contract_status_update($contractId, 'ACTIVE', (int)(current_user()['user_id'] ?? 0), [
             'go_live_at' => date('Y-m-d H:i:s'),
             'billing_start_date' => date('Y-m-d'),
         ]);
+    } elseif ($action === 'send_esignatures_test') {
+        $result = esignatures_send_test_contract($contractId);
     } elseif ($action === 'retry_syncro') {
         $result = syncro_retry_contract_sync($contractId);
         if (!empty($result['ok']) && empty($result['skipped'])) {
@@ -38,6 +65,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $contractId > 0) {
         }
     } else {
         $result = ['ok' => false, 'errors' => ['Unknown action.']];
+    }
+    if ($redirectAnchor !== null) {
+        contract_view_redirect_after_post($contractId, $redirectAnchor, $result);
     }
     if (!empty($result['ok'])) {
         $message = (string)($result['message'] ?? 'Contract updated.');
@@ -68,21 +98,55 @@ $hasSignedCopy = !empty($contract['signed_document_path']);
 $hasAuditCopy = !empty($contract['audit_document_path']);
 $canRetrySyncro = $hasSignedCopy || in_array($currentStatus, ['ONBOARDING', 'SIGNED_PENDING_ONBOARDING', 'ACTIVE'], true);
 $canCompleteOnboarding = in_array($currentStatus, ['ONBOARDING', 'SIGNED_PENDING_ONBOARDING'], true) && !empty($onboardingProgress['all_complete']);
+$esignaturesLatestSend = esignatures_latest_send($contractId);
+$esignaturesWebhookUrl = esignatures_webhook_url();
+$esignaturesWebhookLabel = esignatures_is_staging_mode() ? 'staging/test webhook URL' : 'webhook URL';
+$showEsignaturesTestButton = esignatures_is_enabled() && esignatures_test_mode();
+$signedDocumentHref = '';
+if (!empty($contract['signed_document_path'])) {
+    $signedDocumentValue = trim((string)$contract['signed_document_path']);
+    $signedDocumentHref = preg_match('/^https?:\/\//i', $signedDocumentValue) ? $signedDocumentValue : (BASE_URL . '/' . ltrim($signedDocumentValue, '/'));
+}
+$auditDocumentHref = '';
+if (!empty($contract['audit_document_path'])) {
+    $auditDocumentValue = trim((string)$contract['audit_document_path']);
+    $auditDocumentHref = preg_match('/^https?:\/\//i', $auditDocumentValue) ? $auditDocumentValue : (BASE_URL . '/' . ltrim($auditDocumentValue, '/'));
+}
+$esignaturesStatusMessages = [];
+if ($esignaturesLatestSend) {
+    $esignaturesStatusMessages[] = 'Sent via eSignatures TEST';
+    $providerStatus = strtolower(trim((string)($esignaturesLatestSend['provider_status'] ?? $esignaturesLatestSend['status'] ?? '')));
+    if ($providerStatus === '' || in_array($providerStatus, ['sent', 'pending', 'pending_signature'], true) || str_contains($providerStatus, 'pending')) {
+        $esignaturesStatusMessages[] = 'Pending Signature';
+    }
+    if (!empty($esignaturesLatestSend['signed_at']) || str_contains($providerStatus, 'signed') || str_contains($providerStatus, 'completed') || str_contains($providerStatus, 'finalized')) {
+        $esignaturesStatusMessages[] = 'Signed by eSignatures';
+    }
+    if ($hasSignedCopy) {
+        $esignaturesStatusMessages[] = 'Signed document archived';
+    } elseif ($currentStatus === 'SIGNED_PENDING_DOCUMENTS' || (string)($esignaturesLatestSend['status'] ?? '') === 'signed_pending_documents') {
+        $esignaturesStatusMessages[] = 'eSignatures confirmed this contract was signed, but OPS has not retrieved the signed PDF/audit trail yet.';
+    } elseif (!empty($esignaturesLatestSend['signed_document_url'])) {
+        $esignaturesStatusMessages[] = 'Signed document available from eSignatures; archive recovery is available from the manual recovery tools if automation cannot attach it.';
+    }
+    if (in_array($currentStatus, ['ONBOARDING', 'SIGNED_PENDING_ONBOARDING', 'ACTIVE'], true)) {
+        $esignaturesStatusMessages[] = 'Onboarding ready';
+    }
+}
 $signatureStatusLabel = 'Not signed yet';
 if (!empty($contract['signed_date'])) {
     $signatureStatusLabel = 'Signed ' . (string)$contract['signed_date'];
     if ($currentStatus === 'ONBOARDING') {
         $signatureStatusLabel .= ' · onboarding in progress';
     }
+} elseif ($currentStatus === 'SIGNED_PENDING_DOCUMENTS') {
+    $signatureStatusLabel = 'Signed · pending signed PDF/audit retrieval';
 } elseif ($currentStatus === 'PENDING_SIGNATURE') {
     $signatureStatusLabel = 'Sent for signature';
 } elseif ($hasSignedCopy) {
     $signatureStatusLabel = 'Signed copy uploaded';
 }
 
-$legalReferenceRelative = 'assets/contracts/legal-contract-reference.pdf';
-$legalReferenceAbsolute = dirname(__DIR__) . '/' . $legalReferenceRelative;
-$hasLegalReference = is_file($legalReferenceAbsolute) && is_readable($legalReferenceAbsolute);
 
 $monthlyRecurringTotal = 0.0;
 $baseServiceCode = '';
@@ -162,8 +226,6 @@ page_header((string)$contract['contract_number'], 'contracts');
     <div style="opacity:.68;font-size:13px;">Client: <a href="<?= accounting_h(BASE_URL) ?>/clients/view.php?client_id=<?= (int)$contract['client_id'] ?>"><?= accounting_h((string)($contract['dba_name'] ?: $contract['legal_name'])) ?></a></div>
   </div>
   <div style="display:flex;gap:10px;flex-wrap:wrap;">
-    <a class="btn btn-secondary" style="width:auto;padding:10px 14px;" href="<?= accounting_h(BASE_URL) ?>/contracts/pdf.php?id=<?= (int)$contract['contract_id'] ?>" target="_blank">Agreement packet PDF</a>
-    <?php if ($hasLegalReference): ?><a class="btn btn-secondary" style="width:auto;padding:10px 14px;" href="<?= accounting_h(BASE_URL) . '/' . accounting_h($legalReferenceRelative) ?>" target="_blank">Legal reference PDF</a><?php endif; ?>
     <?php if (!empty($contract['syncro_customer_id']) && defined('SYNCRO_SUBDOMAIN') && SYNCRO_SUBDOMAIN !== ''): ?><a class="btn btn-secondary" style="width:auto;padding:10px 14px;" href="https://<?= accounting_h(syncro_normalize_subdomain((string)SYNCRO_SUBDOMAIN)) ?>.syncromsp.com/customers/<?= (int)$contract['syncro_customer_id'] ?>" target="_blank">Open in Syncro</a><?php endif; ?>
     <?php if ($canRetrySyncro): ?>
     <form method="post" style="margin:0;">
@@ -172,7 +234,7 @@ page_header((string)$contract['contract_number'], 'contracts');
       <button class="btn btn-secondary" style="width:auto;padding:10px 14px;" type="submit">Retry Syncro sync</button>
     </form>
     <?php else: ?>
-      <span class="btn btn-secondary" style="width:auto;padding:10px 14px;opacity:.62;cursor:not-allowed;" title="Upload the signed agreement to start onboarding and unlock Syncro push.">Retry Syncro sync</span>
+      <span class="btn btn-secondary" style="width:auto;padding:10px 14px;opacity:.62;cursor:not-allowed;" title="eSignatures must archive the signed agreement before Syncro sync is available.">Retry Syncro sync</span>
     <?php endif; ?>
     <a class="btn btn-secondary" style="width:auto;padding:10px 14px;" href="<?= accounting_h(BASE_URL) ?>/contracts/index.php">Back to contracts</a>
   </div>
@@ -182,6 +244,7 @@ page_header((string)$contract['contract_number'], 'contracts');
 <?php if ($errors): ?><div class="flash-error"><?php foreach ($errors as $e): ?><div><?= accounting_h((string)$e) ?></div><?php endforeach; ?></div><?php endif; ?>
 <?php if (!empty($syncroReadiness['missing'])): ?><div class="card" style="padding:14px;margin-bottom:16px;border:1px solid rgba(248,113,113,.28);background:rgba(127,29,29,.20);"><div style="font-weight:800;margin-bottom:8px;color:#fecaca;">Syncro readiness checklist</div><div style="opacity:.88;margin-bottom:6px;">This client still needs the following before Syncro sync will succeed:</div><div style="display:flex;gap:8px;flex-wrap:wrap;"><?php foreach ($syncroReadiness['missing'] as $label): ?><span style="display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.08);font-size:12px;"><?= accounting_h((string)$label) ?></span><?php endforeach; ?></div><div style="margin-top:10px;font-size:12px;opacity:.78;">Fill in the client core info plus at least one full location, then retry Syncro sync after the signed agreement starts onboarding.</div></div><?php endif; ?>
 <?php if (in_array($currentStatus, ['ONBOARDING','SIGNED_PENDING_ONBOARDING'], true)): ?><div class="card" style="padding:14px;margin-bottom:16px;border:1px solid rgba(14,165,233,.28);background:rgba(3,105,161,.18);"><div style="font-weight:800;margin-bottom:8px;color:#e0f2fe;">Onboarding is now the billing gate</div><div style="opacity:.88;line-height:1.5;">The signed agreement has been stored, Syncro can be pushed during onboarding, and billing will not begin until the onboarding checklist is complete and the contract is marked go-live.</div></div><?php endif; ?>
+<?php if ($esignaturesStatusMessages || $esignaturesWebhookUrl !== ''): ?><div class="card" style="padding:14px;margin-bottom:16px;border:1px solid rgba(139,92,246,.28);background:rgba(76,29,149,.18);"><div style="font-weight:800;margin-bottom:8px;color:#ede9fe;">eSignatures status</div><?php if ($esignaturesStatusMessages): ?><div style="display:flex;gap:8px;flex-wrap:wrap;"><?php foreach (array_values(array_unique($esignaturesStatusMessages)) as $esignaturesStatusMessage): ?><span style="display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.10);font-size:12px;"><?= accounting_h($esignaturesStatusMessage) ?></span><?php endforeach; ?></div><?php endif; ?><?php if ($esignaturesWebhookUrl !== ''): ?><div style="font-size:12px;opacity:.78;margin-top:8px;word-break:break-all;">Configured eSignatures <?= accounting_h($esignaturesWebhookLabel) ?>: <?= accounting_h($esignaturesWebhookUrl) ?></div><?php endif; ?><?php if (!empty($esignaturesLatestSend['last_webhook_at'])): ?><div style="font-size:12px;opacity:.68;margin-top:8px;">Last eSignatures webhook <?= accounting_h((string)$esignaturesLatestSend['last_webhook_at']) ?></div><?php endif; ?></div><?php endif; ?>
 
 <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:16px;">
   <div class="card" style="padding:16px;"><div style="font-size:13px;opacity:.78;">Monthly recurring total</div><div style="font-size:24px;font-weight:800;">$<?= number_format($monthlyRecurringTotal, 2) ?></div></div>
@@ -211,7 +274,7 @@ page_header((string)$contract['contract_number'], 'contracts');
       <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Auto renew</div><div><?= !empty($contract['auto_renew']) ? 'Yes' : 'No' ?></div></div>
     </div>
     <?php if (!empty($contract['notes'])): ?><div style="margin-top:14px;"><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Notes / scope</div><div><?= nl2br(accounting_h((string)$contract['notes'])) ?></div></div><?php endif; ?>
-    <?php if (!empty($contract['signed_document_path'])): ?><div style="margin-top:14px;display:flex;gap:12px;flex-wrap:wrap;"><a href="<?= accounting_h(BASE_URL) . '/' . accounting_h((string)$contract['signed_document_path']) ?>" target="_blank">Open signed copy</a><?php if (!empty($contract['audit_document_path'])): ?><a href="<?= accounting_h(BASE_URL) . '/' . accounting_h((string)$contract['audit_document_path']) ?>" target="_blank">Open audit trail</a><?php endif; ?></div><?php elseif (!empty($contract['audit_document_path'])): ?><div style="margin-top:14px;"><a href="<?= accounting_h(BASE_URL) . '/' . accounting_h((string)$contract['audit_document_path']) ?>" target="_blank">Open audit trail</a></div><?php endif; ?>
+    <?php if ($signedDocumentHref !== ''): ?><div style="margin-top:14px;display:flex;gap:12px;flex-wrap:wrap;"><a href="<?= accounting_h($signedDocumentHref) ?>" target="_blank" rel="noopener noreferrer">Open signed copy</a><?php if ($auditDocumentHref !== ''): ?><a href="<?= accounting_h($auditDocumentHref) ?>" target="_blank" rel="noopener noreferrer">Open audit trail</a><?php endif; ?></div><?php elseif ($auditDocumentHref !== ''): ?><div style="margin-top:14px;"><a href="<?= accounting_h($auditDocumentHref) ?>" target="_blank" rel="noopener noreferrer">Open audit trail</a></div><?php endif; ?>
   </div>
 
   <div class="card" style="padding:16px;overflow:auto;">
@@ -298,68 +361,95 @@ page_header((string)$contract['contract_number'], 'contracts');
 
   <div style="display:grid;gap:16px;">
     <div class="card" style="padding:16px;">
-      <h2 style="margin:0 0 12px;font-size:19px;">Contract actions</h2>
+      <h2 style="margin:0 0 12px;font-size:19px;">Workflow actions</h2>
       <div style="padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);font-size:13px;line-height:1.55;margin-bottom:14px;">
-        <strong>Simple lane:</strong> build the order form, send the packet for signature, upload the signed PDF to start onboarding and Syncro setup, then mark go-live to activate billing.
+        eSignatures owns the normal lane: Draft → Pending Signature → Onboarding → Active. Manual status and document recovery tools are collapsed below for old contracts or failed webhook recovery.
       </div>
-      <?php if (!in_array($currentStatus, ['ACTIVE','EXPIRED','CANCELLED'], true)): ?>
+      <?php if ($esignaturesLatestSend): ?>
+      <div style="padding:10px 12px;border-radius:12px;border:1px solid rgba(34,197,94,.22);background:rgba(34,197,94,.08);font-size:12px;line-height:1.45;margin-bottom:14px;">
+        <strong>eSignatures:</strong> <?= accounting_h((string)($esignaturesLatestSend['status'] ?: 'sent')) ?><?php if (!empty($esignaturesLatestSend['esignatures_contract_id'])): ?> · ID <?= accounting_h((string)$esignaturesLatestSend['esignatures_contract_id']) ?><?php endif; ?><?php if (!empty($esignaturesLatestSend['test_mode'])): ?> · TEST<?php endif; ?>
+      </div>
+      <?php endif; ?>
+      <?php if ($showEsignaturesTestButton && in_array($currentStatus, ['DRAFT','PENDING_SIGNATURE'], true)): ?>
       <form method="post" style="display:grid;gap:10px;margin-bottom:14px;">
         <?= csrf_field() ?>
         <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
-        <input type="hidden" name="action" value="mark_pending_signature">
-        <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Mark sent to signer</button>
+        <input type="hidden" name="action" value="send_esignatures_test">
+        <div style="font-size:12px;opacity:.72;line-height:1.45;">Sends this packet through eSignatures in forced demo/test mode. Signed contracts move into onboarding through the automated webhook flow.</div>
+        <button type="submit" class="btn btn-primary" style="width:auto;padding:10px 14px;">Send via eSignatures TEST</button>
       </form>
       <?php endif; ?>
-      <form method="post" style="display:grid;gap:10px;margin-bottom:14px;">
-        <?= csrf_field() ?>
-        <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
-        <input type="hidden" name="action" value="set_status">
-        <label>Status</label>
-        <select name="contract_status" style="width:100%;padding:10px;"><?php foreach (accounting_contract_status_options() as $value => $label): ?><?php $disableActive = $value === 'ACTIVE' && (!$hasSignedCopy || empty($onboardingProgress['all_complete'])) && $currentStatus !== 'ACTIVE'; ?><option value="<?= accounting_h($value) ?>" <?= $currentStatus === $value ? 'selected' : '' ?> <?= $disableActive ? 'disabled' : '' ?>><?= accounting_h($label) ?></option><?php endforeach; ?></select>
-        <div style="font-size:12px;opacity:.72;line-height:1.45;">Upload the signed PDF to move into onboarding. Active is the go-live state and starts billing only after the required onboarding tasks are complete.</div>
-        <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Update status</button>
-      </form>
-      <form method="post" enctype="multipart/form-data" style="display:grid;gap:10px;">
-        <?= csrf_field() ?>
-        <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
-        <input type="hidden" name="action" value="upload_signed">
-        <label>Upload signed PDF</label>
-        <input type="file" name="signed_pdf" accept="application/pdf">
-        <div style="font-size:12px;opacity:.72;line-height:1.45;">Use this after BoldSign or any other signer sends the completed PDF back. Uploading here stores the signed copy, starts onboarding, and pushes the client toward Syncro.</div>
-        <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Upload signed PDF and start onboarding</button>
-      </form>
-      <form method="post" enctype="multipart/form-data" style="display:grid;gap:10px;margin-top:14px;">
-        <?= csrf_field() ?>
-        <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
-        <input type="hidden" name="action" value="upload_audit">
-        <label>Upload audit trail PDF</label>
-        <input type="file" name="audit_pdf" accept="application/pdf">
-        <div style="font-size:12px;opacity:.72;line-height:1.45;">BoldSign's certificate / audit trail is stored separately from the signed agreement so you keep both artifacts.</div>
-        <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Upload audit trail PDF</button>
-      </form>
       <?php if ($canCompleteOnboarding): ?>
-      <form method="post" style="display:grid;gap:10px;margin-top:14px;">
+      <form method="post" style="display:grid;gap:10px;margin-bottom:14px;">
         <?= csrf_field() ?>
         <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
         <input type="hidden" name="action" value="complete_onboarding">
+        <div style="font-size:12px;opacity:.72;line-height:1.45;">All required onboarding checklist items are complete. Go-live activates billing and creates a draft invoice for manual review.</div>
         <button type="submit" class="btn btn-primary" style="width:auto;padding:10px 14px;">Mark onboarding complete and go live</button>
       </form>
+      <?php elseif (in_array($currentStatus, ['ONBOARDING','SIGNED_PENDING_ONBOARDING'], true)): ?>
+      <div style="padding:10px 12px;border-radius:12px;border:1px solid rgba(14,165,233,.22);background:rgba(14,165,233,.08);font-size:12px;line-height:1.45;margin-bottom:14px;">
+        Finish the required onboarding checklist below to unlock the go-live action.
+      </div>
+      <?php elseif ($currentStatus === 'ACTIVE'): ?>
+      <div style="padding:10px 12px;border-radius:12px;border:1px solid rgba(34,197,94,.22);background:rgba(34,197,94,.08);font-size:12px;line-height:1.45;margin-bottom:14px;">
+        This contract is active. Invoices remain in draft for review until manually issued.
+      </div>
       <?php endif; ?>
+      <details style="margin-top:8px;border-top:1px solid rgba(255,255,255,.08);padding-top:12px;">
+        <summary style="cursor:pointer;font-weight:800;color:#dbeafe;">Legacy/manual upload fallback</summary>
+        <div style="font-size:12px;opacity:.72;line-height:1.45;margin:8px 0 14px;">Use only for legacy contracts or failed webhook/document recovery. These controls are intentionally hidden from the normal automated workflow.</div>
+        <?php if (!in_array($currentStatus, ['ACTIVE','EXPIRED','CANCELLED'], true)): ?>
+        <form method="post" style="display:grid;gap:10px;margin-bottom:14px;">
+          <?= csrf_field() ?>
+          <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
+          <input type="hidden" name="action" value="mark_pending_signature">
+          <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Mark sent to signer</button>
+        </form>
+        <?php endif; ?>
+        <form method="post" style="display:grid;gap:10px;margin-bottom:14px;">
+          <?= csrf_field() ?>
+          <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
+          <input type="hidden" name="action" value="set_status">
+          <label>Status</label>
+          <select name="contract_status" style="width:100%;padding:10px;"><?php foreach (accounting_contract_status_options() as $value => $label): ?><?php $disableActive = $value === 'ACTIVE' && (!$hasSignedCopy || empty($onboardingProgress['all_complete'])) && $currentStatus !== 'ACTIVE'; ?><option value="<?= accounting_h($value) ?>" <?= $currentStatus === $value ? 'selected' : '' ?> <?= $disableActive ? 'disabled' : '' ?>><?= accounting_h($label) ?></option><?php endforeach; ?></select>
+          <div style="font-size:12px;opacity:.72;line-height:1.45;">Fallback status override. Active remains gated by a signed agreement and completed required onboarding tasks.</div>
+          <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Update status</button>
+        </form>
+        <form method="post" enctype="multipart/form-data" style="display:grid;gap:10px;">
+          <?= csrf_field() ?>
+          <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
+          <input type="hidden" name="action" value="upload_signed">
+          <label>Upload signed PDF</label>
+          <input type="file" name="signed_pdf" accept="application/pdf">
+          <div style="font-size:12px;opacity:.72;line-height:1.45;">Fallback only: stores the signed copy, starts onboarding, and pushes the client toward Syncro if automation did not attach the signed document.</div>
+          <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Upload signed PDF and start onboarding</button>
+        </form>
+        <form method="post" enctype="multipart/form-data" style="display:grid;gap:10px;margin-top:14px;">
+          <?= csrf_field() ?>
+          <input type="hidden" name="contract_id" value="<?= (int)$contract['contract_id'] ?>">
+          <input type="hidden" name="action" value="upload_audit">
+          <label>Upload audit trail PDF</label>
+          <input type="file" name="audit_pdf" accept="application/pdf">
+          <div style="font-size:12px;opacity:.72;line-height:1.45;">Fallback only: stores the certificate / audit trail separately from the signed agreement.</div>
+          <button type="submit" class="btn btn-secondary" style="width:auto;padding:10px 14px;">Upload audit trail PDF</button>
+        </form>
+      </details>
     </div>
 
-    <div class="card" style="padding:16px;">
+    <div id="onboarding-checklist" class="card" style="padding:16px;scroll-margin-top:24px;">
       <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:12px;margin-bottom:12px;">
         <div><h2 style="margin:0;font-size:19px;">Onboarding checklist</h2><div style="opacity:.75;">Billing begins only after the required checklist items are done and the contract is marked go-live.</div></div>
         <div style="text-align:right;"><div style="font-size:26px;font-weight:800;"><?= (int)($onboardingProgress['percent'] ?? 0) ?>%</div><div style="opacity:.68;font-size:12px;"><?= (int)($onboardingProgress['completed'] ?? 0) ?> / <?= (int)($onboardingProgress['required'] ?? 0) ?> required</div></div>
       </div>
       <?php if (!$hasSignedCopy && !in_array($currentStatus, ['ONBOARDING','SIGNED_PENDING_ONBOARDING','ACTIVE'], true)): ?>
-        <div style="opacity:.72;line-height:1.55;">Upload the signed agreement to start onboarding. That will create the checklist, push the organization to Syncro, and hold billing until go-live.</div>
+        <div style="opacity:.72;line-height:1.55;">eSignatures completion starts onboarding automatically. Once the signed agreement is archived, OPS creates the checklist, can push the organization to Syncro, and holds billing until go-live.</div>
       <?php elseif (!$onboardingTasks): ?>
         <div style="opacity:.72;line-height:1.55;">Onboarding checklist will appear here once the contract enters onboarding.</div>
       <?php else: ?>
         <div style="display:grid;gap:10px;">
         <?php foreach ($onboardingTasks as $task): ?>
-          <div style="padding:10px 12px;border-radius:12px;border:1px solid <?= !empty($task['is_completed']) ? 'rgba(34,197,94,.24)' : 'rgba(255,255,255,.08)' ?>;background:<?= !empty($task['is_completed']) ? 'rgba(34,197,94,.08)' : 'rgba(255,255,255,.03)' ?>;display:flex;justify-content:space-between;gap:12px;align-items:flex-start;">
+          <div id="checklist-item-<?= (int)$task['task_id'] ?>" style="padding:10px 12px;border-radius:12px;border:1px solid <?= !empty($task['is_completed']) ? 'rgba(34,197,94,.24)' : 'rgba(255,255,255,.08)' ?>;background:<?= !empty($task['is_completed']) ? 'rgba(34,197,94,.08)' : 'rgba(255,255,255,.03)' ?>;display:flex;justify-content:space-between;gap:12px;align-items:flex-start;scroll-margin-top:24px;">
             <div>
               <div style="font-weight:700;"><?= accounting_h((string)$task['task_name']) ?><?php if (!empty($task['is_required'])): ?><span style="opacity:.58;font-weight:500;"> · Required</span><?php endif; ?></div>
               <?php if (!empty($task['task_detail'])): ?><div style="font-size:12px;opacity:.72;margin-top:4px;line-height:1.45;"><?= accounting_h((string)$task['task_detail']) ?></div><?php endif; ?>

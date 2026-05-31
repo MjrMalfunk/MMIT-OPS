@@ -60,13 +60,30 @@ define('PAYMENT_DEFAULT_FEE_EXPENSE_ACCOUNT_CODE', '5070');
 
 define('STRIPE_SECRET_KEY', '');
 define('STRIPE_PUBLISHABLE_KEY', '');
-define('STRIPE_WEBHOOK_SECRET', '');
+define('STRIPE_WEBHOOK_SECRET', ''); // Fallback signing secret if mode-specific secrets are not set.
+define('STRIPE_TEST_WEBHOOK_SECRET', ''); // Use with sk_test_* / sandbox webhooks.
+define('STRIPE_LIVE_WEBHOOK_SECRET', ''); // Use with sk_live_* / production webhooks.
 // Stripe webhook endpoint: BASE_URL . '/payments/webhook_stripe.php'
 define('STRIPE_CHECKOUT_SUCCESS_URL', BASE_URL . '/payments/return.php?gateway=stripe&session_id={CHECKOUT_SESSION_ID}');
 define('STRIPE_CHECKOUT_CANCEL_URL', BASE_URL . '/payments/pay.php?cancelled=1');
 
 
+// eSignatures.com integration
+// Store the real API token only in private config. OPS TEST/staging forces test mode
+// and sends payloads with "test":"yes"; live stays disabled unless explicitly enabled.
+define('ESIGNATURES_ENABLED', false);
+define('ESIGNATURES_API_TOKEN', '');
+define('ESIGNATURES_TEMPLATE_ID', '20086199-7b34-44a3-b0bd-08010540cda2');
+define('ESIGNATURES_TEST_MODE', false);
+define('ESIGNATURES_BASE_URL', 'https://esignatures.com/api');
+// Staging/test should point eSignatures contract completion events at OPS TEST.
+// Leave blank in live unless the production eSignatures webhook has been registered and verified.
+define('ESIGNATURES_WEBHOOK_URL', '');
+
 // Syncro integration
+// OPS LIVE (APP_ENV=production / ops.midwestmanagedit.com) may push customer records to Syncro.
+// OPS TEST/staging (APP_ENV=staging or ops-test.midwestmanagedit.com) must not push to Syncro;
+// inc/syncro.php blocks POST, PUT, PATCH, and DELETE centrally before any external API call.
 define('SYNCRO_SUBDOMAIN', 'midwestmanagedit');
 define('SYNCRO_API_KEY', '');
 define('SYNCRO_BASE_URL', ''); // Optional override. Leave blank to use https://<subdomain>.syncromsp.com/api/v1/
