@@ -78,9 +78,11 @@ smoke_assert(strpos($plainBody, 'invoice.stripe.com') === false, 'invoice email 
 
 smoke_assert(payment_gateway_resolve_requested_method($largeInvoice, '') === 'ACH', '$1000+ methodless invoice resolves to ACH-first');
 smoke_assert(payment_gateway_stripe_checkout_payment_method_types($largeInvoice, payment_gateway_resolve_requested_method($largeInvoice, '')) === ['us_bank_account', 'card'], '$1000+ methodless invoice checkout offers bank plus card');
-smoke_assert(payment_gateway_resolve_requested_method($smallInvoice, '') === 'CARD', 'small methodless invoice follows configured default behavior');
-smoke_assert(payment_gateway_stripe_checkout_payment_method_types($smallInvoice, payment_gateway_resolve_requested_method($smallInvoice, '')) === ['card'], 'small default card invoice remains card-capable');
+smoke_assert(payment_gateway_resolve_requested_method($smallInvoice, '') === 'ACH', 'small methodless invoice resolves to ACH-first');
+smoke_assert(payment_gateway_stripe_checkout_payment_method_types($smallInvoice, payment_gateway_resolve_requested_method($smallInvoice, '')) === ['us_bank_account', 'card'], 'small methodless invoice checkout offers bank plus card');
 smoke_assert(payment_gateway_resolve_requested_method($recurringInvoice, '') === 'ACH', 'recurring methodless invoice resolves to ACH-first');
 
 smoke_assert(accounting_invoice_payment_link((string)$largeInvoice['invoice_number'], 'ACH') === $largeOpsUrl . '&method=ACH', 'explicit admin ACH override link still works');
 smoke_assert(accounting_invoice_payment_link((string)$largeInvoice['invoice_number'], 'CARD') === $largeOpsUrl . '&method=CARD', 'explicit admin CARD override link still works');
+smoke_assert(payment_gateway_stripe_checkout_payment_method_types($smallInvoice, payment_gateway_resolve_requested_method($smallInvoice, 'CARD')) === ['card'], 'explicit small invoice CARD override creates card-only checkout');
+smoke_assert(payment_gateway_resolve_requested_method($smallInvoice, 'invalid') === 'ACH', 'invalid small invoice method falls back to ACH-first');
