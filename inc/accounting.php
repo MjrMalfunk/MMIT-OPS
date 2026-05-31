@@ -4235,6 +4235,7 @@ function accounting_contract_status_options(): array {
     return [
         'DRAFT' => 'Draft',
         'PENDING_SIGNATURE' => 'Pending Signature',
+        'SIGNED_PENDING_DOCUMENTS' => 'Signed / Pending Documents',
         'SIGNED_PENDING_ONBOARDING' => 'Signed / Pending Onboarding',
         'ONBOARDING' => 'Onboarding In Progress',
         'ACTIVE' => 'Active',
@@ -5775,6 +5776,7 @@ function accounting_contract_status_badge_html(string $status): string {
         'ACTIVE' => ['rgba(34,197,94,.18)', 'rgba(34,197,94,.42)', '#d1fae5'],
         'DRAFT' => ['rgba(148,163,184,.18)', 'rgba(148,163,184,.35)', '#e2e8f0'],
         'PENDING_SIGNATURE' => ['rgba(59,130,246,.18)', 'rgba(59,130,246,.35)', '#dbeafe'],
+        'SIGNED_PENDING_DOCUMENTS' => ['rgba(245,158,11,.18)', 'rgba(245,158,11,.35)', '#fef3c7'],
         'SIGNED_PENDING_ONBOARDING' => ['rgba(139,92,246,.18)', 'rgba(139,92,246,.35)', '#ede9fe'],
         'ONBOARDING' => ['rgba(14,165,233,.18)', 'rgba(14,165,233,.35)', '#e0f2fe'],
         'EXPIRED' => ['rgba(245,158,11,.18)', 'rgba(245,158,11,.35)', '#fef3c7'],

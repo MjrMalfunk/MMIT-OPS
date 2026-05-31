@@ -97,6 +97,8 @@ if ($esignaturesLatestSend) {
     }
     if ($hasSignedCopy) {
         $esignaturesStatusMessages[] = 'Signed document archived';
+    } elseif ($currentStatus === 'SIGNED_PENDING_DOCUMENTS' || (string)($esignaturesLatestSend['status'] ?? '') === 'signed_pending_documents') {
+        $esignaturesStatusMessages[] = 'eSignatures confirmed this contract was signed, but OPS has not retrieved the signed PDF/audit trail yet.';
     } elseif (!empty($esignaturesLatestSend['signed_document_url'])) {
         $esignaturesStatusMessages[] = 'Signed document available from eSignatures; download manually if OPS cannot archive it automatically.';
     }
@@ -110,6 +112,8 @@ if (!empty($contract['signed_date'])) {
     if ($currentStatus === 'ONBOARDING') {
         $signatureStatusLabel .= ' · onboarding in progress';
     }
+} elseif ($currentStatus === 'SIGNED_PENDING_DOCUMENTS') {
+    $signatureStatusLabel = 'Signed · pending signed PDF/audit retrieval';
 } elseif ($currentStatus === 'PENDING_SIGNATURE') {
     $signatureStatusLabel = 'Sent for signature';
 } elseif ($hasSignedCopy) {
