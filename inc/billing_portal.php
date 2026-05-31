@@ -179,7 +179,7 @@ function billing_portal_invoice_pay_url(array $invoice): string
         return $hosted;
     }
     if (accounting_invoice_can_receive_payment($invoice)) {
-        return accounting_invoice_payment_link((string) ($invoice['invoice_number'] ?? ''), 'CARD');
+        return accounting_invoice_payment_link((string) ($invoice['invoice_number'] ?? ''));
     }
     return '';
 }

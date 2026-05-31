@@ -149,6 +149,13 @@ function payment_gateway_default_method_for_invoice(?array $invoice = null): str
     return $invoice !== null && payment_gateway_invoice_prefers_ach($invoice) ? 'ACH' : 'CARD';
 }
 
+function payment_gateway_resolve_requested_method(?array $invoice, string $requestedMethod): string {
+    $requestedMethod = strtoupper(trim($requestedMethod));
+    return in_array($requestedMethod, ['ACH', 'CARD'], true)
+        ? $requestedMethod
+        : payment_gateway_default_method_for_invoice($invoice);
+}
+
 function payment_gateway_stripe_checkout_payment_method_types(array $invoice, string $method): array {
     $method = strtoupper(trim($method));
     if ($method === 'ACH' && payment_gateway_stripe_ach_checkout_allowed()) {

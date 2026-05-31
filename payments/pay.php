@@ -8,7 +8,7 @@ require_once __DIR__ . '/../inc/payment_gateway.php';
 $invoiceNumber = trim((string)($_GET['invoice'] ?? $_POST['invoice'] ?? ''));
 $invoice = $invoiceNumber !== '' ? accounting_invoice_lookup_by_number($invoiceNumber) : null;
 $requestedMethod = strtoupper(trim((string)($_GET['method'] ?? $_POST['method'] ?? '')));
-$method = in_array($requestedMethod, ['ACH', 'CARD'], true) ? $requestedMethod : payment_gateway_default_method_for_invoice($invoice);
+$method = payment_gateway_resolve_requested_method($invoice, $requestedMethod);
 $errors = [];
 $selectedGateway = payment_gateway_pick($method, (string)($_POST['gateway'] ?? $_GET['gateway'] ?? ''));
 $availableGateways = payment_gateway_available_for_method($method);
