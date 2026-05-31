@@ -17,6 +17,18 @@ require_once __DIR__ . '/syncro.php';
      }
      return true;
  }
+
+function accounting_ensure_invoice_line_item_link(): void {
+    if (!db_table_exists('invoice_line') || !db_table_exists('service_item') || db_column_exists('invoice_line', 'item_id')) {
+        return;
+    }
+    try {
+        db()->exec('ALTER TABLE invoice_line ADD COLUMN item_id BIGINT(20) UNSIGNED NULL DEFAULT NULL AFTER line_number');
+        db()->exec('ALTER TABLE invoice_line ADD INDEX idx_invoice_line_item (item_id)');
+    } catch (Throwable $e) {
+        error_log('Unable to add invoice_line.item_id link: ' . $e->getMessage());
+    }
+}
  
  function accounting_h(string $value): string {
      return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
@@ -60,6 +72,7 @@ require_once __DIR__ . '/syncro.php';
          echo 'Accounting tables are not installed yet.';
          exit;
      }
+     accounting_ensure_invoice_line_item_link();
  }
  
  function accounting_get_account_types(): array {
@@ -1228,6 +1241,84 @@ function accounting_can_edit_invoice(array $invoice): bool {
         && empty(accounting_invoice_payments((int)($invoice['invoice_id'] ?? 0)));
 }
 
+function accounting_prepare_invoice_lines_for_save(array $lines): array {
+    $normalizedLines = [];
+    $errors = [];
+    foreach ($lines as $idx => $lineData) {
+        $itemId = (int)($lineData['item_id'] ?? 0);
+        $serviceCode = trim((string)($lineData['service_code'] ?? ''));
+        $description = trim((string)($lineData['description'] ?? ''));
+        $quantity = (float)($lineData['quantity'] ?? 0);
+        $unitPrice = (float)($lineData['unit_price'] ?? 0);
+        $revenueAccountId = (int)($lineData['revenue_account_id'] ?? 0);
+
+        if ($itemId > 0 && db_table_exists('service_item')) {
+            $item = accounting_get_catalog_item($itemId);
+            if ($item) {
+                if ($description === '') $description = (string)$item['item_name'];
+                if ($serviceCode === '') $serviceCode = (string)($item['item_code'] ?? '');
+                if ($revenueAccountId <= 0 && !empty($item['revenue_account_id'])) $revenueAccountId = (int)$item['revenue_account_id'];
+                if ((float)$unitPrice === 0.0 && isset($item['default_unit_price'])) $unitPrice = (float)$item['default_unit_price'];
+            } else {
+                $itemId = 0;
+            }
+        }
+
+        $isBlankRow = $itemId <= 0
+            && $description === ''
+            && $revenueAccountId <= 0
+            && abs($quantity - 1.0) < 0.00001
+            && abs($unitPrice) < 0.00001;
+        if ($isBlankRow || ($itemId <= 0 && $description === '' && $revenueAccountId <= 0 && $quantity <= 0 && abs($unitPrice) < 0.00001)) {
+            continue;
+        }
+
+        if ($description === '') $errors[] = 'Line ' . ($idx + 1) . ': description is required.';
+        if ($quantity <= 0) $errors[] = 'Line ' . ($idx + 1) . ': quantity must be greater than zero.';
+        if ($unitPrice < 0) $errors[] = 'Line ' . ($idx + 1) . ': unit price cannot be negative.';
+        if ($revenueAccountId <= 0) $errors[] = 'Line ' . ($idx + 1) . ': choose a revenue account.';
+
+        $normalizedLines[] = [
+            'item_id' => $itemId,
+            'service_code' => $serviceCode,
+            'description' => $description,
+            'quantity' => round($quantity, 2),
+            'unit_price' => round($unitPrice, 2),
+            'revenue_account_id' => $revenueAccountId,
+            'line_total' => round($quantity * $unitPrice, 2),
+        ];
+    }
+
+    return ['lines' => $normalizedLines, 'errors' => $errors];
+}
+
+function accounting_insert_invoice_lines(PDO $pdo, int $invoiceId, array $normalizedLines): void {
+    $hasItemColumn = db_column_exists('invoice_line', 'item_id');
+    if ($hasItemColumn) {
+        $lineStmt = $pdo->prepare('INSERT INTO invoice_line (invoice_id, line_number, item_id, service_code, description, quantity, unit_price, taxable, tax_amount, line_total, revenue_account_id) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0.00, ?, ?)');
+    } else {
+        $lineStmt = $pdo->prepare('INSERT INTO invoice_line (invoice_id, line_number, service_code, description, quantity, unit_price, taxable, tax_amount, line_total, revenue_account_id) VALUES (?, ?, ?, ?, ?, ?, 0, 0.00, ?, ?)');
+    }
+    foreach ($normalizedLines as $index => $lineData) {
+        $params = [
+            $invoiceId,
+            $index + 1,
+        ];
+        if ($hasItemColumn) {
+            $params[] = !empty($lineData['item_id']) ? (int)$lineData['item_id'] : null;
+        }
+        $params = array_merge($params, [
+            $lineData['service_code'] !== '' ? $lineData['service_code'] : null,
+            $lineData['description'],
+            $lineData['quantity'],
+            $lineData['unit_price'],
+            $lineData['line_total'],
+            $lineData['revenue_account_id'],
+        ]);
+        $lineStmt->execute($params);
+    }
+}
+
 function accounting_update_invoice(int $invoiceId, array $data, int $userId): array {
     $invoice = accounting_get_invoice($invoiceId);
     if (!$invoice) return ['ok' => false, 'errors' => ['Invoice not found.']];
@@ -1235,8 +1326,8 @@ function accounting_update_invoice(int $invoiceId, array $data, int $userId): ar
         return ['ok' => false, 'errors' => ['Only unposted draft invoices can be edited.']];
     }
 
-    $normalized = accounting_normalize_invoice_lines($data);
-    if (empty($normalized['ok'])) return $normalized;
+    $linePrep = accounting_prepare_invoice_lines_for_save(accounting_normalize_invoice_lines($data));
+    $normalizedLines = $linePrep['lines'];
 
     $clientId = (int)($data['client_id'] ?? 0);
     $contractId = (int)($data['contract_id'] ?? 0);
@@ -1245,9 +1336,7 @@ function accounting_update_invoice(int $invoiceId, array $data, int $userId): ar
     $status = strtoupper(trim((string)($data['status'] ?? 'DRAFT')));
     $arAccountId = (int)($data['ar_account_id'] ?? 0);
     $memo = trim((string)($data['memo'] ?? ''));
-    $normalizedLines = $normalized['lines'];
-
-    $errors = [];
+    $errors = $linePrep['errors'];
     if ($clientId <= 0) $errors[] = 'Choose a client.';
     if ($invoiceDate === '') $errors[] = 'Invoice date is required.';
     if ($status !== 'DRAFT') $errors[] = 'Draft invoices can be edited, then issued from the review screen.';
@@ -1282,19 +1371,7 @@ function accounting_update_invoice(int $invoiceId, array $data, int $userId): ar
         ]);
 
         $pdo->prepare('DELETE FROM invoice_line WHERE invoice_id = ?')->execute([$invoiceId]);
-        $lineStmt = $pdo->prepare('INSERT INTO invoice_line (invoice_id, line_number, service_code, description, quantity, unit_price, taxable, tax_amount, line_total, revenue_account_id) VALUES (?, ?, ?, ?, ?, ?, 0, 0.00, ?, ?)');
-        foreach ($normalizedLines as $index => $lineData) {
-            $lineStmt->execute([
-                $invoiceId,
-                $index + 1,
-                $lineData['service_code'] !== '' ? $lineData['service_code'] : null,
-                $lineData['description'],
-                $lineData['quantity'],
-                $lineData['unit_price'],
-                $lineData['line_total'],
-                $lineData['revenue_account_id'],
-            ]);
-        }
+        accounting_insert_invoice_lines($pdo, $invoiceId, $normalizedLines);
 
         $pdo->commit();
         return ['ok' => true, 'invoice_id' => $invoiceId, 'message' => 'Invoice updated.'];
@@ -1317,51 +1394,9 @@ function accounting_create_invoice(array $data, int $userId): array {
     if ($dueDate === '') $dueDate = date('Y-m-d', strtotime($invoiceDate . ' +15 days'));
     if ($arAccountId <= 0) $arAccountId = accounting_find_account_id_by_code('1100') ?? 0;
 
-    $lines = accounting_normalize_invoice_lines($data);
-    $normalizedLines = [];
-    $errors = [];
-    foreach ($lines as $idx => $lineData) {
-        $itemId = (int)($lineData['item_id'] ?? 0);
-        $serviceCode = trim((string)($lineData['service_code'] ?? ''));
-        $description = trim((string)($lineData['description'] ?? ''));
-        $quantity = (float)($lineData['quantity'] ?? 0);
-        $unitPrice = (float)($lineData['unit_price'] ?? 0);
-        $revenueAccountId = (int)($lineData['revenue_account_id'] ?? 0);
-
-        if ($itemId > 0 && db_table_exists('service_item')) {
-            $item = accounting_get_catalog_item($itemId);
-            if ($item) {
-                if ($description === '') $description = (string)$item['item_name'];
-                if ($serviceCode === '') $serviceCode = (string)($item['item_code'] ?? '');
-                if ($revenueAccountId <= 0 && !empty($item['revenue_account_id'])) $revenueAccountId = (int)$item['revenue_account_id'];
-                if ((float)$unitPrice === 0.0 && isset($item['default_unit_price'])) $unitPrice = (float)$item['default_unit_price'];
-            }
-        }
-
-        $isBlankRow = $itemId <= 0
-            && $description === ''
-            && $revenueAccountId <= 0
-            && abs($quantity - 1.0) < 0.00001
-            && abs($unitPrice) < 0.00001;
-        if ($isBlankRow || ($itemId <= 0 && $description === '' && $revenueAccountId <= 0 && $quantity <= 0 && abs($unitPrice) < 0.00001)) {
-            continue;
-        }
-
-        if ($description === '') $errors[] = 'Line ' . ($idx + 1) . ': description is required.';
-        if ($quantity <= 0) $errors[] = 'Line ' . ($idx + 1) . ': quantity must be greater than zero.';
-        if ($unitPrice < 0) $errors[] = 'Line ' . ($idx + 1) . ': unit price cannot be negative.';
-        if ($revenueAccountId <= 0) $errors[] = 'Line ' . ($idx + 1) . ': choose a revenue account.';
-
-        $normalizedLines[] = [
-            'item_id' => $itemId,
-            'service_code' => $serviceCode,
-            'description' => $description,
-            'quantity' => round($quantity, 2),
-            'unit_price' => round($unitPrice, 2),
-            'revenue_account_id' => $revenueAccountId,
-            'line_total' => round($quantity * $unitPrice, 2),
-        ];
-    }
+    $linePrep = accounting_prepare_invoice_lines_for_save(accounting_normalize_invoice_lines($data));
+    $normalizedLines = $linePrep['lines'];
+    $errors = $linePrep['errors'];
 
     if ($clientId <= 0) $errors[] = 'Choose a client.';
     if (!in_array($status, accounting_get_invoice_statuses(), true)) $errors[] = 'Choose a valid invoice status.';
@@ -1400,19 +1435,7 @@ function accounting_create_invoice(array $data, int $userId): array {
         ]);
         $invoiceId = (int)$pdo->lastInsertId();
 
-        $lineStmt = $pdo->prepare('INSERT INTO invoice_line (invoice_id, line_number, service_code, description, quantity, unit_price, taxable, tax_amount, line_total, revenue_account_id) VALUES (?, ?, ?, ?, ?, ?, 0, 0.00, ?, ?)');
-        foreach ($normalizedLines as $index => $lineData) {
-            $lineStmt->execute([
-                $invoiceId,
-                $index + 1,
-                $lineData['service_code'] !== '' ? $lineData['service_code'] : null,
-                $lineData['description'],
-                $lineData['quantity'],
-                $lineData['unit_price'],
-                $lineData['line_total'],
-                $lineData['revenue_account_id'],
-            ]);
-        }
+        accounting_insert_invoice_lines($pdo, $invoiceId, $normalizedLines);
 
         if (in_array($status, ['ISSUED', 'PARTIALLY_PAID', 'PAID'], true)) {
             accounting_post_invoice_journal($pdo, [
@@ -1478,8 +1501,14 @@ function accounting_list_invoices(int $limit = 100): array {
 }
 
 function accounting_invoice_lines(int $invoiceId): array {
-     $st = db()->prepare("SELECT il.*, ga.account_code AS revenue_account_code, ga.account_name AS revenue_account_name
+     $hasItemColumn = db_column_exists('invoice_line', 'item_id');
+     $itemSelect = $hasItemColumn ? 'COALESCE(il.item_id, si.item_id) AS item_id,' : 'si.item_id AS item_id,';
+     $itemJoin = $hasItemColumn
+        ? 'LEFT JOIN service_item si ON si.item_id = il.item_id OR (il.item_id IS NULL AND si.item_code = il.service_code)'
+        : 'LEFT JOIN service_item si ON si.item_code = il.service_code';
+     $st = db()->prepare("SELECT il.*, {$itemSelect} si.item_code AS catalog_item_code, si.item_name AS catalog_item_name, ga.account_code AS revenue_account_code, ga.account_name AS revenue_account_name
                           FROM invoice_line il
+                          {$itemJoin}
                           LEFT JOIN gl_account ga ON ga.account_id = il.revenue_account_id
                           WHERE il.invoice_id = ? ORDER BY il.line_number ASC, il.invoice_line_id ASC");
      $st->execute([$invoiceId]);
