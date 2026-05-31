@@ -21,7 +21,7 @@ $payload = [
     'event' => 'contract.finalized',
     'contract_id' => 'provider-abc-123',
     'status' => 'signed',
-    'metadata' => ['contract_id' => 42, 'client_id' => 7],
+    'metadata' => 'contract_id=42;client_id=7',
     'signed_document_url' => 'https://esignatures.example.test/signed/provider-abc-123.pdf',
     'audit_trail' => ['event' => 'signed'],
     'signed_at' => '2026-05-31T14:15:16Z',
