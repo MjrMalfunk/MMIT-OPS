@@ -66,6 +66,15 @@ define('STRIPE_CHECKOUT_SUCCESS_URL', BASE_URL . '/payments/return.php?gateway=s
 define('STRIPE_CHECKOUT_CANCEL_URL', BASE_URL . '/payments/pay.php?cancelled=1');
 
 
+// eSignatures.com integration
+// Store the real API token only in private config. OPS TEST/staging forces test mode
+// and sends payloads with "test":"yes"; live stays disabled unless explicitly enabled.
+define('ESIGNATURES_ENABLED', false);
+define('ESIGNATURES_API_TOKEN', '');
+define('ESIGNATURES_TEMPLATE_ID', '20086199-7b34-44a3-b0bd-08010540cda2');
+define('ESIGNATURES_TEST_MODE', false);
+define('ESIGNATURES_BASE_URL', 'https://esignatures.com/api');
+
 // Syncro integration
 // OPS LIVE (APP_ENV=production / ops.midwestmanagedit.com) may push customer records to Syncro.
 // OPS TEST/staging (APP_ENV=staging or ops-test.midwestmanagedit.com) must not push to Syncro;
