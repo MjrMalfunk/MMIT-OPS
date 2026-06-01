@@ -104,15 +104,19 @@ page_header('Secure invoice payment', '', false);
 .public-pay-panel h2{margin:0;font-size:18px;letter-spacing:-.02em;}
 .public-pay-panel p{margin:0;color:rgba(233,238,247,.78);line-height:1.6;}
 .public-pay-panel ul{margin:0;padding-left:20px;color:rgba(233,238,247,.78);line-height:1.58;display:grid;gap:8px;}
-.public-pay-action-card{border-radius:24px;background:rgba(248,250,252,.97);border:1px solid rgba(255,255,255,.72);color:#13233f;box-shadow:0 18px 48px rgba(2,6,23,.28);padding:20px;display:grid;gap:14px;}
-.public-pay-action-card h2{margin:0;font-size:20px;color:#0f172a;}
-.public-pay-action-card p{margin:0;color:#475569;line-height:1.55;}
-.public-pay-action-card .public-pay-badge{background:#dcfce7;border-color:#bbf7d0;color:#166534;width:max-content;max-width:100%;}
-.public-pay-action-card .gateway-row{border-color:#dbe3ef;background:#f8fafc;color:#334155;}
-.public-pay-action-card .gateway-row strong{color:#0f172a;}
-.public-pay-action-card .btn-primary{background:#1d4ed8;color:#fff;border-color:#1d4ed8;box-shadow:0 12px 24px rgba(29,78,216,.24);}
-.public-pay-action-card .btn-secondary{background:#eef4ff;border-color:#d6e4ff;color:#1e3a8a;}
+.public-pay-action-card{border-radius:24px;background:linear-gradient(145deg,rgba(15,23,42,.92),rgba(2,6,23,.76));border:1px solid rgba(148,163,184,.24);color:#e5edf8;box-shadow:0 22px 54px rgba(2,6,23,.42),0 0 42px rgba(37,99,235,.10);padding:20px;display:grid;gap:14px;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);}
+.public-pay-action-card h2{margin:0;font-size:20px;color:#f8fafc;}
+.public-pay-action-card p{margin:0;color:#cbd5e1;line-height:1.55;}
+.public-pay-action-card .public-pay-badge{background:rgba(16,185,129,.16);border-color:rgba(74,222,128,.48);color:#bbf7d0;width:max-content;max-width:100%;box-shadow:0 0 0 1px rgba(22,163,74,.08) inset;}
+.public-pay-action-card .gateway-row{border-color:rgba(148,163,184,.22);background:rgba(2,6,23,.35);color:#cbd5e1;box-shadow:inset 0 1px 0 rgba(255,255,255,.04);}
+.public-pay-action-card .gateway-row strong{color:#e5edf8;}
+.public-pay-action-card .btn-primary{background:#1d4ed8;color:#fff;border-color:#60a5fa;box-shadow:0 14px 30px rgba(29,78,216,.36),0 0 0 1px rgba(191,219,254,.12) inset;}
+.public-pay-action-card .btn-secondary{background:rgba(15,23,42,.72);border-color:rgba(148,163,184,.30);color:#dbeafe;box-shadow:inset 0 1px 0 rgba(255,255,255,.05);}
 .gateway-row{display:grid;gap:8px;padding:12px;border:1px solid rgba(255,255,255,.08);border-radius:14px;background:rgba(255,255,255,.03);}
+.public-pay-action-card .btn{justify-content:center;text-decoration:none;}
+.public-pay-action-card .btn-primary:hover{filter:brightness(1.08);}
+.public-pay-action-card .btn-secondary:hover{background:rgba(30,41,59,.86);border-color:rgba(191,219,254,.40);color:#eff6ff;}
+.public-pay-provider-label{display:block;margin-bottom:8px;color:#cbd5e1;font-weight:700;}
 .public-pay-help{padding:18px;text-align:center;color:rgba(233,238,247,.78);line-height:1.6;}
 .public-pay-help strong{color:#f8fafc;}
 .public-pay-alert{border-radius:16px;padding:14px 16px;line-height:1.55;}
@@ -224,7 +228,7 @@ page_header('Secure invoice payment', '', false);
                 <input type="hidden" name="method" value="<?= accounting_h($method) ?>">
                 <?php if (count($availableGateways) > 1): ?>
                   <div>
-                    <label style="display:block;margin-bottom:8px;color:#334155;">Choose checkout provider</label>
+                    <label class="public-pay-provider-label">Choose checkout provider</label>
                     <div style="display:grid;gap:10px;">
                       <?php foreach ($availableGateways as $gateway): ?>
                         <label class="gateway-row" style="cursor:pointer;">
