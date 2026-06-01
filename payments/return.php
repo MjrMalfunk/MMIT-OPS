@@ -7,7 +7,7 @@ require_once __DIR__ . '/../inc/payment_gateway.php';
 
 $gateway = strtoupper(trim((string)($_GET['gateway'] ?? '')));
 $message = null;
-$heading = 'Payment status';
+$heading = 'Payment update';
 $errors = [];
 $invoice = null;
 $paymentId = null;
