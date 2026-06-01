@@ -3032,6 +3032,17 @@ function accounting_catalog_item_exists(): bool {
      };
  }
  
+
+function accounting_sync_client_service_next_bill_date(PDO $pdo, int $recurringServiceId, string $nextBillDate): int {
+    if ($recurringServiceId <= 0 || $nextBillDate === '' || !db_table_exists('client_service')) {
+        return 0;
+    }
+
+    $st = $pdo->prepare('UPDATE client_service SET next_bill_date = ?, updated_at = CURRENT_TIMESTAMP WHERE recurring_service_id = ?');
+    $st->execute([$nextBillDate, $recurringServiceId]);
+    return $st->rowCount();
+}
+
 function accounting_recurring_invoice_group_key(array $row, string $invoiceDate): string {
     return implode(':', [
         (string)((int)($row['client_id'] ?? 0)),
@@ -3165,8 +3176,10 @@ function accounting_generate_recurring_invoices(?string $asOfDate = null, int $u
 
             $upd = $pdo->prepare('UPDATE recurring_service SET last_billed_date = ?, next_bill_date = ?, updated_at = CURRENT_TIMESTAMP WHERE recurring_service_id = ?');
             foreach ($group['rows'] as $row) {
+                $recurringServiceId = (int)$row['recurring_service_id'];
                 $nextDate = accounting_add_billing_interval((string)$row['next_bill_date'], (string)$row['billing_cycle']);
-                $upd->execute([$asOfDate, $nextDate, (int)$row['recurring_service_id']]);
+                $upd->execute([$asOfDate, $nextDate, $recurringServiceId]);
+                accounting_sync_client_service_next_bill_date($pdo, $recurringServiceId, $nextDate);
             }
 
             $created[] = [
@@ -4020,7 +4033,8 @@ function accounting_create_client_service_assignment(array $data, int $userId = 
     $nextBillDate = trim((string)($data['next_bill_date'] ?? ''));
     $endDate = trim((string)($data['end_date'] ?? ''));
     $revenueAccountId = (int)($data['revenue_account_id'] ?? 0);
-    $status = strtoupper(trim((string)($data['status'] ?? 'DRAFT')));
+    $status = strtoupper(trim((string)($data['status'] ?? '')));
+    if ($status === '') $status = 'ACTIVE';
     $autoRenew = !empty($data['auto_renew']) ? 1 : 0;
     $taxable = !empty($data['taxable']) ? 1 : 0;
     $notes = trim((string)($data['notes'] ?? ''));
@@ -6591,9 +6605,11 @@ function accounting_generate_contract_initial_invoice(int $contractId, int $user
 
     $upd = $pdo->prepare('UPDATE recurring_service SET last_billed_date = ?, next_bill_date = ?, updated_at = CURRENT_TIMESTAMP WHERE recurring_service_id = ?');
     foreach ($rows as $row) {
+        $recurringServiceId = (int)$row['recurring_service_id'];
         $currentBillDate = (string)($row['next_bill_date'] ?: $invoiceDate);
         $nextDate = accounting_add_billing_interval($currentBillDate, (string)$row['billing_cycle']);
-        $upd->execute([$invoiceDate, $nextDate, (int)$row['recurring_service_id']]);
+        $upd->execute([$invoiceDate, $nextDate, $recurringServiceId]);
+        accounting_sync_client_service_next_bill_date($pdo, $recurringServiceId, $nextDate);
     }
 
     return [
