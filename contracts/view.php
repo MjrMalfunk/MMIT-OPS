@@ -175,7 +175,7 @@ foreach ($services as $svc) {
             }
         }
     }
-    if (in_array($code, ['SRVR-MGMT', 'SRVR-BKUP'], true)) {
+    if (in_array($code, ['SRVR-MGMT', 'SRVR-BKUP', 'SRVR-BK-500'], true)) {
         $coveredServers = max($coveredServers, (float)($svc['quantity'] ?? 0));
     }
 }

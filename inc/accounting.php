@@ -4734,7 +4734,7 @@ function accounting_catalog_item_default_pricing_model(array $item): string {
     }
 
     $code = strtoupper(trim((string)($item['item_code'] ?? '')));
-    if (in_array($code, ['EP-BKUP', 'DSTR-RCVR', 'SRVR-MGMT', 'EPP-EDR', 'DNS-FLTR', 'SEC-MON', 'COMP-MON', 'MSP-ESS', 'MSP-SEC', 'MSP-COMP', 'SRVR-BK-500', 'SRVR-BK-1000', 'SRVR-BK-1500', 'SRVR-BK-2000'], true)) {
+    if (in_array($code, ['EP-BKUP', 'DSTR-RCVR', 'SRVR-MGMT', 'EPP-EDR', 'DNS-FLTR', 'SEC-MON', 'COMP-MON', 'MSP-ESS', 'MSP-SEC', 'MSP-COMP', 'SRVR-BK-500'], true)) {
         return 'PER_DEVICE';
     }
     if (in_array($code, ['MS-365', 'GW-SEC', 'M365-BKUP', 'GW-BKUP', 'HUNT-ITDR', 'SAT-TRAIN'], true)) {
@@ -4765,72 +4765,68 @@ function accounting_service_package_profiles(): array {
         'ESSENTIAL' => [
             'display_name' => 'Manage IT',
             'default_unit_price' => 85.00,
-            'description' => 'Syncro-powered remote monitoring, patching, managed Microsoft Defender, remote helpdesk, asset tracking, client portal access, and monthly health visibility for small environments that need reliable day-to-day support on a per-device basis.',
+            'description' => 'Updates, patching, help desk, managed AV, and monitoring for covered workstations. Manage IT keeps security, productivity licensing, and backup coverage optional so clients can add only ScoutDNS and backup services they need.',
             'included_services' => [
-                'Syncro remote monitoring and maintenance',
-                'Patch and update management',
-                'Managed Microsoft Defender baseline',
-                'Remote helpdesk support',
-                'Asset tracking',
-                'Client portal access',
-                'Monthly health summary',
+                'Updates / patching',
+                'Help desk',
+                'Managed AV',
+                'Monitoring',
             ],
             'not_included_unless_selected' => [
+                'ScoutDNS filtering',
                 'Productivity platform and license',
-                'Endpoint backup up to 250 GB per workstation',
-                'Additional endpoint backup storage blocks beyond 250 GB per workstation',
+                'Huntress EDR / managed detection',
+                'Huntress ITDR',
+                'Huntress SAT',
+                'Defender for Business',
+                'Workstation backup up to 250 GB per workstation',
+                'Workstation backup storage buckets',
                 'SaaS backup for Microsoft 365 or Google Workspace',
                 'Server management',
-                'Server backup billed by protected storage tier',
-                'Managed firewall / network security',
+                'Server backup with 500 GB included',
+                'Server backup storage buckets',
             ],
         ],
         'SECURE' => [
             'display_name' => 'Protect IT',
             'default_unit_price' => 145.00,
-            'description' => 'Everything in Manage IT plus ScoutDNS filtering, Huntress managed EDR, Huntress ITDR, Defender for Business or equivalent managed protection coverage when applicable, endpoint backup up to 250 GB per workstation, SaaS backup for the selected Microsoft 365 or Google Workspace users, and a stronger protection stack for environments that need fuller day-to-day security coverage.',
+            'description' => 'Everything in Manage IT plus Huntress EDR, ScoutDNS, Basic Microsoft 365 or Google Workspace licensing when a productivity platform is selected, light hardening / compliance, workstation backup up to 250 GB, and SaaS backup for the selected tenant.',
             'included_services' => [
                 'Everything in Manage IT',
+                'Huntress EDR',
                 'ScoutDNS filtering',
-                'Huntress Managed EDR',
-                'Huntress ITDR',
-                'Defender for Business or equivalent managed protection coverage when applicable',
-                'Endpoint backup included up to 250 GB per workstation',
-                'SaaS backup for the selected Microsoft 365 or Google Workspace users',
                 'Microsoft 365 Business Basic or Google Workspace Business Starter included when a productivity platform is selected',
-                'Enhanced security monitoring and escalation support',
-                'Monthly security summary',
+                'Light hardening / compliance',
+                'Workstation backup included up to 250 GB per workstation',
+                'Microsoft 365 / Google Workspace SaaS backup',
             ],
             'not_included_unless_selected' => [
-                'Additional endpoint backup storage blocks beyond 250 GB per workstation',
-                'Server management',
-                'Server backup billed by protected storage tier',
-                'Managed firewall / network security',
                 'Productivity upgrades above the included base license',
+                'Server management',
+                'Server backup with 500 GB included',
+                'Server backup storage buckets',
+                'Workstation backup storage buckets',
             ],
         ],
         'COMPLETE' => [
             'display_name' => 'Govern IT',
-            'default_unit_price' => 195.00,
-            'description' => 'Everything in Protect IT plus Huntress SAT, harder endpoint and admin baselines, recovery readiness checks, security posture reporting, and stronger governance review for clients that need a tighter operational and compliance-oriented lane.',
+            'default_unit_price' => 215.00,
+            'description' => 'Everything in Protect IT plus Defender for Business, top-tier Microsoft 365 or Google Workspace licensing when a productivity platform is selected, Huntress ITDR, Huntress SAT, and stronger hardening, compliance, and management.',
             'included_services' => [
                 'Everything in Protect IT',
-                'Huntress SAT or equivalent',
-                'Endpoint hardening baseline',
-                'Device encryption management',
-                'Hardening and privilege review',
-                'Recovery readiness checks',
-                'Monthly security posture / audit report',
-                'Quarterly restore / recovery validation',
-                'Priority incident handling',
-                'Stronger policy / governance baseline',
-                'Administrative best-practice review for Microsoft 365 or Google Workspace',
+                'Defender for Business',
+                'Microsoft 365 Business Premium or Google Workspace Business Plus included when a productivity platform is selected',
+                'Huntress ITDR',
+                'Huntress SAT',
+                'Stronger hardening / compliance / management',
+                'Workstation backup included up to 250 GB per workstation',
+                'Microsoft 365 / Google Workspace SaaS backup',
             ],
             'not_included_unless_selected' => [
-                'Additional endpoint backup storage blocks beyond 250 GB per workstation',
                 'Server management',
-                'Server backup billed by protected storage tier',
-                'Managed firewall / network security',
+                'Server backup with 500 GB included',
+                'Server backup storage buckets',
+                'Workstation backup storage buckets',
             ],
         ],
     ];
@@ -4922,6 +4918,10 @@ function accounting_productivity_included_base_license(string $packageCode, stri
         if ($platform === 'M365') return 'BASIC';
         if ($platform === 'GW') return 'STARTER';
     }
+    if ($packageCode === 'COMPLETE') {
+        if ($platform === 'M365') return 'PREMIUM';
+        if ($platform === 'GW') return 'PLUS';
+    }
     return 'NONE';
 }
 
@@ -4930,12 +4930,12 @@ function accounting_productivity_license_options(string $packageCode, string $pl
     $platform = strtoupper(trim($platform));
 
     if ($platform === 'M365') {
-        if ($packageCode === 'COMPLETE') return ['PREMIUM'];
+        if ($packageCode === 'COMPLETE') return ['NONE'];
         if ($packageCode === 'SECURE') return ['NONE', 'STANDARD', 'PREMIUM'];
         return ['BASIC', 'STANDARD', 'PREMIUM'];
     }
     if ($platform === 'GW') {
-        if ($packageCode === 'COMPLETE') return ['PLUS'];
+        if ($packageCode === 'COMPLETE') return ['NONE'];
         if ($packageCode === 'SECURE') return ['NONE', 'STANDARD', 'PLUS'];
         return ['STARTER', 'STANDARD', 'PLUS'];
     }
@@ -4945,7 +4945,7 @@ function accounting_productivity_license_options(string $packageCode, string $pl
 function accounting_productivity_default_license(string $packageCode, string $platform): string {
     $packageCode = strtoupper(trim($packageCode));
     $platform = strtoupper(trim($platform));
-    if ($packageCode === 'SECURE') {
+    if (in_array($packageCode, ['SECURE', 'COMPLETE'], true)) {
         return 'NONE';
     }
     if ($platform === 'M365') {
@@ -5062,7 +5062,7 @@ function accounting_ensure_productivity_service_items(): array {
         'item_name' => 'DNS Filtering',
         'item_type' => 'SERVICE',
         'description' => 'Managed DNS filtering to block phishing, malware, ransomware, and unsafe websites for covered devices.',
-        'default_unit_price' => 4.00,
+        'default_unit_price' => 2.00,
         'pricing_model' => 'PER_DEVICE',
         'billing_mode' => 'RECURRING',
         'default_billing_cycle' => 'MONTHLY',
@@ -5088,11 +5088,26 @@ function accounting_ensure_productivity_service_items(): array {
     ];
 
     $templates[] = [
-        'item_code' => 'EP-BKUP-X150',
-        'item_name' => 'Endpoint Backup Storage Extension (+150 GB)',
+        'item_code' => 'EP-BKUP-STOR-500',
+        'item_name' => 'Workstation Backup Storage Bucket - 500 GB',
         'item_type' => 'SERVICE',
-        'description' => 'Additional endpoint backup storage block covering each extra 150 GB above the included 250 GB per protected workstation.',
-        'default_unit_price' => 15.00,
+        'description' => 'Additional 500 GB workstation backup storage bucket at $0.05 per GB above the included 250 GB per protected workstation.',
+        'default_unit_price' => 25.00,
+        'pricing_model' => 'FIXED',
+        'billing_mode' => 'RECURRING',
+        'default_billing_cycle' => 'MONTHLY',
+        'term_months' => 12,
+        'revenue_account_id' => $revenueAccountId,
+        'category_id' => $backupCategoryId,
+        'is_taxable' => 0,
+    ];
+
+    $templates[] = [
+        'item_code' => 'EP-BKUP-STOR-1000',
+        'item_name' => 'Workstation Backup Storage Bucket - 1000 GB',
+        'item_type' => 'SERVICE',
+        'description' => 'Additional 1000 GB workstation backup storage bucket at $0.04 per GB above the included 250 GB per protected workstation.',
+        'default_unit_price' => 40.00,
         'pricing_model' => 'FIXED',
         'billing_mode' => 'RECURRING',
         'default_billing_cycle' => 'MONTHLY',
@@ -5136,7 +5151,7 @@ function accounting_ensure_productivity_service_items(): array {
         'item_name' => 'Server Backup - Up to 500 GB',
         'item_type' => 'SERVICE',
         'description' => 'Managed server backup with recovery support for a protected server, including up to 500 GB of compressed protected storage.',
-        'default_unit_price' => 59.00,
+        'default_unit_price' => 45.00,
         'pricing_model' => 'PER_DEVICE',
         'billing_mode' => 'RECURRING',
         'default_billing_cycle' => 'MONTHLY',
@@ -5147,12 +5162,12 @@ function accounting_ensure_productivity_service_items(): array {
     ];
 
     $templates[] = [
-        'item_code' => 'SRVR-BK-1000',
-        'item_name' => 'Server Backup - 501 GB to 1 TB',
+        'item_code' => 'SRVR-BK-STOR-500',
+        'item_name' => 'Server Backup Storage Bucket - 500 GB',
         'item_type' => 'SERVICE',
-        'description' => 'Managed server backup with recovery support for a protected server using 501 GB to 1 TB of compressed protected storage.',
-        'default_unit_price' => 99.00,
-        'pricing_model' => 'PER_DEVICE',
+        'description' => 'Additional 500 GB server backup storage bucket at $0.05 per GB above the included 500 GB per protected server.',
+        'default_unit_price' => 25.00,
+        'pricing_model' => 'FIXED',
         'billing_mode' => 'RECURRING',
         'default_billing_cycle' => 'MONTHLY',
         'term_months' => 12,
@@ -5162,12 +5177,12 @@ function accounting_ensure_productivity_service_items(): array {
     ];
 
     $templates[] = [
-        'item_code' => 'SRVR-BK-1500',
-        'item_name' => 'Server Backup - 1 TB to 1.5 TB',
+        'item_code' => 'SRVR-BK-STOR-1000',
+        'item_name' => 'Server Backup Storage Bucket - 1000 GB',
         'item_type' => 'SERVICE',
-        'description' => 'Managed server backup with recovery support for a protected server using more than 1 TB and up to 1.5 TB of compressed protected storage.',
-        'default_unit_price' => 149.00,
-        'pricing_model' => 'PER_DEVICE',
+        'description' => 'Additional 1000 GB server backup storage bucket at $0.04 per GB above the included 500 GB per protected server.',
+        'default_unit_price' => 40.00,
+        'pricing_model' => 'FIXED',
         'billing_mode' => 'RECURRING',
         'default_billing_cycle' => 'MONTHLY',
         'term_months' => 12,
@@ -5177,12 +5192,12 @@ function accounting_ensure_productivity_service_items(): array {
     ];
 
     $templates[] = [
-        'item_code' => 'SRVR-BK-2000',
-        'item_name' => 'Server Backup - 1.5 TB to 2 TB',
+        'item_code' => 'SRVR-BK-STOR-2000',
+        'item_name' => 'Server Backup Storage Bucket - 2000 GB',
         'item_type' => 'SERVICE',
-        'description' => 'Managed server backup with recovery support for a protected server using more than 1.5 TB and up to 2 TB of compressed protected storage.',
-        'default_unit_price' => 199.00,
-        'pricing_model' => 'PER_DEVICE',
+        'description' => 'Additional 2000 GB server backup storage bucket at $0.03 per GB above the included 500 GB per protected server.',
+        'default_unit_price' => 60.00,
+        'pricing_model' => 'FIXED',
         'billing_mode' => 'RECURRING',
         'default_billing_cycle' => 'MONTHLY',
         'term_months' => 12,
@@ -5199,7 +5214,7 @@ function accounting_ensure_productivity_service_items(): array {
         }
     }
 
-    $legacyCodes = ['DSTR-RCVR', 'SRVR-BKUP', 'SRVR-BK-FILE', 'SRVR-BK-STD', 'SRVR-BK-SQL', 'SRVR-BK-VMSOCKET', 'SRVR-BK-VMHOST'];
+    $legacyCodes = ['EP-BKUP-X150', 'DSTR-RCVR', 'SRVR-BKUP', 'SRVR-BK-FILE', 'SRVR-BK-STD', 'SRVR-BK-SQL', 'SRVR-BK-VMSOCKET', 'SRVR-BK-VMHOST', 'SRVR-BK-1000', 'SRVR-BK-1500', 'SRVR-BK-2000'];
     $legacyCodes = array_values(array_filter($legacyCodes, static fn(string $code): bool => !isset($results[$code])));
     if ($legacyCodes) {
         $placeholders = implode(',', array_fill(0, count($legacyCodes), '?'));
@@ -5258,14 +5273,17 @@ function accounting_not_included_unless_selected(array $package, array $services
     if (in_array('M365-BKUP', $selectedCodes, true) || in_array('GW-BKUP', $selectedCodes, true)) {
         $items = array_values(array_filter($items, static fn(string $label): bool => stripos($label, 'SaaS backup') === false));
     }
-    if (in_array('EP-BKUP-X150', $selectedCodes, true)) {
-        $items = array_values(array_filter($items, static fn(string $label): bool => stripos($label, 'storage blocks') === false));
+    if (in_array('EP-BKUP-STOR-500', $selectedCodes, true) || in_array('EP-BKUP-STOR-1000', $selectedCodes, true)) {
+        $items = array_values(array_filter($items, static fn(string $label): bool => stripos($label, 'storage bucket') === false));
     }
     if (in_array('SRVR-MGMT', $selectedCodes, true)) {
         $items = array_values(array_filter($items, static fn(string $label): bool => stripos($label, 'Server management') === false));
     }
-    if (array_filter($selectedCodes, static fn(string $code): bool => str_starts_with($code, 'SRVR-BK-'))) {
-        $items = array_values(array_filter($items, static fn(string $label): bool => stripos($label, 'Server backup') === false));
+    if (in_array('SRVR-BK-500', $selectedCodes, true)) {
+        $items = array_values(array_filter($items, static fn(string $label): bool => stripos($label, 'Server backup with 500 GB included') === false));
+    }
+    if (array_filter($selectedCodes, static fn(string $code): bool => str_starts_with($code, 'SRVR-BK-STOR-'))) {
+        $items = array_values(array_filter($items, static fn(string $label): bool => stripos($label, 'Server backup storage bucket') === false));
     }
     if (in_array('FW-NETSEC', $selectedCodes, true)) {
         $items = array_values(array_filter($items, static fn(string $label): bool => stripos($label, 'firewall') === false));
@@ -5282,7 +5300,7 @@ function accounting_not_included_unless_selected(array $package, array $services
 function accounting_service_packages(): array {
     accounting_ensure_productivity_service_items();
     $profiles = accounting_service_package_profiles();
-    $allowedAddonCodes = ['DNS-FLTR', 'EP-BKUP', 'EP-BKUP-X150', 'M365-BKUP', 'GW-BKUP', 'SAT-TRAIN', 'SRVR-MGMT', 'SRVR-BK-500', 'SRVR-BK-1000', 'SRVR-BK-1500', 'SRVR-BK-2000', 'FW-NETSEC'];
+    $allowedAddonCodes = ['DNS-FLTR', 'EP-BKUP', 'EP-BKUP-STOR-500', 'EP-BKUP-STOR-1000', 'M365-BKUP', 'GW-BKUP', 'SAT-TRAIN', 'SRVR-MGMT', 'SRVR-BK-500', 'SRVR-BK-STOR-500', 'SRVR-BK-STOR-1000', 'SRVR-BK-STOR-2000'];
     $addonSort = array_flip($allowedAddonCodes);
 
     $catalogAddons = [];
@@ -5318,7 +5336,7 @@ function accounting_service_packages(): array {
                 'bundle_id' => (int)$bundle['bundle_id'],
                 'code' => $bundleCode,
                 'name' => (string)$profile['display_name'],
-                'default_unit_price' => (float)$bundle['default_unit_price'],
+                'default_unit_price' => (float)($profile['default_unit_price'] ?? $bundle['default_unit_price']),
                 'pricing_model' => (string)$bundle['pricing_model'],
                 'description' => (string)$profile['description'],
                 'included_services' => (array)$profile['included_services'],
@@ -5350,7 +5368,7 @@ function accounting_service_packages(): array {
     $defaults = [
         'ESSENTIAL' => 85.00,
         'SECURE' => 145.00,
-        'COMPLETE' => 195.00,
+        'COMPLETE' => 215.00,
     ];
     $packages = [];
     foreach ($profiles as $code => $profile) {
@@ -6069,7 +6087,7 @@ function accounting_render_contract_pdf_bytes(array $contract, array $services):
         if ($code !== '' && str_starts_with($code, 'MSP-') && $baseServiceCode === '') {
             $baseServiceCode = preg_replace('/^MSP-/', '', $code) ?? '';
         }
-        if ($code === 'SRVR-MGMT' || str_starts_with($code, 'SRVR-BK-')) {
+        if (in_array($code, ['SRVR-MGMT', 'SRVR-BK-500'], true)) {
             $coveredServers = max($coveredServers, (float)($svc['quantity'] ?? 0));
         }
         if (empty($svc['is_included']) && $code !== '' && !str_starts_with($code, 'MSP-') && !in_array($code, $productivityCodes, true)) {
@@ -6829,7 +6847,7 @@ function accounting_default_addon_unit_price(string $addonCode, float $packageUn
 function accounting_allowed_addon_codes_for_package(string $packageCode, string $platform): array {
     $packageCode = strtoupper(trim($packageCode));
     $platform = strtoupper(trim($platform));
-    $codes = ['EP-BKUP-X150', 'SRVR-MGMT', 'SRVR-BK-500', 'SRVR-BK-1000', 'SRVR-BK-1500', 'SRVR-BK-2000', 'FW-NETSEC'];
+    $codes = ['EP-BKUP-STOR-500', 'EP-BKUP-STOR-1000', 'SRVR-MGMT', 'SRVR-BK-500', 'SRVR-BK-STOR-500', 'SRVR-BK-STOR-1000', 'SRVR-BK-STOR-2000'];
     if ($packageCode === 'ESSENTIAL') {
         array_unshift($codes, 'DNS-FLTR', 'EP-BKUP');
         if ($platform === 'M365') {
@@ -6837,8 +6855,6 @@ function accounting_allowed_addon_codes_for_package(string $packageCode, string 
         } elseif ($platform === 'GW') {
             $codes[] = 'GW-BKUP';
         }
-    } elseif ($packageCode === 'SECURE') {
-        $codes[] = 'SAT-TRAIN';
     }
     return array_values(array_unique($codes));
 }
@@ -6976,13 +6992,13 @@ function accounting_create_contract_bundle(array $data, int $userId = 0): array 
             if (!in_array($addonCode, $allowedAddonCodes, true)) {
                 continue;
             }
-            if ($addonCode === 'SRVR-MGMT' || str_starts_with($addonCode, 'SRVR-BK-')) {
+            if ($addonCode === 'SRVR-MGMT' || $addonCode === 'SRVR-BK-500') {
                 $defaultAddonQty = max(0, $serverCount);
             } else {
                 $defaultAddonQty = $addonPricingModel === 'PER_DEVICE' ? max(1, $coveredDevices) : ($addonPricingModel === 'PER_USER' ? max(0, $coveredUsers) : max(1, $quantity));
             }
             $addonQty = (float)($data['addon_qty'][$addonItemId] ?? $defaultAddonQty);
-            if ($addonCode === 'SRVR-MGMT' || str_starts_with($addonCode, 'SRVR-BK-')) {
+            if ($addonCode === 'SRVR-MGMT' || $addonCode === 'SRVR-BK-500') {
                 if ($addonQty <= 0) {
                     throw new RuntimeException(($addon['item_name'] ?? 'Server add-on') . ' requires a server quantity greater than zero.');
                 }
@@ -7011,7 +7027,7 @@ function accounting_create_contract_bundle(array $data, int $userId = 0): array 
             $includedItem = $catalogItems[$includedCode] ?? accounting_find_service_item_by_code($includedCode);
             if ($includedItem) {
                 $includedDescription = (string)($includedItem['description'] ?: $includedItem['item_name']);
-                $includedDescription .= ' Included with Protect IT when a productivity platform is selected.';
+                $includedDescription .= ' Included with ' . ($packageCode === 'COMPLETE' ? 'Govern IT' : 'Protect IT') . ' when a productivity platform is selected.';
                 $line->execute([$contractId, (int)($package['bundle_id'] ?? 0) ?: null, (int)$includedItem['item_id'], (string)$includedItem['item_code'], (string)$includedItem['item_name'], $includedDescription, 'PER_USER', max(0, $coveredUsers), 0, 0, 1, $sort]);
                 $sort += 10;
             }

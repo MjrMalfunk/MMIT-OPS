@@ -318,6 +318,10 @@ function includedBaseLicense(packageCode, platform) {
     if (plat === 'M365') return 'BASIC';
     if (plat === 'GW') return 'STARTER';
   }
+  if (pkg === 'COMPLETE') {
+    if (plat === 'M365') return 'PREMIUM';
+    if (plat === 'GW') return 'PLUS';
+  }
   return 'NONE';
 }
 
@@ -325,12 +329,12 @@ function allowedLicenses(packageCode, platform) {
   const pkg = String(packageCode || '').toUpperCase();
   const plat = String(platform || '').toUpperCase();
   if (plat === 'M365') {
-    if (pkg === 'COMPLETE') return ['PREMIUM'];
+    if (pkg === 'COMPLETE') return ['NONE'];
     if (pkg === 'SECURE') return ['NONE', 'STANDARD', 'PREMIUM'];
     return ['BASIC', 'STANDARD', 'PREMIUM'];
   }
   if (plat === 'GW') {
-    if (pkg === 'COMPLETE') return ['PLUS'];
+    if (pkg === 'COMPLETE') return ['NONE'];
     if (pkg === 'SECURE') return ['NONE', 'STANDARD', 'PLUS'];
     return ['STARTER', 'STANDARD', 'PLUS'];
   }
@@ -340,7 +344,7 @@ function allowedLicenses(packageCode, platform) {
 function defaultLicense(packageCode, platform) {
   const plat = String(platform || '').toUpperCase();
   const pkg = String(packageCode || '').toUpperCase();
-  if (pkg === 'SECURE') return 'NONE';
+  if (['SECURE', 'COMPLETE'].includes(pkg)) return 'NONE';
   if (plat === 'M365') return pkg === 'COMPLETE' ? 'PREMIUM' : 'BASIC';
   if (plat === 'GW') return pkg === 'COMPLETE' ? 'PLUS' : 'STARTER';
   return 'NONE';
@@ -349,7 +353,7 @@ function defaultLicense(packageCode, platform) {
 function allowedAddonCodes(packageCode, platform) {
   const pkg = String(packageCode || '').toUpperCase();
   const plat = String(platform || '').toUpperCase();
-  const codes = ['EP-BKUP-X150', 'SRVR-MGMT', 'SRVR-BK-500', 'SRVR-BK-1000', 'SRVR-BK-1500', 'SRVR-BK-2000', 'FW-NETSEC'];
+  const codes = ['EP-BKUP-STOR-500', 'EP-BKUP-STOR-1000', 'SRVR-MGMT', 'SRVR-BK-500', 'SRVR-BK-STOR-500', 'SRVR-BK-STOR-1000', 'SRVR-BK-STOR-2000'];
   if (pkg === 'ESSENTIAL') {
     codes.unshift('DNS-FLTR', 'EP-BKUP');
     if (plat === 'M365') {
@@ -357,8 +361,6 @@ function allowedAddonCodes(packageCode, platform) {
     } else if (plat === 'GW') {
       codes.push('GW-BKUP');
     }
-  } else if (pkg === 'SECURE') {
-    codes.push('SAT-TRAIN');
   }
   return [...new Set(codes)];
 }
@@ -442,9 +444,10 @@ function renderNotIncluded(pkg) {
     if (selectedAddonCodes.includes('DNS-FLTR') && /DNS filtering/i.test(label)) return false;
     if (selectedAddonCodes.includes('EP-BKUP') && /Endpoint backup/i.test(label)) return false;
     if ((selectedAddonCodes.includes('M365-BKUP') || selectedAddonCodes.includes('GW-BKUP')) && /SaaS backup/i.test(label)) return false;
-    if (selectedAddonCodes.includes('EP-BKUP-X150') && /storage blocks/i.test(label)) return false;
+    if ((selectedAddonCodes.includes('EP-BKUP-STOR-500') || selectedAddonCodes.includes('EP-BKUP-STOR-1000')) && /storage bucket/i.test(label)) return false;
     if (selectedAddonCodes.includes('SRVR-MGMT') && /Server management/i.test(label)) return false;
-    if (selectedAddonCodes.some((code) => code.startsWith('SRVR-BK-')) && /Server backup/i.test(label)) return false;
+    if (selectedAddonCodes.includes('SRVR-BK-500') && /Server backup with 500 GB included/i.test(label)) return false;
+    if (selectedAddonCodes.some((code) => code.startsWith('SRVR-BK-STOR-')) && /Server backup storage bucket/i.test(label)) return false;
     if (selectedAddonCodes.includes('FW-NETSEC') && /firewall/i.test(label)) return false;
     return true;
   });
@@ -488,7 +491,7 @@ function renderProductivity() {
     const opt = document.createElement('option');
     opt.value = licenseCode;
     if (licenseCode === 'NONE') {
-      opt.textContent = pkgCode === 'SECURE' ? 'Included with Protect IT' : 'No license selected';
+      opt.textContent = pkgCode === 'COMPLETE' ? 'Included with Govern IT' : (pkgCode === 'SECURE' ? 'Included with Protect IT' : 'No license selected');
     } else {
       const meta = productivityCatalog?.[platform]?.licenses?.[licenseCode];
       if (!meta) return;
@@ -511,9 +514,10 @@ function renderProductivity() {
   const baseMeta = baseCode !== 'NONE' ? (productivityCatalog?.[platform]?.licenses?.[baseCode] || null) : null;
   if (productivityCard) productivityCard.style.display = platform !== 'NONE' ? 'block' : 'none';
 
-  if (selected === 'NONE' && pkgCode === 'SECURE' && baseMeta) {
-    if (productivityDesc) productivityDesc.textContent = `${baseMeta.item_name} is included with Protect IT when you manage a ${platform === 'M365' ? 'Microsoft 365' : 'Google Workspace'} tenant.`;
-    if (productivityGuidance) productivityGuidance.textContent = 'Choose Standard or Premium / Plus only when you want to upgrade above the included base license.';
+  if (selected === 'NONE' && ['SECURE', 'COMPLETE'].includes(pkgCode) && baseMeta) {
+    const includedPackageName = pkgCode === 'COMPLETE' ? 'Govern IT' : 'Protect IT';
+    if (productivityDesc) productivityDesc.textContent = `${baseMeta.item_name} is included with ${includedPackageName} when you manage a ${platform === 'M365' ? 'Microsoft 365' : 'Google Workspace'} tenant.`;
+    if (productivityGuidance) productivityGuidance.textContent = pkgCode === 'COMPLETE' ? 'Govern IT includes the top productivity tier in the base price; no separate productivity upcharge is added.' : 'Choose Standard or Premium / Plus only when you want to upgrade above the included base license.';
     if (productivityPriceInput) {
       productivityPriceInput.value = '0.00';
       productivityPriceInput.dataset.autofill = '1';
@@ -559,7 +563,7 @@ function renderAddons(pkg) {
     wrap.className = 'addon-row';
     const pricingModel = String(addon.pricing_model || 'FIXED').toUpperCase();
     const itemCode = String(addon.item_code || '').toUpperCase();
-    const isServerAddon = itemCode === 'SRVR-MGMT' || itemCode.startsWith('SRVR-BK-');
+    const isServerAddon = itemCode === 'SRVR-MGMT' || itemCode === 'SRVR-BK-500';
     const defaultQty = isServerAddon
       ? Math.max(0, Number(serverCountInput?.value || 0))
       : (pricingModel === 'PER_USER'
@@ -577,16 +581,16 @@ function renderAddons(pkg) {
           ? 'Per Server · package price + $15'
           : itemCode === 'EP-BKUP'
             ? 'Per Workstation · includes up to 250 GB'
-            : itemCode === 'EP-BKUP-X150'
-              ? 'Per 150 GB block over 250 GB'
+            : itemCode === 'EP-BKUP-STOR-500' || itemCode === 'EP-BKUP-STOR-1000'
+              ? (itemCode === 'EP-BKUP-STOR-500' ? '500 GB bucket · $0.05/GB' : '1000 GB bucket · $0.04/GB')
               : itemCode === 'SRVR-BK-500'
                 ? 'Per Server · up to 500 GB included'
-                : itemCode === 'SRVR-BK-1000'
-                  ? 'Per Server · 501 GB to 1 TB'
-                  : itemCode === 'SRVR-BK-1500'
-                    ? 'Per Server · 1 TB to 1.5 TB'
-                    : itemCode === 'SRVR-BK-2000'
-                      ? 'Per Server · 1.5 TB to 2 TB'
+                : itemCode === 'SRVR-BK-STOR-500'
+                  ? '500 GB server storage bucket · $0.05/GB'
+                  : itemCode === 'SRVR-BK-STOR-1000'
+                    ? '1000 GB server storage bucket · $0.04/GB'
+                    : itemCode === 'SRVR-BK-STOR-2000'
+                      ? '2000 GB server storage bucket · $0.03/GB'
                       : (isServerAddon ? 'Per Server' : (itemCode === 'DNS-FLTR' ? 'Per Device' : pricingModel.replace(/_/g, ' ')))}</div>
       </div>
       <input class="addon-qty" type="number" step="1" min="${isServerAddon || pricingModel === 'PER_USER' ? 0 : 1}" name="addon_qty[${addon.item_id}]" value="${defaultQty}">
@@ -607,7 +611,7 @@ function syncAddonQuantities() {
     const pricingModel = String(row.dataset.pricingModel || 'FIXED').toUpperCase();
     const itemCode = String(row.dataset.itemCode || '').toUpperCase();
     if (!qtyField) return;
-    if (itemCode === 'SRVR-MGMT' || itemCode.startsWith('SRVR-BK-')) {
+    if (itemCode === 'SRVR-MGMT' || itemCode === 'SRVR-BK-500') {
       qtyField.value = Math.max(0, Number(serverCountInput?.value || 0));
     } else if (pricingModel === 'PER_USER') {
       qtyField.value = Math.max(0, Number(coveredUsersInput?.value || 0));
