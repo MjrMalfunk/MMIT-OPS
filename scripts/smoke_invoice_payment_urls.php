@@ -85,4 +85,21 @@ smoke_assert(payment_gateway_resolve_requested_method($recurringInvoice, '') ===
 smoke_assert(accounting_invoice_payment_link((string)$largeInvoice['invoice_number'], 'ACH') === $largeOpsUrl . '&method=ACH', 'explicit admin ACH override link still works');
 smoke_assert(accounting_invoice_payment_link((string)$largeInvoice['invoice_number'], 'CARD') === $largeOpsUrl . '&method=CARD', 'explicit admin CARD override link still works');
 smoke_assert(payment_gateway_stripe_checkout_payment_method_types($smallInvoice, payment_gateway_resolve_requested_method($smallInvoice, 'CARD')) === ['card'], 'explicit small invoice CARD override creates card-only checkout');
+
+$achPayload = payment_gateway_stripe_checkout_session_payload($largeInvoice, payment_gateway_resolve_requested_method($largeInvoice, ''));
+smoke_assert(($achPayload['payment_method_types[0]'] ?? '') === 'us_bank_account', 'methodless ACH-default checkout payload requests US bank account first');
+smoke_assert(($achPayload['payment_method_types[1]'] ?? '') === 'card', 'methodless ACH-default checkout payload keeps card fallback second');
+smoke_assert(!array_key_exists('payment_method_types[2]', $achPayload), 'methodless ACH-default checkout payload does not request extra payment methods');
+smoke_assert(($achPayload['wallet_options[link][display]'] ?? '') === 'never', 'methodless ACH-default checkout payload hides Stripe Link');
+smoke_assert(!array_key_exists('automatic_payment_methods[enabled]', $achPayload), 'methodless ACH-default checkout payload avoids Stripe automatic payment methods');
+
+$explicitAchPayload = payment_gateway_stripe_checkout_session_payload($largeInvoice, payment_gateway_resolve_requested_method($largeInvoice, 'ACH'));
+smoke_assert(($explicitAchPayload['payment_method_types[0]'] ?? '') === 'us_bank_account' && ($explicitAchPayload['payment_method_types[1]'] ?? '') === 'card', 'explicit ACH checkout payload requests only bank and card');
+
+$cardPayload = payment_gateway_stripe_checkout_session_payload($smallInvoice, payment_gateway_resolve_requested_method($smallInvoice, 'CARD'));
+smoke_assert(($cardPayload['payment_method_types[0]'] ?? '') === 'card', 'explicit CARD checkout payload requests card only');
+smoke_assert(!array_key_exists('payment_method_types[1]', $cardPayload), 'explicit CARD checkout payload does not request bank or alternate methods');
+smoke_assert(($cardPayload['wallet_options[link][display]'] ?? '') === 'never', 'explicit CARD checkout payload hides Stripe Link');
+smoke_assert(!array_key_exists('automatic_payment_methods[enabled]', $cardPayload), 'explicit CARD checkout payload avoids Stripe automatic payment methods');
+
 smoke_assert(payment_gateway_resolve_requested_method($smallInvoice, 'invalid') === 'ACH', 'invalid small invoice method falls back to ACH-first');

@@ -268,11 +268,7 @@ function payment_gateway_curl_form(string $method, string $url, array $payload, 
     return ['status' => $status, 'body' => $body, 'json' => is_array($decoded) ? $decoded : null];
 }
 
-function payment_gateway_stripe_checkout(array $invoice, string $method): array {
-    $secret = trim((string)payment_gateway_setting('STRIPE_SECRET_KEY', ''));
-    if ($secret === '') {
-        throw new RuntimeException('Stripe is not configured yet.');
-    }
+function payment_gateway_stripe_checkout_session_payload(array $invoice, string $method): array {
     $method = strtoupper(trim($method));
     $amountCents = (int)round(((float)$invoice['balance_due']) * 100);
     if ($amountCents <= 0) {
@@ -302,7 +298,16 @@ function payment_gateway_stripe_checkout(array $invoice, string $method): array 
         'line_items[0][quantity]' => '1',
         'submit_type' => 'pay',
         'invoice_creation[enabled]' => 'false',
+        'wallet_options[link][display]' => 'never',
     ];
+
+    // OPS invoice Checkout must not use Stripe Dynamic/automatic payment methods:
+    // explicitly sending payment_method_types prevents account-level Klarna, Cash App
+    // Pay, Amazon Pay, and other BNPL/consumer wallet methods from joining this flow.
+    // Link is hidden per session above; if Apple Pay/Google Pay card wallet buttons or
+    // account-level Link still appear, turn them off in Stripe Dashboard > Settings >
+    // Checkout / Payment methods for the staging account because Stripe may surface
+    // those as card-wallet accelerators outside the payment_method_types list.
     foreach ($paymentMethods as $i => $pm) {
         $payload['payment_method_types[' . $i . ']'] = $pm;
     }
@@ -310,6 +315,16 @@ function payment_gateway_stripe_checkout(array $invoice, string $method): array 
         $payload['payment_method_options[us_bank_account][verification_method]'] = 'automatic';
     }
 
+    return $payload;
+}
+
+function payment_gateway_stripe_checkout(array $invoice, string $method): array {
+    $secret = trim((string)payment_gateway_setting('STRIPE_SECRET_KEY', ''));
+    if ($secret === '') {
+        throw new RuntimeException('Stripe is not configured yet.');
+    }
+
+    $payload = payment_gateway_stripe_checkout_session_payload($invoice, $method);
     $resp = payment_gateway_curl_form('POST', 'https://api.stripe.com/v1/checkout/sessions', $payload, [
         'Authorization: Bearer ' . $secret,
     ]);

@@ -47,6 +47,23 @@ smoke_assert(payment_gateway_stripe_payment_method_label(['payment_method_detail
 
 smoke_assert(payment_gateway_stripe_checkout_payment_method_types(['balance_due' => 1500], 'CARD') === ['card'], 'card checkout keeps card-only Stripe method list');
 smoke_assert(payment_gateway_stripe_checkout_payment_method_types(['balance_due' => 1500], 'ACH') === ['us_bank_account', 'card'], 'staging ACH checkout offers bank first with card fallback');
+$checkoutSmokeInvoice = [
+    'invoice_id' => 77,
+    'client_id' => 88,
+    'invoice_number' => 'INV-SMOKE',
+    'balance_due' => 1500.00,
+    'client_email' => 'ap@example.test',
+    'dba_name' => '',
+    'legal_name' => 'Smoke Client LLC',
+];
+$achCheckoutPayload = payment_gateway_stripe_checkout_session_payload($checkoutSmokeInvoice, 'ACH');
+smoke_assert(($achCheckoutPayload['payment_method_types[0]'] ?? '') === 'us_bank_account' && ($achCheckoutPayload['payment_method_types[1]'] ?? '') === 'card', 'ACH checkout payload requests only bank and card');
+smoke_assert(($achCheckoutPayload['wallet_options[link][display]'] ?? '') === 'never', 'ACH checkout payload disables Link wallet display');
+smoke_assert(!array_key_exists('automatic_payment_methods[enabled]', $achCheckoutPayload), 'ACH checkout payload does not enable automatic payment methods');
+$cardCheckoutPayload = payment_gateway_stripe_checkout_session_payload($checkoutSmokeInvoice, 'CARD');
+smoke_assert(($cardCheckoutPayload['payment_method_types[0]'] ?? '') === 'card' && !array_key_exists('payment_method_types[1]', $cardCheckoutPayload), 'CARD checkout payload requests card only');
+smoke_assert(($cardCheckoutPayload['wallet_options[link][display]'] ?? '') === 'never', 'CARD checkout payload disables Link wallet display');
+smoke_assert(!array_key_exists('automatic_payment_methods[enabled]', $cardCheckoutPayload), 'CARD checkout payload does not enable automatic payment methods');
 smoke_assert(accounting_invoice_payment_link('INV-95') === BASE_URL . '/payments/pay.php?invoice=INV-95', 'default payment link omits method so checkout resolves invoice default at pay time');
 smoke_assert(accounting_invoice_payment_link('INV-1000') === BASE_URL . '/payments/pay.php?invoice=INV-1000', 'large invoice payment link does not force CARD in the URL');
 smoke_assert(accounting_invoice_payment_link('INV-1000', 'CARD') === BASE_URL . '/payments/pay.php?invoice=INV-1000&method=CARD', 'explicit card payment link preserves intentional card override');
