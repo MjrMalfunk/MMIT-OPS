@@ -149,8 +149,8 @@ page_header('Secure invoice payment', '', false);
     <div class="public-pay-grid">
       <main class="public-pay-main">
         <section>
-          <h1 class="public-pay-title">Secure invoice payment</h1>
-          <p class="public-pay-lede">Review your Midwest Managed IT invoice details below, then continue to Stripe Checkout to complete payment securely.</p>
+          <h1 class="public-pay-title"><?= $isPaid ? 'Invoice payment received' : 'Secure invoice payment' ?></h1>
+          <p class="public-pay-lede"><?= $isPaid ? 'Thank you. Your payment has been received and applied to this invoice.' : 'Review your Midwest Managed IT invoice details below, then continue to Stripe Checkout to complete payment securely.' ?></p>
         </section>
 
         <?php if ($invoice): ?>
@@ -205,8 +205,8 @@ page_header('Secure invoice payment', '', false);
         <section class="public-pay-action-card" aria-label="Payment action">
           <?php if ($isPaid): ?>
             <span class="public-pay-badge">Paid in full</span>
-            <h2>Thank you — this invoice is paid.</h2>
-            <p>We have recorded payment for this invoice. No additional payment action is needed.</p>
+            <h2>Payment received</h2>
+            <p>Thank you. Your payment has been received and applied to this invoice. No additional payment action is needed.</p>
             <?php if ($invoicePdfUrl !== ''): ?>
               <a href="<?= accounting_h($invoicePdfUrl) ?>" target="_blank" rel="noopener" class="btn btn-secondary">Download invoice PDF</a>
             <?php endif; ?>
@@ -272,7 +272,7 @@ page_header('Secure invoice payment', '', false);
           <ul>
             <li>For ACH, payment may show pending until bank confirmation.</li>
             <li>For card, payment normally confirms immediately.</li>
-            <li>Receipt and payment status will update after Stripe confirms payment.</li>
+            <li>Your receipt and invoice confirmation will update after Stripe confirms payment.</li>
           </ul>
         </section>
       </aside>
