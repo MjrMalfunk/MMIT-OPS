@@ -6,6 +6,7 @@ require_once __DIR__ . '/../inc/accounting.php';
 require_login();
 accounting_require_ready();
 csrf_check();
+accounting_ensure_productivity_service_items();
 
 if (!accounting_client_service_ready()) {
     page_header('Client Services', 'clients');

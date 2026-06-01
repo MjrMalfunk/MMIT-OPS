@@ -5,6 +5,7 @@ require_once __DIR__ . '/../inc/accounting.php';
 require_login();
 accounting_require_ready();
 csrf_check();
+accounting_ensure_productivity_service_items();
 
 $message = null;
 $errors = [];
