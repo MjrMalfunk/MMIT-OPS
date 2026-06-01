@@ -80,31 +80,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($invoice['invoice_id'] ?? 0) > 0 &
 page_header('Secure invoice payment', '', false);
 ?>
 <style>
+.page-wrap{background:radial-gradient(circle at top left,rgba(37,99,235,.20),transparent 34%),linear-gradient(135deg,#020617 0%,#0f172a 52%,#111827 100%);min-height:100vh;}
 .page-title{display:none;}
 .glass{max-width:1120px;margin:0 auto;padding:0;background:transparent;border:0;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;}
 .public-pay-shell{max-width:1040px;margin:0 auto;display:grid;gap:18px;}
-.public-pay-hero{padding:28px;border-radius:28px;background:linear-gradient(135deg,rgba(15,23,42,.94),rgba(15,23,42,.78));border:1px solid rgba(148,163,184,.22);box-shadow:0 24px 70px rgba(0,0,0,.34);overflow:hidden;position:relative;}
+.public-pay-hero{padding:28px;border-radius:28px;background:linear-gradient(135deg,rgba(15,23,42,.96),rgba(15,23,42,.80));border:1px solid rgba(148,163,184,.24);box-shadow:0 24px 70px rgba(0,0,0,.34);overflow:hidden;position:relative;}
+.public-pay-hero::before{content:'';position:absolute;inset:0;background:linear-gradient(90deg,rgba(96,165,250,.14),transparent 34%);pointer-events:none;}
 .public-pay-hero::after{content:'';position:absolute;right:-100px;top:-120px;width:320px;height:320px;border-radius:999px;background:radial-gradient(circle,rgba(47,108,255,.22),transparent 68%);pointer-events:none;}
 .public-pay-brand{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:28px;position:relative;z-index:1;}
+.public-pay-brand-mark{display:inline-flex;align-items:center;padding:10px 12px;border:1px solid rgba(148,163,184,.20);border-radius:18px;background:rgba(255,255,255,.05);box-shadow:inset 0 1px 0 rgba(255,255,255,.06);}
 .public-pay-brand img{height:42px;width:auto;max-width:260px;}
 .public-pay-secure-pill,.public-pay-badge,.public-pay-status-pill{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:8px 12px;border:1px solid rgba(148,163,184,.24);background:rgba(255,255,255,.06);color:rgba(233,238,247,.9);font-size:13px;font-weight:700;white-space:nowrap;}
 .public-pay-badge{border-color:rgba(52,211,153,.32);background:rgba(16,185,129,.12);color:#d1fae5;}
 .public-pay-status-pill.paid{border-color:rgba(52,211,153,.36);background:rgba(16,185,129,.14);color:#d1fae5;}
 .public-pay-status-pill.open{border-color:rgba(96,165,250,.34);background:rgba(59,130,246,.12);color:#dbeafe;}
 .public-pay-grid{display:grid;grid-template-columns:minmax(0,1.35fr) 360px;gap:18px;align-items:start;position:relative;z-index:1;}
+.public-pay-main,.public-pay-aside{display:grid;gap:18px;min-width:0;}
 .public-pay-title{margin:0 0 10px;font-size:clamp(30px,5vw,46px);line-height:1.04;letter-spacing:-.04em;}
 .public-pay-lede{margin:0;color:rgba(233,238,247,.78);font-size:16px;line-height:1.65;max-width:640px;}
 .public-pay-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:24px;}
 .public-pay-field,.public-pay-panel{border:1px solid rgba(148,163,184,.18);border-radius:18px;background:rgba(2,6,23,.32);padding:14px;}
+.public-pay-field{box-shadow:inset 0 1px 0 rgba(255,255,255,.04);}
 .public-pay-field.full{grid-column:1/-1;}
 .public-pay-label{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:rgba(203,213,225,.66);font-weight:800;margin-bottom:7px;}
 .public-pay-value{font-size:16px;font-weight:800;color:#f8fafc;overflow-wrap:anywhere;}
-.public-pay-amount{font-size:30px;letter-spacing:-.03em;}
+.public-pay-amount{font-size:30px;letter-spacing:-.03em;color:#bfdbfe;}
 .public-pay-panel{padding:18px;display:grid;gap:12px;}
 .public-pay-panel h2{margin:0;font-size:18px;letter-spacing:-.02em;}
 .public-pay-panel p{margin:0;color:rgba(233,238,247,.78);line-height:1.6;}
 .public-pay-panel ul{margin:0;padding-left:20px;color:rgba(233,238,247,.78);line-height:1.58;display:grid;gap:8px;}
-.public-pay-action-card{border-radius:24px;background:linear-gradient(145deg,rgba(15,23,42,.92),rgba(2,6,23,.76));border:1px solid rgba(148,163,184,.24);color:#e5edf8;box-shadow:0 22px 54px rgba(2,6,23,.42),0 0 42px rgba(37,99,235,.10);padding:20px;display:grid;gap:14px;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);}
+.public-pay-action-card{border-radius:24px;background:linear-gradient(145deg,rgba(15,23,42,.94),rgba(2,6,23,.78));border:1px solid rgba(148,163,184,.24);color:#e5edf8;box-shadow:0 22px 54px rgba(2,6,23,.42),0 0 42px rgba(37,99,235,.10);padding:20px;display:grid;gap:14px;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);position:relative;overflow:hidden;}
+.public-pay-action-card::before{content:'';position:absolute;inset:0 0 auto;height:4px;background:linear-gradient(90deg,#2563eb,#38bdf8,#22c55e);}
 .public-pay-action-card h2{margin:0;font-size:20px;color:#f8fafc;}
 .public-pay-action-card p{margin:0;color:#cbd5e1;line-height:1.55;}
 .public-pay-action-card .public-pay-badge{background:rgba(16,185,129,.16);border-color:rgba(74,222,128,.48);color:#bbf7d0;width:max-content;max-width:100%;box-shadow:0 0 0 1px rgba(22,163,74,.08) inset;}
@@ -112,17 +118,23 @@ page_header('Secure invoice payment', '', false);
 .public-pay-action-card .gateway-row strong{color:#e5edf8;}
 .public-pay-action-card .btn-primary{background:#1d4ed8;color:#fff;border-color:#60a5fa;box-shadow:0 14px 30px rgba(29,78,216,.36),0 0 0 1px rgba(191,219,254,.12) inset;}
 .public-pay-action-card .btn-secondary{background:rgba(15,23,42,.72);border-color:rgba(148,163,184,.30);color:#dbeafe;box-shadow:inset 0 1px 0 rgba(255,255,255,.05);}
+.public-pay-actions,.public-pay-provider-options{display:grid;gap:12px;}
+.public-pay-provider-options{gap:10px;}
 .gateway-row{display:grid;gap:8px;padding:12px;border:1px solid rgba(255,255,255,.08);border-radius:14px;background:rgba(255,255,255,.03);}
+.gateway-row-choice{cursor:pointer;}
+.gateway-row-choice-content{display:flex;gap:10px;align-items:flex-start;}
+.gateway-note{display:block;opacity:.78;font-size:13px;line-height:1.45;margin-top:4px;}
 .public-pay-action-card .btn{justify-content:center;text-decoration:none;}
 .public-pay-action-card .btn-primary:hover{filter:brightness(1.08);}
 .public-pay-action-card .btn-secondary:hover{background:rgba(30,41,59,.86);border-color:rgba(191,219,254,.40);color:#eff6ff;}
 .public-pay-provider-label{display:block;margin-bottom:8px;color:#cbd5e1;font-weight:700;}
 .public-pay-help{padding:18px;text-align:center;color:rgba(233,238,247,.78);line-height:1.6;}
 .public-pay-help strong{color:#f8fafc;}
+.public-pay-help a{color:#bfdbfe;font-weight:700;}
 .public-pay-alert{border-radius:16px;padding:14px 16px;line-height:1.55;}
 .public-pay-alert.warning{border:1px solid rgba(245,158,11,.28);background:rgba(245,158,11,.10);color:#ffedd5;}
 @media (max-width:900px){.public-pay-grid{grid-template-columns:1fr;}.public-pay-brand{align-items:flex-start;flex-direction:column;}.public-pay-action-card{order:-1;}.public-pay-summary{grid-template-columns:1fr;}.public-pay-amount{font-size:26px;}}
-@media (max-width:560px){.page-wrap{padding:12px;}.public-pay-hero{padding:20px;border-radius:22px;}.public-pay-brand img{height:34px;max-width:220px;}.public-pay-secure-pill,.public-pay-badge,.public-pay-status-pill{white-space:normal;}.public-pay-action-card{padding:16px;border-radius:20px;}}
+@media (max-width:560px){.page-wrap{padding:12px;}.public-pay-hero{padding:20px;border-radius:22px;}.public-pay-brand img{height:34px;max-width:220px;}.public-pay-secure-pill,.public-pay-badge,.public-pay-status-pill{white-space:normal;}.public-pay-action-card{padding:16px;border-radius:20px;}.public-pay-brand-mark{padding:8px 10px;}}
 </style>
 <div class="public-pay-shell">
   <?php if ($errors): ?><div class="flash-error public-pay-alert"><?php foreach ($errors as $error): ?><div><?= accounting_h((string)$error) ?></div><?php endforeach; ?></div><?php endif; ?>
@@ -130,12 +142,12 @@ page_header('Secure invoice payment', '', false);
 
   <div class="public-pay-hero">
     <div class="public-pay-brand">
-      <img src="<?= accounting_h(BASE_URL) ?>/assets/brand/mmit-logo-horizontal-light.svg" alt="Midwest Managed IT">
+      <span class="public-pay-brand-mark"><img src="<?= accounting_h(BASE_URL) ?>/assets/brand/mmit-logo-horizontal-light.svg" alt="Midwest Managed IT"></span>
       <div class="public-pay-secure-pill" aria-label="Secure payment page">🔒 Secure payment</div>
     </div>
 
     <div class="public-pay-grid">
-      <main style="min-width:0;display:grid;gap:18px;">
+      <main class="public-pay-main">
         <section>
           <h1 class="public-pay-title">Secure invoice payment</h1>
           <p class="public-pay-lede">Review your Midwest Managed IT invoice details below, then continue to Stripe Checkout to complete payment securely.</p>
@@ -189,7 +201,7 @@ page_header('Secure invoice payment', '', false);
         </section>
       </main>
 
-      <aside style="display:grid;gap:18px;min-width:0;">
+      <aside class="public-pay-aside">
         <section class="public-pay-action-card" aria-label="Payment action">
           <?php if ($isPaid): ?>
             <span class="public-pay-badge">Paid in full</span>
@@ -219,20 +231,20 @@ page_header('Secure invoice payment', '', false);
             <?php elseif ($availableGateways === []): ?>
               <p>Secure checkout is temporarily unavailable. Please try again later or contact billing for help.</p>
             <?php else: ?>
-              <form method="post" class="public-pay-actions" style="display:grid;gap:12px;">
+              <form method="post" class="public-pay-actions">
                 <input type="hidden" name="invoice" value="<?= accounting_h($invoiceNumber) ?>">
                 <input type="hidden" name="method" value="<?= accounting_h($method) ?>">
                 <?php if (count($availableGateways) > 1): ?>
                   <div>
                     <label class="public-pay-provider-label">Choose checkout provider</label>
-                    <div style="display:grid;gap:10px;">
+                    <div class="public-pay-provider-options">
                       <?php foreach ($availableGateways as $gateway): ?>
-                        <label class="gateway-row" style="cursor:pointer;">
-                          <span style="display:flex;gap:10px;align-items:flex-start;">
+                        <label class="gateway-row gateway-row-choice">
+                          <span class="gateway-row-choice-content">
                             <input type="radio" name="gateway" value="<?= payment_gateway_h((string)$gateway['code']) ?>" <?= $selectedGateway === $gateway['code'] ? 'checked' : '' ?>>
                             <span>
                               <strong><?= payment_gateway_h((string)$gateway['label']) ?></strong>
-                              <span style="display:block;opacity:.78;font-size:13px;line-height:1.45;margin-top:4px;"><?= payment_gateway_h((string)$gateway['note']) ?></span>
+                              <span class="gateway-note"><?= payment_gateway_h((string)$gateway['note']) ?></span>
                             </span>
                           </span>
                         </label>
@@ -243,7 +255,7 @@ page_header('Secure invoice payment', '', false);
                   <input type="hidden" name="gateway" value="<?= payment_gateway_h((string)$selectedGateway) ?>">
                   <div class="gateway-row">
                     <strong><?= payment_gateway_h($method === 'ACH' ? 'Stripe Checkout' : (string)($availableGateways[$selectedGateway]['label'] ?? $selectedGateway)) ?></strong>
-                    <span style="opacity:.78;font-size:13px;line-height:1.45;">Payment is completed securely through Stripe. Midwest Managed IT does not store your card, bank, or login credentials.</span>
+                    <span class="gateway-note">Payment is completed securely through Stripe. Midwest Managed IT does not store your card, bank, or login credentials.</span>
                   </div>
                 <?php endif; ?>
                 <button type="submit" class="btn btn-primary">Continue to secure checkout</button>
