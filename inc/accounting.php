@@ -4020,7 +4020,8 @@ function accounting_create_client_service_assignment(array $data, int $userId = 
     $nextBillDate = trim((string)($data['next_bill_date'] ?? ''));
     $endDate = trim((string)($data['end_date'] ?? ''));
     $revenueAccountId = (int)($data['revenue_account_id'] ?? 0);
-    $status = strtoupper(trim((string)($data['status'] ?? 'DRAFT')));
+    $status = strtoupper(trim((string)($data['status'] ?? '')));
+    if ($status === '') $status = 'ACTIVE';
     $autoRenew = !empty($data['auto_renew']) ? 1 : 0;
     $taxable = !empty($data['taxable']) ? 1 : 0;
     $notes = trim((string)($data['notes'] ?? ''));

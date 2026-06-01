@@ -106,6 +106,7 @@ page_header('Client Services', 'clients');
 
     <form method="post" class="portal-form">
       <?= csrf_field() ?>
+      <input type="hidden" name="status" value="ACTIVE">
       <div><label>Client</label><select name="client_id" id="svc-client"><option value="0">Select client</option><?php foreach ($clients as $client): ?><option value="<?= (int)$client['client_id'] ?>" <?= ((int)$form['client_id'] === (int)$client['client_id']) ? 'selected' : '' ?>><?= accounting_h((string)($client['dba_name'] ?: $client['legal_name'])) ?></option><?php endforeach; ?></select></div>
       <div class="split-2">
         <div><label>Contract</label><select name="contract_id" id="svc-contract"><option value="0">No contract</option></select></div>
