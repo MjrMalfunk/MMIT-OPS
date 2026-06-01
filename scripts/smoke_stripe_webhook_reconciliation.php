@@ -92,4 +92,51 @@ smoke_assert(payment_gateway_stripe_charge_net_amount(['payment_method_details' 
 smoke_assert(payment_gateway_stripe_charge_fee_amount(['payment_method_details' => ['type' => 'us_bank_account'], 'balance_transaction' => ['fee' => 500, 'net' => 99500]]) === 5.00, 'ACH balance transaction fee is extracted');
 smoke_assert(payment_gateway_stripe_charge_net_amount(['payment_method_details' => ['type' => 'us_bank_account'], 'balance_transaction' => ['fee' => 500, 'net' => 99500]]) === 995.00, 'ACH balance transaction net deposit is extracted');
 smoke_assert(payment_gateway_stripe_charge_has_reconciliation_details(['payment_method_details' => ['type' => 'card'], 'balance_transaction' => ['fee' => 320, 'net' => 9680]]) === true, 'expanded charge with method details and balance transaction is reconciliation-ready');
+$existingCardWithoutFees = [
+    'payment_id' => 1001,
+    'payment_method' => 'CARD',
+    'processor_name' => 'STRIPE',
+    'processor_txn_id' => 'cs_without_fee_yet',
+    'processor_payment_intent_id' => 'pi_card_late_fee',
+    'reference_number' => 'cs_without_fee_yet',
+    'gross_amount' => 100.00,
+    'fee_amount' => 0.00,
+    'net_amount' => 100.00,
+];
+$cardChargeWithBalance = [
+    'id' => 'ch_card_late_fee',
+    'payment_intent' => 'pi_card_late_fee',
+    'amount' => 10000,
+    'created' => 1710000000,
+    'receipt_url' => 'https://pay.stripe.com/receipts/card-late-fee',
+    'payment_method_details' => ['type' => 'card', 'card' => ['brand' => 'visa', 'last4' => '4242']],
+    'balance_transaction' => ['id' => 'txn_card_late_fee', 'fee' => 320, 'net' => 9680],
+];
+$cardEnrichment = payment_gateway_stripe_existing_payment_enrichment_fields($existingCardWithoutFees, $cardChargeWithBalance, [], 'cs_card_late_fee');
+smoke_assert(($cardEnrichment['fee_amount'] ?? null) === 3.20 && ($cardEnrichment['net_amount'] ?? null) === 96.80, 'card payment posted before balance transaction is enriched with actual Stripe fee/net later');
+smoke_assert(($cardEnrichment['processor_charge_id'] ?? '') === 'ch_card_late_fee' && ($cardEnrichment['processor_balance_transaction_id'] ?? '') === 'txn_card_late_fee', 'card enrichment stores charge and balance transaction ids on the existing payment row');
+smoke_assert(($cardEnrichment['reference_number'] ?? '') === 'ch_card_late_fee', 'card enrichment updates a provisional checkout-session reference to the Stripe charge reference');
+smoke_assert(($cardEnrichment['processor_payment_method_label'] ?? '') === 'VISA •••• 4242' && ($cardEnrichment['payment_method'] ?? '') !== 'ACH', 'card enrichment preserves actual card method details from charge.payment_method_details');
+$cardAfterEnrichment = array_merge($existingCardWithoutFees, $cardEnrichment);
+$secondCardEnrichment = payment_gateway_stripe_existing_payment_enrichment_fields($cardAfterEnrichment, $cardChargeWithBalance, [], 'cs_card_late_fee');
+smoke_assert(!array_key_exists('fee_amount', $secondCardEnrichment) && !array_key_exists('net_amount', $secondCardEnrichment) && !array_key_exists('processor_charge_id', $secondCardEnrichment) && !array_key_exists('reference_number', $secondCardEnrichment), 'replayed card enrichment is idempotent and does not require a duplicate payment row');
+$achExisting = [
+    'payment_id' => 1002,
+    'payment_method' => 'ACH',
+    'processor_name' => 'STRIPE',
+    'processor_txn_id' => 'ch_ach_existing',
+    'gross_amount' => 1000.00,
+    'fee_amount' => 0.00,
+    'net_amount' => 1000.00,
+];
+$achChargeWithBalance = [
+    'id' => 'ch_ach_existing',
+    'payment_intent' => 'pi_ach_existing',
+    'amount' => 100000,
+    'created' => 1710000100,
+    'payment_method_details' => ['type' => 'us_bank_account', 'us_bank_account' => ['bank_name' => 'STRIPE TEST BANK', 'account_type' => 'checking', 'last4' => '6789']],
+    'balance_transaction' => ['id' => 'txn_ach_existing', 'fee' => 500, 'net' => 99500],
+];
+$achEnrichment = payment_gateway_stripe_existing_payment_enrichment_fields($achExisting, $achChargeWithBalance);
+smoke_assert(($achEnrichment['fee_amount'] ?? null) === 5.00 && ($achEnrichment['net_amount'] ?? null) === 995.00 && ($achEnrichment['payment_method'] ?? 'ACH') !== 'CARD', 'ACH balance transaction fee/net enrichment remains ACH/BANK');
 smoke_assert(function_exists('payment_gateway_invoice_already_recorded'), 'duplicate webhook idempotency matcher is available for replayed processor ids');
