@@ -44,3 +44,99 @@ smoke_assert(payment_gateway_stripe_metadata_invoice_id(['metadata' => ['local_i
 smoke_assert(payment_gateway_stripe_metadata_invoice_id(['metadata' => [], 'payment_intent' => ['metadata' => ['invoice_id' => '789']]]) === 789, 'nested PaymentIntent invoice metadata is extracted');
 smoke_assert(payment_gateway_stripe_payment_method_label(['payment_method_details' => ['card' => ['brand' => 'visa', 'last4' => '4242'], 'type' => 'card']]) === 'VISA •••• 4242', 'card payment method label includes brand and last4');
 
+
+smoke_assert(payment_gateway_stripe_checkout_payment_method_types(['balance_due' => 1500], 'CARD') === ['card'], 'card checkout keeps card-only Stripe method list');
+smoke_assert(payment_gateway_stripe_checkout_payment_method_types(['balance_due' => 1500], 'ACH') === ['us_bank_account', 'card'], 'staging ACH checkout offers bank first with card fallback');
+$checkoutSmokeInvoice = [
+    'invoice_id' => 77,
+    'client_id' => 88,
+    'invoice_number' => 'INV-SMOKE',
+    'balance_due' => 1500.00,
+    'client_email' => 'ap@example.test',
+    'dba_name' => '',
+    'legal_name' => 'Smoke Client LLC',
+];
+$achCheckoutPayload = payment_gateway_stripe_checkout_session_payload($checkoutSmokeInvoice, 'ACH');
+smoke_assert(($achCheckoutPayload['payment_method_types[0]'] ?? '') === 'us_bank_account' && ($achCheckoutPayload['payment_method_types[1]'] ?? '') === 'card', 'ACH checkout payload requests only bank and card');
+smoke_assert(($achCheckoutPayload['wallet_options[link][display]'] ?? '') === 'never', 'ACH checkout payload disables Link wallet display');
+smoke_assert(!array_key_exists('automatic_payment_methods[enabled]', $achCheckoutPayload), 'ACH checkout payload does not enable automatic payment methods');
+$cardCheckoutPayload = payment_gateway_stripe_checkout_session_payload($checkoutSmokeInvoice, 'CARD');
+smoke_assert(($cardCheckoutPayload['payment_method_types[0]'] ?? '') === 'card' && !array_key_exists('payment_method_types[1]', $cardCheckoutPayload), 'CARD checkout payload requests card only');
+smoke_assert(($cardCheckoutPayload['wallet_options[link][display]'] ?? '') === 'never', 'CARD checkout payload disables Link wallet display');
+smoke_assert(!array_key_exists('automatic_payment_methods[enabled]', $cardCheckoutPayload), 'CARD checkout payload does not enable automatic payment methods');
+smoke_assert(accounting_invoice_payment_link('INV-95') === BASE_URL . '/payments/pay.php?invoice=INV-95', 'default payment link omits method so checkout resolves invoice default at pay time');
+smoke_assert(accounting_invoice_payment_link('INV-1000') === BASE_URL . '/payments/pay.php?invoice=INV-1000', 'large invoice payment link does not force CARD in the URL');
+smoke_assert(accounting_invoice_payment_link('INV-1000', 'CARD') === BASE_URL . '/payments/pay.php?invoice=INV-1000&method=CARD', 'explicit card payment link preserves intentional card override');
+smoke_assert(accounting_invoice_payment_link('INV-1000', 'ACH') === BASE_URL . '/payments/pay.php?invoice=INV-1000&method=ACH', 'explicit ACH payment link preserves intentional ACH override');
+smoke_assert(accounting_invoice_payment_link('INV-1000', '') === BASE_URL . '/payments/pay.php?invoice=INV-1000', 'blank payment link method omits method parameter');
+smoke_assert(payment_gateway_resolve_requested_method(['balance_due' => 95, 'source_system' => 'PORTAL'], '') === 'ACH', 'small invoice blank method resolves to ACH-first');
+smoke_assert(payment_gateway_resolve_requested_method(['balance_due' => 1000, 'source_system' => 'PORTAL'], '') === 'ACH', 'large invoice blank method resolves to ACH-first');
+smoke_assert(payment_gateway_resolve_requested_method(['balance_due' => 95, 'source_system' => 'PORTAL'], 'invalid') === 'ACH', 'invalid payment method falls back to ACH invoice default');
+smoke_assert(payment_gateway_resolve_requested_method(['balance_due' => 1000, 'source_system' => 'PORTAL'], 'card') === 'CARD', 'explicit lower-case card request still resolves to card override');
+smoke_assert(payment_gateway_invoice_prefers_ach(['balance_due' => 2500, 'source_system' => 'PORTAL']) === true, 'large staging invoice prefers ACH');
+smoke_assert(payment_gateway_invoice_prefers_ach(['balance_due' => 95, 'source_system' => 'PORTAL']) === true, 'small staging invoice prefers ACH');
+smoke_assert(payment_gateway_invoice_prefers_ach(['balance_due' => 100, 'source_system' => 'RECURRING_BATCH']) === true, 'recurring managed service invoice prefers ACH');
+smoke_assert(payment_gateway_stripe_pending_status_from_session(['status' => 'complete', 'payment_status' => 'paid']) === 'POSTED', 'card success state posts immediately');
+smoke_assert(payment_gateway_stripe_pending_status_from_session(['status' => 'complete', 'payment_status' => 'unpaid', 'payment_intent' => ['status' => 'processing']]) === 'PENDING', 'ACH processing state remains pending');
+smoke_assert(payment_gateway_stripe_charge_fee_amount(['balance_transaction' => ['fee' => 175, 'net' => 9825]]) === 1.75, 'Stripe balance transaction fee is extracted');
+smoke_assert(payment_gateway_stripe_charge_net_amount(['balance_transaction' => ['fee' => 175, 'net' => 9825]]) === 98.25, 'Stripe balance transaction net deposit is extracted');
+smoke_assert(payment_gateway_stripe_payment_method_from_charge(['payment_method_details' => ['type' => 'us_bank_account']]) === 'ACH', 'ACH/bank charge records ACH payment method');
+smoke_assert(payment_gateway_stripe_payment_method_from_charge(['payment_method_details' => ['type' => 'card', 'card' => ['brand' => 'mastercard', 'last4' => '4444']]]) === 'CARD', 'card charge records CARD payment method');
+smoke_assert(payment_gateway_stripe_payment_method_from_details(payment_gateway_stripe_payment_method_details([], ['latest_charge' => ['payment_method_details' => ['type' => 'card', 'card' => ['brand' => 'visa', 'last4' => '4242']]]])) === 'CARD', 'ACH-preferred checkout card fallback uses actual latest_charge card details');
+smoke_assert(payment_gateway_stripe_payment_method_from_details(payment_gateway_stripe_payment_method_details([], ['latest_charge' => ['payment_method_details' => ['type' => 'us_bank_account', 'us_bank_account' => ['bank_name' => 'STRIPE TEST BANK', 'account_type' => 'checking', 'last4' => '6789']]]])) === 'ACH', 'latest_charge bank details record ACH/BANK method');
+smoke_assert(payment_gateway_stripe_payment_method_from_charge(['payment_method_details' => ['type' => 'card', 'card' => ['brand' => 'visa', 'last4' => '4242', 'wallet' => ['type' => 'link']]]]) === 'CARD', 'Link-backed card records CARD from underlying card details');
+smoke_assert(payment_gateway_stripe_payment_method_from_charge(['payment_method_details' => ['type' => 'us_bank_account', 'us_bank_account' => ['bank_name' => 'LINK BANK', 'last4' => '9999']]]) === 'ACH', 'Link-backed bank records ACH/BANK from underlying bank details');
+smoke_assert(payment_gateway_stripe_payment_method_label(['payment_method_details' => ['type' => 'us_bank_account', 'us_bank_account' => ['bank_name' => 'STRIPE TEST BANK', 'account_type' => 'checking', 'last4' => '6789']]]) === 'STRIPE TEST BANK checking •••• 6789', 'bank payment method label includes bank name, type, and last4');
+smoke_assert(payment_gateway_stripe_charge_fee_amount(['payment_method_details' => ['type' => 'card'], 'balance_transaction' => ['fee' => 320, 'net' => 9680]]) === 3.20, 'card balance transaction fee is extracted');
+smoke_assert(payment_gateway_stripe_charge_net_amount(['payment_method_details' => ['type' => 'card'], 'balance_transaction' => ['fee' => 320, 'net' => 9680]]) === 96.80, 'card balance transaction net deposit is extracted');
+smoke_assert(payment_gateway_stripe_charge_fee_amount(['payment_method_details' => ['type' => 'us_bank_account'], 'balance_transaction' => ['fee' => 500, 'net' => 99500]]) === 5.00, 'ACH balance transaction fee is extracted');
+smoke_assert(payment_gateway_stripe_charge_net_amount(['payment_method_details' => ['type' => 'us_bank_account'], 'balance_transaction' => ['fee' => 500, 'net' => 99500]]) === 995.00, 'ACH balance transaction net deposit is extracted');
+smoke_assert(payment_gateway_stripe_charge_has_reconciliation_details(['payment_method_details' => ['type' => 'card'], 'balance_transaction' => ['fee' => 320, 'net' => 9680]]) === true, 'expanded charge with method details and balance transaction is reconciliation-ready');
+$existingCardWithoutFees = [
+    'payment_id' => 1001,
+    'payment_method' => 'CARD',
+    'processor_name' => 'STRIPE',
+    'processor_txn_id' => 'cs_without_fee_yet',
+    'processor_payment_intent_id' => 'pi_card_late_fee',
+    'reference_number' => 'cs_without_fee_yet',
+    'gross_amount' => 100.00,
+    'fee_amount' => 0.00,
+    'net_amount' => 100.00,
+];
+$cardChargeWithBalance = [
+    'id' => 'ch_card_late_fee',
+    'payment_intent' => 'pi_card_late_fee',
+    'amount' => 10000,
+    'created' => 1710000000,
+    'receipt_url' => 'https://pay.stripe.com/receipts/card-late-fee',
+    'payment_method_details' => ['type' => 'card', 'card' => ['brand' => 'visa', 'last4' => '4242']],
+    'balance_transaction' => ['id' => 'txn_card_late_fee', 'fee' => 320, 'net' => 9680],
+];
+$cardEnrichment = payment_gateway_stripe_existing_payment_enrichment_fields($existingCardWithoutFees, $cardChargeWithBalance, [], 'cs_card_late_fee');
+smoke_assert(($cardEnrichment['fee_amount'] ?? null) === 3.20 && ($cardEnrichment['net_amount'] ?? null) === 96.80, 'card payment posted before balance transaction is enriched with actual Stripe fee/net later');
+smoke_assert(($cardEnrichment['processor_charge_id'] ?? '') === 'ch_card_late_fee' && ($cardEnrichment['processor_balance_transaction_id'] ?? '') === 'txn_card_late_fee', 'card enrichment stores charge and balance transaction ids on the existing payment row');
+smoke_assert(($cardEnrichment['reference_number'] ?? '') === 'ch_card_late_fee', 'card enrichment updates a provisional checkout-session reference to the Stripe charge reference');
+smoke_assert(($cardEnrichment['processor_payment_method_label'] ?? '') === 'VISA •••• 4242' && ($cardEnrichment['payment_method'] ?? '') !== 'ACH', 'card enrichment preserves actual card method details from charge.payment_method_details');
+$cardAfterEnrichment = array_merge($existingCardWithoutFees, $cardEnrichment);
+$secondCardEnrichment = payment_gateway_stripe_existing_payment_enrichment_fields($cardAfterEnrichment, $cardChargeWithBalance, [], 'cs_card_late_fee');
+smoke_assert(!array_key_exists('fee_amount', $secondCardEnrichment) && !array_key_exists('net_amount', $secondCardEnrichment) && !array_key_exists('processor_charge_id', $secondCardEnrichment) && !array_key_exists('reference_number', $secondCardEnrichment), 'replayed card enrichment is idempotent and does not require a duplicate payment row');
+$achExisting = [
+    'payment_id' => 1002,
+    'payment_method' => 'ACH',
+    'processor_name' => 'STRIPE',
+    'processor_txn_id' => 'ch_ach_existing',
+    'gross_amount' => 1000.00,
+    'fee_amount' => 0.00,
+    'net_amount' => 1000.00,
+];
+$achChargeWithBalance = [
+    'id' => 'ch_ach_existing',
+    'payment_intent' => 'pi_ach_existing',
+    'amount' => 100000,
+    'created' => 1710000100,
+    'payment_method_details' => ['type' => 'us_bank_account', 'us_bank_account' => ['bank_name' => 'STRIPE TEST BANK', 'account_type' => 'checking', 'last4' => '6789']],
+    'balance_transaction' => ['id' => 'txn_ach_existing', 'fee' => 500, 'net' => 99500],
+];
+$achEnrichment = payment_gateway_stripe_existing_payment_enrichment_fields($achExisting, $achChargeWithBalance);
+smoke_assert(($achEnrichment['fee_amount'] ?? null) === 5.00 && ($achEnrichment['net_amount'] ?? null) === 995.00 && ($achEnrichment['payment_method'] ?? 'ACH') !== 'CARD', 'ACH balance transaction fee/net enrichment remains ACH/BANK');
+smoke_assert(function_exists('payment_gateway_invoice_already_recorded'), 'duplicate webhook idempotency matcher is available for replayed processor ids');

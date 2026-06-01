@@ -77,6 +77,7 @@ $canReceivePayment = accounting_invoice_can_receive_payment($invoice);
 $canVoidInvoice = accounting_invoice_can_void($invoice);
 $receivePaymentHref = accounting_h(BASE_URL) . '/accounting/receive_payment.php?invoice_id=' . (int)$invoice['invoice_id'];
 $stripeConfigured = payment_gateway_stripe_enabled();
+$opsPaymentUrl = accounting_invoice_customer_payment_url($invoice);
 $stripeHostedUrl = accounting_invoice_stripe_payment_url($invoice);
 $stripeSyncStatus = strtoupper(trim((string)($invoice['stripe_sync_status'] ?? '')));
 $stripeSyncError = trim((string)($invoice['stripe_last_error'] ?? ''));
@@ -227,27 +228,32 @@ page_header('Invoice ' . (string)$invoice['invoice_number'], 'accounting'); acco
         <?php if ($canReceivePayment): ?>
         <div class="card" style="padding:12px;background:rgba(255,255,255,.02);">
           <div style="font-weight:700;margin-bottom:10px;">Client payment links</div>
-          <?php if ($stripeHostedUrl !== ''): ?>
-            <div style="display:grid;gap:10px;">
-              <a class="btn btn-secondary" href="<?= accounting_h($stripeHostedUrl) ?>" target="_blank" rel="noopener" style="text-decoration:none;text-align:left;">Open Stripe payment page</a>
-              <?php if (!empty($invoice['stripe_invoice_pdf_url'])): ?>
-                <a class="btn btn-secondary" href="<?= accounting_h((string)$invoice['stripe_invoice_pdf_url']) ?>" target="_blank" rel="noopener" style="text-decoration:none;text-align:left;">Open Stripe invoice PDF</a>
-              <?php endif; ?>
-            </div>
-            <div style="font-size:12px;opacity:.72;line-height:1.45;margin-top:10px;">Customers pay on Stripe’s hosted invoice page and can download the receipt there after payment.</div>
-          <?php else: ?>
-            <div style="display:grid;gap:10px;">
-              <?= accounting_invoice_payment_link_html($invoice, 'ACH') ?>
-              <?= accounting_invoice_payment_link_html($invoice, 'CARD') ?>
-            </div>
-            <div style="font-size:12px;opacity:.72;line-height:1.45;margin-top:10px;">Portal checkout links remain available as a fallback until Stripe sync is ready.</div>
-            <?php if ($stripeConfigured): ?>
-              <form method="post" style="margin-top:12px;display:grid;gap:10px;">
-                <?= csrf_field() ?>
-                <input type="hidden" name="action" value="stripe_sync_invoice">
-                <button type="submit" class="btn btn-secondary" style="text-align:left;">Build Stripe hosted payment page</button>
-              </form>
+          <div style="display:grid;gap:10px;">
+            <?php if ($opsPaymentUrl !== ''): ?>
+              <a class="btn btn-secondary" href="<?= accounting_h($opsPaymentUrl) ?>" target="_blank" rel="noopener" style="text-decoration:none;text-align:left;">Open OPS payment page</a>
             <?php endif; ?>
+            <?= accounting_invoice_payment_link_html($invoice, 'ACH') ?>
+            <?= accounting_invoice_payment_link_html($invoice, 'CARD') ?>
+          </div>
+          <div style="font-size:12px;opacity:.72;line-height:1.45;margin-top:10px;">Customer emails use the methodless OPS payment page first. ACH and card links above are explicit admin overrides for testing or support.</div>
+          <?php if ($stripeHostedUrl !== '' || !empty($invoice['stripe_invoice_pdf_url'])): ?>
+            <details style="margin-top:12px;">
+              <summary style="cursor:pointer;font-size:12px;opacity:.78;font-weight:700;">Stripe internal reference</summary>
+              <div style="display:grid;gap:10px;margin-top:10px;">
+                <?php if ($stripeHostedUrl !== ''): ?>
+                  <a class="btn btn-secondary" href="<?= accounting_h($stripeHostedUrl) ?>" target="_blank" rel="noopener" style="text-decoration:none;text-align:left;">Open Stripe hosted invoice</a>
+                <?php endif; ?>
+                <?php if (!empty($invoice['stripe_invoice_pdf_url'])): ?>
+                  <a class="btn btn-secondary" href="<?= accounting_h((string)$invoice['stripe_invoice_pdf_url']) ?>" target="_blank" rel="noopener" style="text-decoration:none;text-align:left;">Open Stripe invoice PDF</a>
+                <?php endif; ?>
+              </div>
+            </details>
+          <?php elseif ($stripeConfigured): ?>
+            <form method="post" style="margin-top:12px;display:grid;gap:10px;">
+              <?= csrf_field() ?>
+              <input type="hidden" name="action" value="stripe_sync_invoice">
+              <button type="submit" class="btn btn-secondary" style="text-align:left;">Build Stripe hosted invoice reference</button>
+            </form>
           <?php endif; ?>
           <?php if ($stripeConfigured && $stripeSyncStatus !== ''): ?>
             <div style="font-size:12px;opacity:.72;line-height:1.45;margin-top:10px;">Stripe sync status: <strong><?= accounting_h($stripeSyncStatus) ?></strong><?= $stripeSyncError !== '' ? ' · ' . accounting_h($stripeSyncError) : '' ?></div>
@@ -342,6 +348,7 @@ page_header('Invoice ' . (string)$invoice['invoice_number'], 'accounting'); acco
                 <div><?= accounting_delivery_status_badge_html((string)$delivery['delivery_status']) ?></div>
               </div>
               <div style="font-size:13px;opacity:.82;margin-top:8px;word-break:break-word;"><?= accounting_h((string)$delivery['subject_line']) ?></div>
+              <?php if (!empty($delivery['body_preview'])): ?><div style="font-size:12px;opacity:.68;margin-top:6px;word-break:break-word;">Customer-facing payment URL/source: <?= str_contains((string)$delivery['body_preview'], '/payments/pay.php?invoice=') ? 'OPS payment page' : 'Not detected in preview' ?></div><?php endif; ?>
               <?php if (!empty($delivery['error_message'])): ?><div style="font-size:12px;color:#fecaca;margin-top:6px;"><?= accounting_h((string)$delivery['error_message']) ?></div><?php endif; ?>
             </div>
           <?php endforeach; ?>

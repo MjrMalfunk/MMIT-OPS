@@ -163,13 +163,21 @@ function accounting_invoice_lookup_by_number(string $invoiceNumber): ?array {
     return accounting_get_invoice((int)$id);
 }
 
-function accounting_invoice_payment_link(string $invoiceNumber, string $method): string {
-    $method = strtoupper(trim($method));
-    $allowed = ['ACH', 'CARD'];
-    if (!in_array($method, $allowed, true)) {
-        $method = 'ACH';
+function accounting_invoice_payment_link(string $invoiceNumber, ?string $method = null): string {
+    $url = BASE_URL . '/payments/pay.php?invoice=' . rawurlencode($invoiceNumber);
+    $method = strtoupper(trim((string)$method));
+    if (in_array($method, ['ACH', 'CARD'], true)) {
+        $url .= '&method=' . rawurlencode($method);
     }
-    return BASE_URL . '/payments/pay.php?invoice=' . rawurlencode($invoiceNumber) . '&method=' . rawurlencode($method);
+    return $url;
+}
+
+function accounting_invoice_customer_payment_url(array $invoice): string {
+    $invoiceNumber = trim((string)($invoice['invoice_number'] ?? ''));
+    if ($invoiceNumber === '') {
+        return '';
+    }
+    return accounting_invoice_payment_link($invoiceNumber);
 }
 
 function accounting_invoice_payment_link_html(array $invoice, string $method): string {
@@ -243,8 +251,9 @@ function accounting_payment_method_badge_html(string $method): string {
         'OTHER' => ['bg' => 'rgba(148,163,184,.18)', 'border' => 'rgba(148,163,184,.28)', 'color' => '#cbd5e1'],
     ];
     $style = $map[$method] ?? $map['OTHER'];
+    $label = $method === 'ACH' ? 'ACH / BANK' : $method;
     return '<span class="status-badge" style="display:inline-flex;align-items:center;padding:5px 9px;border-radius:999px;font-size:12px;font-weight:700;letter-spacing:.02em;background:'
-        . $style['bg'] . ';border:1px solid ' . $style['border'] . ';color:' . $style['color'] . ';">' . accounting_h($method) . '</span>';
+        . $style['bg'] . ';border:1px solid ' . $style['border'] . ';color:' . $style['color'] . ';">' . accounting_h($label) . '</span>';
 }
 
 function accounting_payment_status_badge_html(string $status): string {
@@ -1949,12 +1958,12 @@ function accounting_get_payment(int $paymentId): ?array {
     $statusSql = $supportsExtended ? "COALESCE(p.payment_status, 'POSTED')" : "'POSTED'";
 
     $extraColumns = [];
-    foreach (['processor_name', 'processor_txn_id', 'processor_payment_intent_id', 'processor_charge_id', 'processor_checkout_session_id', 'processor_customer_id', 'processor_receipt_url', 'processor_payment_method_label', 'processor_environment', 'settled_at', 'voided_at', 'void_reason'] as $column) {
+    foreach (['processor_name', 'processor_txn_id', 'processor_payment_intent_id', 'processor_charge_id', 'processor_checkout_session_id', 'processor_customer_id', 'processor_receipt_url', 'processor_payment_method_label', 'processor_balance_transaction_id', 'processor_environment', 'settled_at', 'voided_at', 'void_reason'] as $column) {
         $extraColumns[] = db_column_exists('payment_receipt', $column) ? 'p.' . $column : 'NULL AS ' . $column;
     }
 
     $sql = "SELECT p.payment_id, p.client_id, p.payment_date, p.payment_method, p.reference_number, p.memo, p.created_at,
-                   p.deposit_account_id, p.ar_account_id,
+                   p.deposit_account_id, p.ar_account_id, p.fee_expense_account_id,
                    {$grossSql} AS gross_amount,
                    {$feeSql} AS fee_amount,
                    {$netSql} AS net_amount,
@@ -2266,14 +2275,14 @@ function accounting_record_invoice_payment(int $invoiceId, array $data, int $use
     }
 
     $netAmount = round($grossAmount - $feeAmount, 2);
-    $appliedAmount = $grossAmount;
-    $unappliedAmount = 0.00;
+    $appliedAmount = $paymentStatus === 'PENDING' ? 0.00 : $grossAmount;
+    $unappliedAmount = $paymentStatus === 'PENDING' ? $grossAmount : 0.00;
 
     $errors = [];
     if ($grossAmount <= 0) $errors[] = 'Gross amount must be greater than zero.';
     if ($feeAmount < 0) $errors[] = 'Fee amount cannot be negative.';
     if ($netAmount < 0) $errors[] = 'Fee amount cannot exceed gross amount.';
-    if ($appliedAmount - (float)$invoice['balance_due'] > 0.00001) $errors[] = 'Gross amount cannot exceed the invoice balance.';
+    if ($paymentStatus !== 'PENDING' && $appliedAmount - (float)$invoice['balance_due'] > 0.00001) $errors[] = 'Gross amount cannot exceed the invoice balance.';
     if ($depositAccountId <= 0) $errors[] = 'Choose a deposit account.';
     if ($feeAmount > 0 && $feeExpenseAccountId <= 0) $errors[] = 'Choose a fee expense account when a processing fee is entered.';
     if ($paymentDate === '') $errors[] = 'Payment date is required.';
@@ -2341,18 +2350,119 @@ function accounting_record_invoice_payment(int $invoiceId, array $data, int $use
             $line->execute([$journalId, $lineNumber++, (int)$invoice['ar_account_id'], (int)$invoice['client_id'], 0, $appliedAmount, 'Accounts receivable settlement']);
         }
 
-        $newBalance = round((float)$invoice['balance_due'] - $appliedAmount, 2);
-        $newStatus = $newBalance <= 0.00001 ? 'PAID' : 'PARTIALLY_PAID';
-        $st = $pdo->prepare('UPDATE customer_invoice SET balance_due = ?, status = ? WHERE invoice_id = ?');
-        $st->execute([$newBalance <= 0 ? 0 : $newBalance, $newStatus, $invoiceId]);
+        if ($paymentStatus === 'POSTED') {
+            $newBalance = round((float)$invoice['balance_due'] - $appliedAmount, 2);
+            $newStatus = $newBalance <= 0.00001 ? 'PAID' : 'PARTIALLY_PAID';
+            $st = $pdo->prepare('UPDATE customer_invoice SET balance_due = ?, status = ? WHERE invoice_id = ?');
+            $st->execute([$newBalance <= 0 ? 0 : $newBalance, $newStatus, $invoiceId]);
+            $message = $newStatus === 'PAID' ? 'Payment recorded and invoice marked paid.' : 'Partial payment recorded.';
+        } else {
+            $message = 'Payment is pending processor settlement and has not been applied to A/R yet.';
+        }
         $pdo->commit();
-        return ['ok' => true, 'payment_id' => $paymentId, 'message' => $newStatus === 'PAID' ? 'Payment recorded and invoice marked paid.' : 'Partial payment recorded.'];
+        return ['ok' => true, 'payment_id' => $paymentId, 'message' => $message];
     } catch (Throwable $e) {
         if ($pdo->inTransaction()) $pdo->rollBack();
         return ['ok' => false, 'errors' => ['Failed to record payment: ' . $e->getMessage()]];
     }
 }
 
+
+function accounting_post_pending_invoice_payment(int $paymentId, int $invoiceId, array $data = [], int $userId = 0): array {
+    $payment = accounting_get_payment($paymentId);
+    if (!$payment) {
+        return ['ok' => false, 'errors' => ['Pending payment not found.']];
+    }
+    $invoice = accounting_get_invoice($invoiceId);
+    if (!$invoice) {
+        return ['ok' => false, 'errors' => ['Invoice not found.']];
+    }
+    if (strtoupper(trim((string)($payment['payment_status'] ?? ''))) === 'POSTED') {
+        return ['ok' => true, 'payment_id' => $paymentId, 'message' => 'Payment already posted.'];
+    }
+    if (strtoupper(trim((string)($payment['payment_status'] ?? ''))) !== 'PENDING') {
+        return ['ok' => false, 'errors' => ['Only pending payments can be finalized.']];
+    }
+    if (!accounting_invoice_can_receive_payment($invoice)) {
+        return ['ok' => false, 'errors' => ['Invoice is not open for payment posting.']];
+    }
+
+    $grossAmount = round((float)($data['gross_amount'] ?? $payment['gross_amount'] ?? $payment['amount_received'] ?? 0), 2);
+    $feeAmount = round((float)($data['fee_amount'] ?? $payment['fee_amount'] ?? 0), 2);
+    $netAmount = round($grossAmount - $feeAmount, 2);
+    $amountToApply = min($grossAmount, round((float)($invoice['balance_due'] ?? 0), 2));
+    $paymentDate = trim((string)($data['payment_date'] ?? '')) ?: date('Y-m-d');
+    $reference = trim((string)($data['reference_number'] ?? $payment['reference_number'] ?? $invoice['invoice_number'] ?? ''));
+    $memo = trim((string)($data['memo'] ?? $payment['memo'] ?? ''));
+    $depositAccountId = (int)($data['deposit_account_id'] ?? $payment['deposit_account_id'] ?? 0);
+    $feeExpenseAccountId = (int)($data['fee_expense_account_id'] ?? $payment['fee_expense_account_id'] ?? 0);
+    $effectiveUserId = $userId > 0 ? $userId : null;
+
+    $errors = [];
+    if ($grossAmount <= 0) $errors[] = 'Gross amount must be greater than zero.';
+    if ($feeAmount < 0) $errors[] = 'Fee amount cannot be negative.';
+    if ($netAmount < 0) $errors[] = 'Fee amount cannot exceed gross amount.';
+    if ($amountToApply <= 0) $errors[] = 'Nothing remains to apply locally.';
+    if ($depositAccountId <= 0) $errors[] = 'Choose a deposit account.';
+    if ($feeAmount > 0 && $feeExpenseAccountId <= 0) $errors[] = 'Choose a fee expense account when a processing fee is entered.';
+    if ($errors) return ['ok' => false, 'errors' => $errors];
+
+    $pdo = db();
+    $pdo->beginTransaction();
+    try {
+        $fields = ['payment_date = ?', 'amount_received = ?', 'payment_status = ?'];
+        $params = [$paymentDate, $grossAmount, 'POSTED'];
+        foreach ([
+            'gross_amount' => $grossAmount,
+            'fee_amount' => $feeAmount,
+            'net_amount' => $netAmount,
+            'applied_amount' => $amountToApply,
+            'unapplied_amount' => 0.00,
+            'fee_expense_account_id' => $feeExpenseAccountId > 0 ? $feeExpenseAccountId : null,
+            'reference_number' => $reference !== '' ? $reference : null,
+            'memo' => $memo !== '' ? $memo : null,
+            'settled_at' => trim((string)($data['settled_at'] ?? '')) ?: date('Y-m-d H:i:s'),
+        ] as $column => $value) {
+            if (db_column_exists('payment_receipt', $column)) {
+                $fields[] = $column . ' = ?';
+                $params[] = $value;
+            }
+        }
+        $params[] = $paymentId;
+        $st = $pdo->prepare('UPDATE payment_receipt SET ' . implode(', ', $fields) . ' WHERE payment_id = ?');
+        $st->execute($params);
+
+        $st = $pdo->prepare('UPDATE payment_invoice_apply SET amount_applied = ? WHERE payment_id = ? AND invoice_id = ?');
+        $st->execute([$amountToApply, $paymentId, $invoiceId]);
+        if ($st->rowCount() === 0) {
+            $st = $pdo->prepare('INSERT INTO payment_invoice_apply (payment_id, invoice_id, amount_applied) VALUES (?, ?, ?)');
+            $st->execute([$paymentId, $invoiceId, $amountToApply]);
+        }
+
+        $memoText = 'Payment for ' . $invoice['invoice_number'];
+        $st = $pdo->prepare("INSERT INTO gl_journal (journal_date, status, source_type, source_id, reference_number, memo, posted_by) VALUES (?, 'POSTED', 'PAYMENT', ?, ?, ?, ?)");
+        $st->execute([$paymentDate, $paymentId, $reference !== '' ? $reference : $invoice['invoice_number'], $memoText, $effectiveUserId]);
+        $journalId = (int)$pdo->lastInsertId();
+
+        $line = $pdo->prepare('INSERT INTO gl_journal_line (journal_id, line_number, account_id, client_id, debit_amount, credit_amount, line_memo) VALUES (?, ?, ?, ?, ?, ?, ?)');
+        $lineNumber = 1;
+        $line->execute([$journalId, $lineNumber++, $depositAccountId, (int)$invoice['client_id'], $netAmount, 0, 'Customer payment deposit']);
+        if ($feeAmount > 0 && $feeExpenseAccountId > 0) {
+            $line->execute([$journalId, $lineNumber++, $feeExpenseAccountId, (int)$invoice['client_id'], $feeAmount, 0, 'Merchant processing fee']);
+        }
+        $line->execute([$journalId, $lineNumber++, (int)$invoice['ar_account_id'], (int)$invoice['client_id'], 0, $amountToApply, 'Accounts receivable settlement']);
+
+        $newBalance = round((float)$invoice['balance_due'] - $amountToApply, 2);
+        $newStatus = $newBalance <= 0.00001 ? 'PAID' : 'PARTIALLY_PAID';
+        $st = $pdo->prepare('UPDATE customer_invoice SET balance_due = ?, status = ? WHERE invoice_id = ?');
+        $st->execute([$newBalance <= 0 ? 0 : $newBalance, $newStatus, $invoiceId]);
+        $pdo->commit();
+        return ['ok' => true, 'payment_id' => $paymentId, 'message' => $newStatus === 'PAID' ? 'Pending payment settled and invoice marked paid.' : 'Pending payment settled and applied.'];
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        return ['ok' => false, 'errors' => ['Failed to finalize pending payment: ' . $e->getMessage()]];
+    }
+}
 
 function accounting_bank_reconciliation_ready(): bool {
     return db_table_exists('bank_reconciliation') && db_table_exists('bank_reconciliation_item');
@@ -3328,7 +3438,7 @@ function accounting_invoice_email_logo_url(): string {
     return '';
 }
 
-function accounting_render_invoice_email_html(array $invoice, string $messageBody, string $stripeUrl, bool $sandboxMode = false, string $originalTo = ''): string {
+function accounting_render_invoice_email_html(array $invoice, string $messageBody, string $paymentUrl, bool $sandboxMode = false, string $originalTo = ''): string {
     $clientName = trim((string)($invoice['dba_name'] ?: $invoice['legal_name'] ?: 'there'));
     $invoiceNumber = trim((string)($invoice['invoice_number'] ?? 'Invoice'));
     $amountDue = '$' . number_format((float)($invoice['balance_due'] ?? 0), 2);
@@ -3338,7 +3448,7 @@ function accounting_render_invoice_email_html(array $invoice, string $messageBod
     $logoUrl = accounting_invoice_email_logo_url();
     $safeLogoUrl = accounting_h($logoUrl);
     $bodyHtml = accounting_plain_to_html(trim($messageBody));
-    $safeStripeUrl = accounting_h($stripeUrl);
+    $safePaymentUrl = accounting_h($paymentUrl);
     $safeOriginalTo = accounting_h($originalTo);
     $safeSandboxTo = accounting_h(accounting_mail_sandbox_to());
 
@@ -3372,12 +3482,12 @@ function accounting_render_invoice_email_html(array $invoice, string $messageBod
     }
 
     $buttonBlock = '';
-    if ($stripeUrl !== '' && in_array($status, ['ISSUED', 'PARTIALLY_PAID'], true) && (float)($invoice['balance_due'] ?? 0) > 0.0) {
+    if ($paymentUrl !== '' && in_array($status, ['ISSUED', 'PARTIALLY_PAID'], true) && (float)($invoice['balance_due'] ?? 0) > 0.0) {
         $buttonBlock = '<tr><td style="padding:0 0 20px 0;">'
             . '<table role="presentation" cellspacing="0" cellpadding="0" border="0"><tr><td style="border-radius:12px;background:#1d4ed8;">'
-            . '<a href="' . $safeStripeUrl . '" style="display:inline-block;padding:14px 22px;font-family:Arial,sans-serif;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:12px;">View &amp; Pay Invoice</a>'
+            . '<a href="' . $safePaymentUrl . '" style="display:inline-block;padding:14px 22px;font-family:Arial,sans-serif;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:12px;">View &amp; Pay Invoice</a>'
             . '</td></tr></table>'
-            . '<div style="margin-top:12px;color:#6b7280;font-size:12px;line-height:1.5;">Prefer the full link? <a href="' . $safeStripeUrl . '" style="color:#1d4ed8;text-decoration:none;word-break:break-all;">' . $safeStripeUrl . '</a></div>'
+            . '<div style="margin-top:12px;color:#6b7280;font-size:12px;line-height:1.5;">Prefer the full link? <a href="' . $safePaymentUrl . '" style="color:#1d4ed8;text-decoration:none;word-break:break-all;">' . $safePaymentUrl . '</a></div>'
             . '</td></tr>';
     }
 
@@ -3414,14 +3524,14 @@ function accounting_render_invoice_email_html(array $invoice, string $messageBod
         . '<tr><td style="padding:0 0 20px 0;">'
         . '<div style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:16px;padding:16px 18px;color:#334155;font-size:13px;line-height:1.65;">'
         . '<strong style="display:block;font-size:13px;color:#10233f;margin-bottom:6px;">Included with this email</strong>'
-        . 'A PDF copy of the invoice is attached for your records. Customers paying through Stripe can also download the invoice and receipt from the secure payment page after payment.'
+        . 'A PDF copy of the invoice is attached for your records. Customers can review payment options from the secure OPS payment page before continuing to checkout.'
         . '</div>'
         . '</td></tr>'
         . '<tr><td style="font-size:12px;line-height:1.65;color:#64748b;padding-top:4px;">Questions? Reply to this email or contact <a href="mailto:billing@midwestmanagedit.com" style="color:#1d4ed8;text-decoration:none;">billing@midwestmanagedit.com</a>.</td></tr>'
         . '</table>'
         . '</td></tr>'
         . '</table>'
-        . '<div style="padding:14px 12px 0 12px;text-align:center;font-size:11px;line-height:1.6;color:#64748b;">Midwest Managed IT · Secure invoice delivery powered by your portal and Stripe-hosted payment pages.</div>'
+        . '<div style="padding:14px 12px 0 12px;text-align:center;font-size:11px;line-height:1.6;color:#64748b;">Midwest Managed IT · Secure invoice delivery powered by the OPS payment portal.</div>'
         . '</td></tr></table>'
         . '</td></tr></table>'
         . '</body></html>';
@@ -3538,8 +3648,8 @@ function accounting_render_invoice_pdf_bytes(array $invoice, array $lines, array
         $paymentText = (string)$paymentSnapshot['detail_text'];
     } elseif (!empty($paymentSnapshot['has_payments'])) {
         $paymentText = (string)$paymentSnapshot['detail_text'];
-    } elseif (accounting_invoice_has_stripe_payment_page($invoice)) {
-        $paymentText = 'Pay securely online through Stripe: ' . htmlspecialchars(accounting_invoice_stripe_payment_url($invoice));
+    } elseif (accounting_invoice_customer_payment_url($invoice) !== '') {
+        $paymentText = 'Pay securely online through the Midwest Managed IT payment portal: ' . htmlspecialchars(accounting_invoice_customer_payment_url($invoice));
     }
 
     $watermarkHtml = '';
@@ -3774,25 +3884,14 @@ function accounting_send_invoice_email(int $invoiceId, array $data, int $userId)
         return ['ok' => false, 'errors' => array_merge($errors, $stripeWarnings)];
     }
 
-    $stripeUrl = accounting_invoice_stripe_payment_url($invoice);
+    $paymentLink = accounting_invoice_customer_payment_url($invoice);
     $plainBody = trim($body);
-    if ($stripeUrl !== '' && stripos($plainBody, $stripeUrl) === false) {
+    if ($paymentLink !== '' && (float)($invoice['balance_due'] ?? 0) > 0.00001 && stripos($plainBody, $paymentLink) === false) {
         $plainBody = rtrim($plainBody) . "
 
 Secure payment link:
-" . $stripeUrl . "
+" . $paymentLink . "
 ";
-    } elseif ($stripeUrl === '' && (float)($invoice['balance_due'] ?? 0) > 0.00001) {
-        $achLink = accounting_invoice_payment_link((string)$invoice['invoice_number'], 'ACH');
-        $cardLink = accounting_invoice_payment_link((string)$invoice['invoice_number'], 'CARD');
-        if (stripos($plainBody, $achLink) === false && stripos($plainBody, $cardLink) === false) {
-            $plainBody = rtrim($plainBody) . "
-
-Payment options:
-Pay by ACH: " . $achLink . "
-Pay by Card: " . $cardLink . "
-";
-        }
     }
 
     $lines = accounting_invoice_lines($invoiceId);
@@ -3806,7 +3905,7 @@ Pay by Card: " . $cardLink . "
     }
 
     $plainBody = str_replace(["\r\n", "\r"], "\n", $plainBody);
-    $htmlBody = accounting_render_invoice_email_html($invoice, $htmlEmailBody, $stripeUrl, accounting_mail_sandbox_enabled(), $originalTo);
+    $htmlBody = accounting_render_invoice_email_html($invoice, $htmlEmailBody, $paymentLink, accounting_mail_sandbox_enabled(), $originalTo);
 
     $sendResult = ops_mail_send([
         'sender_channel' => 'billing',

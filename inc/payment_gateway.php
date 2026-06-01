@@ -52,6 +52,7 @@ function payment_gateway_ensure_schema(): void {
             'processor_checkout_session_id' => "VARCHAR(120) NULL DEFAULT NULL",
             'processor_receipt_url' => "TEXT NULL DEFAULT NULL",
             'processor_payment_method_label' => "VARCHAR(80) NULL DEFAULT NULL",
+            'processor_balance_transaction_id' => "VARCHAR(120) NULL DEFAULT NULL",
             'processor_environment' => "VARCHAR(30) NULL DEFAULT NULL",
         ];
         foreach ($paymentColumns as $column => $definition) {
@@ -66,6 +67,8 @@ function payment_gateway_ensure_schema(): void {
         foreach ([
             'idx_payment_receipt_stripe_session' => 'processor_checkout_session_id',
             'idx_payment_receipt_stripe_intent' => 'processor_payment_intent_id',
+            'idx_payment_receipt_stripe_charge' => 'processor_charge_id',
+            'idx_payment_receipt_stripe_balance_txn' => 'processor_balance_transaction_id',
         ] as $index => $column) {
             if (db_column_exists('payment_receipt', $column)) {
                 try {
@@ -124,17 +127,55 @@ function payment_gateway_stripe_mode(): string {
 }
 
 
+
+function payment_gateway_stripe_ach_checkout_allowed(): bool {
+    $env = payment_gateway_app_environment();
+    $stripeMode = payment_gateway_stripe_mode();
+    return in_array($env, ['staging', 'stage', 'testing', 'test', 'development', 'local'], true)
+        && in_array($stripeMode, ['test', 'unknown'], true);
+}
+
+function payment_gateway_invoice_prefers_ach(array $invoice): bool {
+    if (!payment_gateway_stripe_ach_checkout_allowed()) {
+        return false;
+    }
+    $balanceDue = round((float)($invoice['balance_due'] ?? 0), 2);
+    return $balanceDue > 0;
+}
+
+function payment_gateway_default_method_for_invoice(?array $invoice = null): string {
+    return $invoice !== null && payment_gateway_invoice_prefers_ach($invoice) ? 'ACH' : 'CARD';
+}
+
+function payment_gateway_resolve_requested_method(?array $invoice, string $requestedMethod): string {
+    $requestedMethod = strtoupper(trim($requestedMethod));
+    return in_array($requestedMethod, ['ACH', 'CARD'], true)
+        ? $requestedMethod
+        : payment_gateway_default_method_for_invoice($invoice);
+}
+
+function payment_gateway_stripe_checkout_payment_method_types(array $invoice, string $method): array {
+    $method = strtoupper(trim($method));
+    if ($method === 'ACH' && payment_gateway_stripe_ach_checkout_allowed()) {
+        return ['us_bank_account', 'card'];
+    }
+    return ['card'];
+}
+
 function payment_gateway_available_for_method(string $method): array {
     $method = strtoupper(trim($method));
     $available = [];
     if (payment_gateway_stripe_enabled()) {
+        if ($method === 'ACH' && !payment_gateway_stripe_ach_checkout_allowed()) {
+            return [];
+        }
         $available['STRIPE'] = [
             'code' => 'STRIPE',
             'label' => $method === 'CARD' ? 'Stripe Checkout' : 'Stripe ACH Checkout',
             'supports_realtime_posting' => $method === 'CARD',
             'note' => $method === 'CARD'
                 ? 'Card payments return from Stripe and can auto-post to the invoice.'
-                : 'ACH payments can start in Stripe Checkout. Settlement timing depends on bank processing.',
+                : 'ACH is offered first in staging Stripe Checkout, with card kept as a fallback. Bank payments remain pending until Stripe confirms settlement.',
         ];
     }
     return $available;
@@ -230,18 +271,14 @@ function payment_gateway_curl_form(string $method, string $url, array $payload, 
     return ['status' => $status, 'body' => $body, 'json' => is_array($decoded) ? $decoded : null];
 }
 
-function payment_gateway_stripe_checkout(array $invoice, string $method): array {
-    $secret = trim((string)payment_gateway_setting('STRIPE_SECRET_KEY', ''));
-    if ($secret === '') {
-        throw new RuntimeException('Stripe is not configured yet.');
-    }
+function payment_gateway_stripe_checkout_session_payload(array $invoice, string $method): array {
     $method = strtoupper(trim($method));
     $amountCents = (int)round(((float)$invoice['balance_due']) * 100);
     if ($amountCents <= 0) {
         throw new RuntimeException('Invoice balance must be greater than zero.');
     }
 
-    $paymentMethods = $method === 'ACH' ? ['us_bank_account'] : ['card'];
+    $paymentMethods = payment_gateway_stripe_checkout_payment_method_types($invoice, $method);
     $payload = [
         'mode' => 'payment',
         'success_url' => str_replace('{METHOD}', rawurlencode(strtolower($method)), (string)payment_gateway_setting('STRIPE_CHECKOUT_SUCCESS_URL', BASE_URL . '/payments/return.php?gateway=stripe&method={METHOD}&session_id={CHECKOUT_SESSION_ID}')),
@@ -264,14 +301,33 @@ function payment_gateway_stripe_checkout(array $invoice, string $method): array 
         'line_items[0][quantity]' => '1',
         'submit_type' => 'pay',
         'invoice_creation[enabled]' => 'false',
+        'wallet_options[link][display]' => 'never',
     ];
+
+    // OPS invoice Checkout must not use Stripe Dynamic/automatic payment methods:
+    // explicitly sending payment_method_types prevents account-level Klarna, Cash App
+    // Pay, Amazon Pay, and other BNPL/consumer wallet methods from joining this flow.
+    // Link is hidden per session above; if Apple Pay/Google Pay card wallet buttons or
+    // account-level Link still appear, turn them off in Stripe Dashboard > Settings >
+    // Checkout / Payment methods for the staging account because Stripe may surface
+    // those as card-wallet accelerators outside the payment_method_types list.
     foreach ($paymentMethods as $i => $pm) {
         $payload['payment_method_types[' . $i . ']'] = $pm;
     }
-    if ($method === 'ACH') {
+    if (in_array('us_bank_account', $paymentMethods, true)) {
         $payload['payment_method_options[us_bank_account][verification_method]'] = 'automatic';
     }
 
+    return $payload;
+}
+
+function payment_gateway_stripe_checkout(array $invoice, string $method): array {
+    $secret = trim((string)payment_gateway_setting('STRIPE_SECRET_KEY', ''));
+    if ($secret === '') {
+        throw new RuntimeException('Stripe is not configured yet.');
+    }
+
+    $payload = payment_gateway_stripe_checkout_session_payload($invoice, $method);
     $resp = payment_gateway_curl_form('POST', 'https://api.stripe.com/v1/checkout/sessions', $payload, [
         'Authorization: Bearer ' . $secret,
     ]);
@@ -287,7 +343,7 @@ function payment_gateway_stripe_session(string $sessionId): array {
     if ($secret === '') {
         throw new RuntimeException('Stripe is not configured yet.');
     }
-    $url = 'https://api.stripe.com/v1/checkout/sessions/' . rawurlencode($sessionId) . '?expand[]=payment_intent';
+    $url = 'https://api.stripe.com/v1/checkout/sessions/' . rawurlencode($sessionId) . '?expand[]=payment_intent&expand[]=payment_intent.latest_charge.balance_transaction&expand[]=payment_intent.payment_method';
     if (!function_exists('curl_init')) {
         throw new RuntimeException('cURL is not available on this PHP host.');
     }
@@ -330,6 +386,10 @@ function payment_gateway_invoice_already_recorded(string $processorName, string 
     }
     if ($processorTxnId !== '' && db_column_exists('payment_receipt', 'processor_txn_id')) {
         $matchers[] = 'processor_txn_id = ?';
+        $params[] = $processorTxnId;
+    }
+    if ($processorTxnId !== '' && db_column_exists('payment_receipt', 'processor_charge_id')) {
+        $matchers[] = 'processor_charge_id = ?';
         $params[] = $processorTxnId;
     }
     if ($checkoutSessionId !== '' && db_column_exists('payment_receipt', 'processor_checkout_session_id')) {
@@ -586,6 +646,39 @@ function payment_gateway_find_payment_by_processor(string $processorName, string
     return accounting_get_payment((int)$id);
 }
 
+
+function payment_gateway_stripe_pending_status_from_session(array $session): string {
+    $paymentStatus = strtolower(trim((string)($session['payment_status'] ?? '')));
+    $sessionStatus = strtolower(trim((string)($session['status'] ?? '')));
+    if ($sessionStatus === 'complete' && $paymentStatus === 'paid') {
+        return 'POSTED';
+    }
+    if ($sessionStatus === 'complete' && in_array($paymentStatus, ['unpaid', 'no_payment_required'], true)) {
+        return 'PENDING';
+    }
+    $paymentIntent = $session['payment_intent'] ?? [];
+    $intentStatus = is_array($paymentIntent) ? strtolower(trim((string)($paymentIntent['status'] ?? ''))) : '';
+    if (in_array($intentStatus, ['processing', 'requires_capture'], true)) {
+        return 'PENDING';
+    }
+    return '';
+}
+function payment_gateway_finalize_pending_stripe_payment(int $paymentId, array $invoice, array $fields): array {
+    $result = accounting_post_pending_invoice_payment($paymentId, (int)$invoice['invoice_id'], $fields, 0);
+    if (!empty($result['ok'])) {
+        $update = [];
+        foreach (['payment_method', 'fee_amount', 'net_amount', 'processor_charge_id', 'processor_receipt_url', 'processor_payment_method_label', 'processor_balance_transaction_id', 'settled_at'] as $column) {
+            if (array_key_exists($column, $fields)) {
+                $update[$column] = $fields[$column];
+            }
+        }
+        if ($update !== []) {
+            payment_gateway_stripe_update_local_payment($paymentId, $update);
+        }
+    }
+    return $result;
+}
+
 function payment_gateway_record_stripe_invoice_payment(array $invoice, array $session): array {
     payment_gateway_ensure_schema();
 
@@ -594,6 +687,14 @@ function payment_gateway_record_stripe_invoice_payment(array $invoice, array $se
     $sessionId = trim((string)($session['id'] ?? ''));
     $paymentIntent = $session['payment_intent'] ?? [];
     $paymentIntentId = is_array($paymentIntent) ? trim((string)($paymentIntent['id'] ?? '')) : trim((string)$paymentIntent);
+    if ($paymentIntentId !== '' && (!is_array($paymentIntent) || empty($paymentIntent['latest_charge']))) {
+        try {
+            $paymentIntent = payment_gateway_stripe_retrieve_payment_intent($paymentIntentId);
+        } catch (Throwable $e) {
+            // Expanded intent details are helpful but should not block local reconciliation.
+        }
+    }
+
     $charge = [];
     $chargeId = '';
     if (is_array($paymentIntent) && !empty($paymentIntent['latest_charge'])) {
@@ -604,19 +705,48 @@ function payment_gateway_record_stripe_invoice_payment(array $invoice, array $se
             $chargeId = trim((string)$paymentIntent['latest_charge']);
         }
     }
-    if ($charge === [] && $chargeId !== '') {
+    if ($chargeId !== '' && !payment_gateway_stripe_charge_has_reconciliation_details($charge)) {
         try {
             $charge = payment_gateway_stripe_retrieve_charge($chargeId);
         } catch (Throwable $e) {
-            // Receipt and method details are helpful but should not block local reconciliation.
+            // Receipt, method details, and balance transaction are helpful but should not block local reconciliation.
         }
     }
 
+    $methodDetails = payment_gateway_stripe_payment_method_details($charge, is_array($paymentIntent) ? $paymentIntent : []);
+    $actualMethod = payment_gateway_stripe_payment_method_from_details($methodDetails);
+    $actualMethodLabel = payment_gateway_stripe_payment_method_label_from_details($methodDetails);
+
     $existing = payment_gateway_invoice_already_recorded('STRIPE', $chargeId !== '' ? $chargeId : $sessionId, $paymentIntentId, $sessionId);
+    $localStatus = payment_gateway_stripe_pending_status_from_session($session);
     if ($existing !== null) {
-        return ['ok' => true, 'payment_id' => $existing, 'message' => 'Payment already recorded.'];
+        $existingPayment = accounting_get_payment($existing);
+        if ($localStatus === 'POSTED' && strtoupper(trim((string)($existingPayment['payment_status'] ?? ''))) === 'PENDING') {
+            return payment_gateway_finalize_pending_stripe_payment($existing, $invoice, [
+                'payment_date' => date('Y-m-d'),
+                'payment_method' => $actualMethod,
+                'gross_amount' => round(((int)($session['amount_total'] ?? 0)) / 100, 2),
+                'fee_amount' => $charge !== [] ? payment_gateway_stripe_charge_fee_amount($charge) : 0.00,
+                'net_amount' => $charge !== [] ? payment_gateway_stripe_charge_net_amount($charge) : null,
+                'deposit_account_id' => payment_gateway_default_deposit_account_id(),
+                'fee_expense_account_id' => payment_gateway_default_fee_expense_account_id(),
+                'reference_number' => $chargeId !== '' ? $chargeId : ($sessionId !== '' ? $sessionId : $paymentIntentId),
+                'settled_at' => date('Y-m-d H:i:s', (int)($charge['created'] ?? time())),
+                'processor_charge_id' => $chargeId !== '' ? $chargeId : null,
+                'processor_receipt_url' => $charge !== [] ? (trim((string)($charge['receipt_url'] ?? '')) ?: null) : null,
+                'processor_payment_method_label' => $actualMethodLabel !== '' ? $actualMethodLabel : null,
+                'processor_balance_transaction_id' => payment_gateway_stripe_charge_balance_transaction_id($charge) ?: null,
+            ]);
+        }
+        $enrichment = $charge !== [] ? payment_gateway_stripe_enrich_existing_payment($existing, $charge, is_array($paymentIntent) ? $paymentIntent : [], $sessionId) : ['updated' => false];
+        return [
+            'ok' => true,
+            'payment_id' => $existing,
+            'message' => !empty($enrichment['updated']) ? 'Payment already recorded; Stripe details enriched.' : 'Payment already recorded.',
+            'enriched' => !empty($enrichment['updated']),
+        ];
     }
-    if ($sessionStatus !== 'COMPLETE' || $paymentStatus !== 'PAID') {
+    if ($localStatus === '') {
         return ['ok' => false, 'deferred' => true, 'errors' => ['Stripe reports this payment as ' . strtolower($paymentStatus ?: $sessionStatus ?: 'pending') . '. It has not been posted into the invoice ledger yet.']];
     }
 
@@ -626,27 +756,23 @@ function payment_gateway_record_stripe_invoice_payment(array $invoice, array $se
     if ($amountToApply <= 0) {
         return ['ok' => false, 'ignored' => true, 'errors' => ['Nothing remains to apply locally for this Stripe payment.']];
     }
-    $methodTypes = $session['payment_method_types'] ?? [];
-    $method = in_array('us_bank_account', is_array($methodTypes) ? $methodTypes : [], true) ? 'ACH' : 'CARD';
-    if ($charge !== []) {
-        $method = payment_gateway_stripe_payment_method_from_charge($charge);
-    }
+    $method = $actualMethod;
     $created = (int)($session['created'] ?? (is_array($paymentIntent) ? ($paymentIntent['created'] ?? 0) : 0) ?: ($charge['created'] ?? time()));
     $receiptUrl = is_array($charge) ? trim((string)($charge['receipt_url'] ?? '')) : '';
-    $methodLabel = is_array($charge) ? payment_gateway_stripe_payment_method_label($charge) : (in_array('us_bank_account', is_array($methodTypes) ? $methodTypes : [], true) ? 'us_bank_account' : 'card');
+    $methodLabel = $actualMethodLabel;
 
     $result = accounting_record_invoice_payment((int)$invoice['invoice_id'], [
         'payment_date' => date('Y-m-d', $created > 0 ? $created : time()),
         'payment_method' => $method,
         'gross_amount' => $amountToApply,
-        'fee_amount' => 0.00,
+        'fee_amount' => $charge !== [] ? payment_gateway_stripe_charge_fee_amount($charge) : 0.00,
         'deposit_account_id' => payment_gateway_default_deposit_account_id(),
         'fee_expense_account_id' => payment_gateway_default_fee_expense_account_id(),
-        'reference_number' => $sessionId !== '' ? $sessionId : ($paymentIntentId !== '' ? $paymentIntentId : (string)($invoice['invoice_number'] ?? '')),
+        'reference_number' => $chargeId !== '' ? $chargeId : ($sessionId !== '' ? $sessionId : ($paymentIntentId !== '' ? $paymentIntentId : (string)($invoice['invoice_number'] ?? ''))),
         'memo' => 'Stripe Checkout payment ' . ($sessionId !== '' ? $sessionId : $paymentIntentId),
         'processor_name' => 'STRIPE',
         'processor_txn_id' => $chargeId !== '' ? $chargeId : ($sessionId !== '' ? $sessionId : $paymentIntentId),
-        'payment_status' => 'POSTED',
+        'payment_status' => $localStatus,
     ], 0);
     if (!empty($result['ok'])) {
         payment_gateway_stripe_update_local_payment((int)$result['payment_id'], [
@@ -656,8 +782,10 @@ function payment_gateway_record_stripe_invoice_payment(array $invoice, array $se
             'processor_customer_id' => trim((string)($session['customer'] ?? ($charge['customer'] ?? ''))) ?: null,
             'processor_receipt_url' => $receiptUrl !== '' ? $receiptUrl : null,
             'processor_payment_method_label' => $methodLabel !== '' ? $methodLabel : null,
+            'processor_balance_transaction_id' => payment_gateway_stripe_charge_balance_transaction_id($charge) ?: null,
+            'net_amount' => $charge !== [] ? payment_gateway_stripe_charge_net_amount($charge) : null,
             'processor_environment' => payment_gateway_stripe_mode(),
-            'settled_at' => date('Y-m-d H:i:s', $created > 0 ? $created : time()),
+            'settled_at' => $localStatus === 'POSTED' ? date('Y-m-d H:i:s', $created > 0 ? $created : time()) : null,
         ]);
     }
     return $result;
