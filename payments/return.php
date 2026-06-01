@@ -11,6 +11,8 @@ $errors = [];
 $invoice = null;
 $paymentId = null;
 $statusLabel = 'Pending';
+$currentUser = current_user();
+$canViewPaymentRecord = is_array($currentUser) && strtoupper((string)($currentUser['user_type'] ?? '')) === 'INTERNAL';
 
 try {
     if ($gateway === 'STRIPE') {
@@ -29,7 +31,7 @@ try {
         }
         $result = payment_gateway_record_stripe_invoice_payment($invoice, $session);
         if (!empty($result['ok'])) {
-            $message = (string)($result['message'] ?? 'Payment received.');
+            $message = 'Thank you. This invoice has been paid in full.';
             $paymentId = (int)($result['payment_id'] ?? 0);
             $payment = $paymentId > 0 ? accounting_get_payment($paymentId) : null;
             $statusLabel = strtoupper(trim((string)($payment['payment_status'] ?? ''))) === 'PENDING' ? 'Processing' : 'Paid';
@@ -45,13 +47,13 @@ try {
     $errors[] = $e->getMessage();
 }
 
-page_header('Payment status', '', false);
+page_header('Invoice payment complete', '', false);
 ?>
 <div class="card" style="max-width:780px;margin:0 auto;padding:24px;">
   <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap;">
     <div>
-      <h1 style="margin:0 0 8px;font-size:28px;">Payment status</h1>
-      <div style="opacity:.78;">Gateway: <?= accounting_h($gateway ?: 'UNKNOWN') ?></div>
+      <h1 style="margin:0 0 8px;font-size:28px;">Invoice payment complete</h1>
+      <div style="opacity:.78;">Thank you for your payment.</div>
     </div>
     <div style="padding:8px 12px;border-radius:999px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);font-weight:700;">
       <?= accounting_h($statusLabel) ?>
@@ -72,10 +74,13 @@ page_header('Payment status', '', false);
 
   <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:18px;">
     <?php if ($invoice): ?>
-      <a href="<?= accounting_h(BASE_URL) ?>/payments/pay.php?invoice=<?= rawurlencode((string)$invoice['invoice_number']) ?><?= isset($_GET['method']) ? '&method=' . rawurlencode((string)$_GET['method']) : '' ?>" class="btn btn-secondary" style="text-decoration:none;">Back to payment page</a>
+      <a href="<?= accounting_h(BASE_URL) ?>/payments/pay.php?invoice=<?= rawurlencode((string)$invoice['invoice_number']) ?><?= isset($_GET['method']) ? '&method=' . rawurlencode((string)$_GET['method']) : '' ?>" class="btn btn-secondary" style="text-decoration:none;">Return to invoice</a>
     <?php endif; ?>
-    <?php if ($paymentId): ?>
-      <a href="<?= accounting_h(BASE_URL) ?>/payments/view.php?id=<?= (int)$paymentId ?>" class="btn btn-secondary" style="text-decoration:none;">Open payment record</a>
+    <?php if ($invoice && trim((string)($invoice['stripe_invoice_pdf_url'] ?? '')) !== ''): ?>
+      <a href="<?= accounting_h((string)$invoice['stripe_invoice_pdf_url']) ?>" target="_blank" rel="noopener" class="btn btn-secondary" style="text-decoration:none;">Download invoice PDF</a>
+    <?php endif; ?>
+    <?php if ($paymentId && $canViewPaymentRecord): ?>
+      <a href="<?= accounting_h(BASE_URL) ?>/payments/view.php?id=<?= (int)$paymentId ?>" class="btn btn-secondary" style="text-decoration:none;">View internal payment record</a>
     <?php endif; ?>
   </div>
 </div>
