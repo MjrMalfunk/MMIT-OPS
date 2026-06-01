@@ -152,7 +152,7 @@ page_header('Secure invoice payment', '', false);
               <div><span class="public-pay-status-pill <?= $isPaid ? 'paid' : 'open' ?>"><?= $isPaid ? 'Paid' : accounting_h(public_pay_status_label((string)$invoice['status'])) ?></span></div>
             </div>
             <div class="public-pay-field full">
-              <div class="public-pay-label">Client</div>
+              <div class="public-pay-label">Billed to</div>
               <div class="public-pay-value"><?= accounting_h($clientName) ?></div>
             </div>
             <div class="public-pay-field">
@@ -185,11 +185,7 @@ page_header('Secure invoice payment', '', false);
 
         <section class="public-pay-panel">
           <h2>Trust &amp; security</h2>
-          <ul>
-            <li>Payments are processed securely by Stripe.</li>
-            <li>Midwest Managed IT does not store your card or bank credentials.</li>
-            <li>You will be redirected to Stripe Checkout to complete payment.</li>
-          </ul>
+          <p>Payment is completed securely through Stripe. Midwest Managed IT does not store your card, bank, or login credentials.</p>
         </section>
       </main>
 
@@ -206,7 +202,7 @@ page_header('Secure invoice payment', '', false);
             <?php if ($method === 'ACH'): ?>
               <span class="public-pay-badge">Preferred: Bank / ACH</span>
               <h2>Continue with secure checkout</h2>
-              <p>Bank/ACH is preferred and usually has lower processing fees. Card payment remains available in secure checkout.</p>
+              <p>Bank/ACH is our preferred payment method and is greatly appreciated. Card payment remains available in secure checkout.</p>
             <?php elseif ($method === 'CARD'): ?>
               <span class="public-pay-badge">Card payment</span>
               <h2>Continue with card checkout</h2>
@@ -247,7 +243,7 @@ page_header('Secure invoice payment', '', false);
                   <input type="hidden" name="gateway" value="<?= payment_gateway_h((string)$selectedGateway) ?>">
                   <div class="gateway-row">
                     <strong><?= payment_gateway_h($method === 'ACH' ? 'Stripe Checkout' : (string)($availableGateways[$selectedGateway]['label'] ?? $selectedGateway)) ?></strong>
-                    <span style="opacity:.78;font-size:13px;line-height:1.45;">Payment is completed through Stripe. Midwest Managed IT does not store card or bank login credentials.</span>
+                    <span style="opacity:.78;font-size:13px;line-height:1.45;">Payment is completed securely through Stripe. Midwest Managed IT does not store your card, bank, or login credentials.</span>
                   </div>
                 <?php endif; ?>
                 <button type="submit" class="btn btn-primary">Continue to secure checkout</button>
@@ -273,7 +269,7 @@ page_header('Secure invoice payment', '', false);
 
   <footer class="public-pay-help">
     <strong>Need help?</strong><br>
-    Questions about this invoice? Contact <a href="mailto:billing@midwestmanagedit.com">billing@midwestmanagedit.com</a><?php if ($invoice): ?> and include invoice number <strong><?= accounting_h((string)$invoice['invoice_number']) ?></strong><?php else: ?> and include the invoice number from your email<?php endif; ?>.
+    Questions about this invoice? Contact <a href="mailto:billing@midwestmanagedit.com">billing@midwestmanagedit.com</a> and include your invoice number.
   </footer>
 </div>
 <?php page_footer();
