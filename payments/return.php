@@ -7,6 +7,7 @@ require_once __DIR__ . '/../inc/payment_gateway.php';
 
 $gateway = strtoupper(trim((string)($_GET['gateway'] ?? '')));
 $message = null;
+$heading = 'Payment status';
 $errors = [];
 $invoice = null;
 $paymentId = null;
@@ -31,7 +32,6 @@ try {
         }
         $result = payment_gateway_record_stripe_invoice_payment($invoice, $session);
         if (!empty($result['ok'])) {
-            $message = 'Thank you. This invoice has been paid in full.';
             $paymentId = (int)($result['payment_id'] ?? 0);
             $payment = $paymentId > 0 ? accounting_get_payment($paymentId) : null;
             $statusLabel = strtoupper(trim((string)($payment['payment_status'] ?? ''))) === 'PENDING' ? 'Processing' : 'Paid';
@@ -47,20 +47,36 @@ try {
     $errors[] = $e->getMessage();
 }
 
-page_header('Invoice payment complete', '', false);
+$invoiceIsPaid = false;
+if ($invoice) {
+    $invoiceStatus = strtoupper(trim((string)($invoice['status'] ?? '')));
+    $remainingBalance = round((float)($invoice['balance_due'] ?? 0), 2);
+    $invoiceIsPaid = $invoiceStatus === 'PAID' || $remainingBalance <= 0.00001;
+}
+
+if ($invoiceIsPaid) {
+    $heading = 'Invoice payment complete';
+    $message = 'Thank you. This invoice has been paid in full.';
+    $statusLabel = 'Paid';
+} elseif (!$errors && $invoice) {
+    $heading = 'Payment submitted';
+    $message = 'Your bank payment has been submitted and may show as processing until bank confirmation is complete.';
+    $statusLabel = 'Processing';
+}
+
+page_header($heading, '', false);
 ?>
 <div class="card" style="max-width:780px;margin:0 auto;padding:24px;">
   <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap;">
     <div>
-      <h1 style="margin:0 0 8px;font-size:28px;">Invoice payment complete</h1>
-      <div style="opacity:.78;">Thank you for your payment.</div>
+      <h1 style="margin:0 0 8px;font-size:28px;"><?= accounting_h($heading) ?></h1>
+      <div style="opacity:.78;"><?= accounting_h($message ?: ($errors ? 'We could not confirm this payment automatically.' : 'Thank you for your payment.')) ?></div>
     </div>
     <div style="padding:8px 12px;border-radius:999px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);font-weight:700;">
       <?= accounting_h($statusLabel) ?>
     </div>
   </div>
 
-  <?php if ($message): ?><div class="flash-success" style="margin-top:16px;"><?= accounting_h($message) ?></div><?php endif; ?>
   <?php if ($errors): ?><div class="flash-error" style="margin-top:16px;"><?php foreach ($errors as $error): ?><div><?= accounting_h((string)$error) ?></div><?php endforeach; ?></div><?php endif; ?>
 
   <?php if ($invoice): ?>
