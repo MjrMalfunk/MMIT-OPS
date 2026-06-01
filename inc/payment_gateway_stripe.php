@@ -473,6 +473,26 @@ function payment_gateway_stripe_retrieve_charge(string $chargeId, bool $expandBa
     return $resp['json'];
 }
 
+function payment_gateway_stripe_retrieve_payment_intent(string $paymentIntentId): array {
+    $paymentIntentId = trim($paymentIntentId);
+    if ($paymentIntentId === '') {
+        throw new RuntimeException('Missing Stripe payment intent id.');
+    }
+    $resp = payment_gateway_stripe_request('GET', '/v1/payment_intents/' . rawurlencode($paymentIntentId), [
+        'expand[0]' => 'latest_charge.balance_transaction',
+        'expand[1]' => 'payment_method',
+    ]);
+    return $resp['json'];
+}
+
+function payment_gateway_stripe_charge_has_reconciliation_details(array $charge): bool {
+    if ($charge === []) {
+        return false;
+    }
+    return is_array($charge['payment_method_details'] ?? null)
+        && is_array($charge['balance_transaction'] ?? null);
+}
+
 function payment_gateway_stripe_list_invoice_payments(string $stripeInvoiceId): array {
     $stripeInvoiceId = trim($stripeInvoiceId);
     if ($stripeInvoiceId === '') {
@@ -591,8 +611,32 @@ function payment_gateway_stripe_charge_net_amount(array $charge): ?float {
     return null;
 }
 
-function payment_gateway_stripe_payment_method_label(array $charge): string {
+function payment_gateway_stripe_payment_method_details(array $charge = [], array $paymentIntent = []): array {
     $details = is_array($charge['payment_method_details'] ?? null) ? $charge['payment_method_details'] : [];
+    if ($details !== []) {
+        return $details;
+    }
+
+    $latestCharge = is_array($paymentIntent['latest_charge'] ?? null) ? $paymentIntent['latest_charge'] : [];
+    $details = is_array($latestCharge['payment_method_details'] ?? null) ? $latestCharge['payment_method_details'] : [];
+    if ($details !== []) {
+        return $details;
+    }
+
+    $paymentMethod = is_array($paymentIntent['payment_method'] ?? null) ? $paymentIntent['payment_method'] : [];
+    $type = strtolower(trim((string)($paymentMethod['type'] ?? '')));
+    if ($type === '') {
+        return [];
+    }
+
+    $fallback = ['type' => $type];
+    if (is_array($paymentMethod[$type] ?? null)) {
+        $fallback[$type] = $paymentMethod[$type];
+    }
+    return $fallback;
+}
+
+function payment_gateway_stripe_payment_method_label_from_details(array $details): string {
     $type = strtolower(trim((string)($details['type'] ?? '')));
     if ($type === '') {
         return '';
@@ -605,19 +649,39 @@ function payment_gateway_stripe_payment_method_label(array $charge): string {
     }
     if ($type === 'us_bank_account') {
         $bank = is_array($details['us_bank_account'] ?? null) ? $details['us_bank_account'] : [];
-        $bankName = trim((string)($bank['bank_name'] ?? 'bank account'));
+        $parts = [];
+        $bankName = trim((string)($bank['bank_name'] ?? ''));
+        if ($bankName !== '') {
+            $parts[] = $bankName;
+        }
+        $accountType = trim((string)($bank['account_type'] ?? ''));
+        if ($accountType !== '') {
+            $parts[] = $accountType;
+        }
+        $label = $parts !== [] ? implode(' ', $parts) : 'bank account';
         $last4 = trim((string)($bank['last4'] ?? ''));
-        return $last4 !== '' ? $bankName . ' •••• ' . $last4 : $bankName;
+        return $last4 !== '' ? $label . ' •••• ' . $last4 : $label;
     }
     return $type;
 }
 
-function payment_gateway_stripe_payment_method_from_charge(array $charge): string {
-    $type = strtolower(trim((string)($charge['payment_method_details']['type'] ?? '')));
+function payment_gateway_stripe_payment_method_label(array $charge): string {
+    return payment_gateway_stripe_payment_method_label_from_details(payment_gateway_stripe_payment_method_details($charge));
+}
+
+function payment_gateway_stripe_payment_method_from_details(array $details): string {
+    $type = strtolower(trim((string)($details['type'] ?? '')));
     if ($type === 'us_bank_account' || $type === 'ach_debit') {
         return 'ACH';
     }
+    if ($type === 'card') {
+        return 'CARD';
+    }
     return 'CARD';
+}
+
+function payment_gateway_stripe_payment_method_from_charge(array $charge): string {
+    return payment_gateway_stripe_payment_method_from_details(payment_gateway_stripe_payment_method_details($charge));
 }
 
 function payment_gateway_stripe_record_charge_payment(array $invoice, array $charge): array {
@@ -629,6 +693,7 @@ function payment_gateway_stripe_record_charge_payment(array $invoice, array $cha
         if (is_array($existingPayment) && strtoupper(trim((string)($existingPayment['payment_status'] ?? ''))) === 'PENDING') {
             $result = accounting_post_pending_invoice_payment($existing, (int)$invoice['invoice_id'], [
                 'payment_date' => date('Y-m-d', (int)($charge['created'] ?? time())),
+                'payment_method' => payment_gateway_stripe_payment_method_from_charge($charge),
                 'gross_amount' => round(((int)($charge['amount'] ?? 0)) / 100, 2),
                 'fee_amount' => payment_gateway_stripe_charge_fee_amount($charge),
                 'deposit_account_id' => payment_gateway_default_deposit_account_id(),
@@ -638,6 +703,7 @@ function payment_gateway_stripe_record_charge_payment(array $invoice, array $cha
             ], 0);
             if (!empty($result['ok'])) {
                 payment_gateway_stripe_update_local_payment($existing, [
+                    'payment_method' => payment_gateway_stripe_payment_method_from_charge($charge),
                     'processor_payment_intent_id' => $paymentIntentId !== '' ? $paymentIntentId : null,
                     'processor_charge_id' => $chargeId !== '' ? $chargeId : null,
                     'processor_receipt_url' => trim((string)($charge['receipt_url'] ?? '')) ?: null,
