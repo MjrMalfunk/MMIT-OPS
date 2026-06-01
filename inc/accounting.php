@@ -1958,12 +1958,12 @@ function accounting_get_payment(int $paymentId): ?array {
     $statusSql = $supportsExtended ? "COALESCE(p.payment_status, 'POSTED')" : "'POSTED'";
 
     $extraColumns = [];
-    foreach (['processor_name', 'processor_txn_id', 'processor_payment_intent_id', 'processor_charge_id', 'processor_checkout_session_id', 'processor_customer_id', 'processor_receipt_url', 'processor_payment_method_label', 'processor_environment', 'settled_at', 'voided_at', 'void_reason'] as $column) {
+    foreach (['processor_name', 'processor_txn_id', 'processor_payment_intent_id', 'processor_charge_id', 'processor_checkout_session_id', 'processor_customer_id', 'processor_receipt_url', 'processor_payment_method_label', 'processor_balance_transaction_id', 'processor_environment', 'settled_at', 'voided_at', 'void_reason'] as $column) {
         $extraColumns[] = db_column_exists('payment_receipt', $column) ? 'p.' . $column : 'NULL AS ' . $column;
     }
 
     $sql = "SELECT p.payment_id, p.client_id, p.payment_date, p.payment_method, p.reference_number, p.memo, p.created_at,
-                   p.deposit_account_id, p.ar_account_id,
+                   p.deposit_account_id, p.ar_account_id, p.fee_expense_account_id,
                    {$grossSql} AS gross_amount,
                    {$feeSql} AS fee_amount,
                    {$netSql} AS net_amount,
