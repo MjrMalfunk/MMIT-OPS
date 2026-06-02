@@ -3597,7 +3597,6 @@ function accounting_render_invoice_pdf_bytes(array $invoice, array $lines, array
     $invoiceDate = (string)($invoice['invoice_date'] ?? '');
     $dueDate = (string)($invoice['due_date'] ?? '');
     $status = strtoupper(trim((string)($invoice['status'] ?? 'DRAFT')));
-    $memo = trim((string)($invoice['memo'] ?? ''));
     $totalAmount = (float)($invoice['total_amount'] ?? 0);
     $balanceDue = (float)($invoice['balance_due'] ?? $totalAmount);
     $subtotalAmount = (float)($invoice['subtotal_amount'] ?? $totalAmount);
@@ -3686,16 +3685,6 @@ function accounting_render_invoice_pdf_bytes(array $invoice, array $lines, array
         $lineRows = '<tr><td>No invoice lines</td><td class="num">0</td><td class="num">$0.00</td><td class="num total-col">$0.00</td></tr>';
     }
 
-    $notesText = $memo !== '' ? nl2br(htmlspecialchars($memo)) : 'Any invoice questions, please email billing@midwestmanagedit.com. Thank you.';
-    $paymentText = 'Online payment links will appear here after merchant setup is complete.';
-    if (!empty($paymentSnapshot['is_paid'])) {
-        $paymentText = (string)$paymentSnapshot['detail_text'];
-    } elseif (!empty($paymentSnapshot['has_payments'])) {
-        $paymentText = (string)$paymentSnapshot['detail_text'];
-    } elseif (accounting_invoice_customer_payment_url($invoice) !== '') {
-        $paymentText = 'Pay securely online through the Midwest Managed IT payment portal: ' . htmlspecialchars(accounting_invoice_customer_payment_url($invoice));
-    }
-
     $watermarkHtml = '';
     if (!empty($paymentSnapshot['show_paid_watermark'])) {
         $watermarkSub = '';
@@ -3714,7 +3703,7 @@ function accounting_render_invoice_pdf_bytes(array $invoice, array $lines, array
     @page { margin: 26px 34px 30px 34px; }
     body { font-family: DejaVu Sans, Arial, sans-serif; color: #172033; font-size: 11.5px; margin: 0; }
     .page-shell { position: relative; z-index: 1; }
-    .invoice-page { width: 100%; min-height: 716px; border-collapse: collapse; }
+    .invoice-page { width: 100%; min-height: 700px; border-collapse: collapse; }
     .invoice-page > tbody > tr > td { padding: 0; vertical-align: top; }
     .invoice-page > tbody > tr.content-row > td { height: 100%; }
     .invoice-page > tbody > tr.footer-row > td { vertical-align: bottom; }
@@ -3762,11 +3751,6 @@ function accounting_render_invoice_pdf_bytes(array $invoice, array $lines, array
     .summary-table td { padding: 5px 9px; border-bottom: 1px solid #e5e7eb; }
     .summary-table td:last-child { text-align: right; font-weight: 700; }
     .summary-table tr.total td { background: #f8fafc; font-size: 12.5px; color: #10233f; }
-    .bottom { margin-top: 14px; width: 100%; border-collapse: separate; border-spacing: 0; page-break-inside: avoid; }
-    .bottom td { vertical-align: top; }
-    .notes, .payment { border: 1px solid #d9e2ec; border-radius: 10px; padding: 10px 12px; font-size: 10.5px; line-height: 1.35; }
-    .notes { width: 48%; }
-    .payment { width: 48%; overflow-wrap: anywhere; word-break: break-word; }
     .footer {
         text-align: center;
         font-size: 9.5px;
@@ -3831,20 +3815,6 @@ function accounting_render_invoice_pdf_bytes(array $invoice, array $lines, array
             <tr class="total"><td>Total</td><td>$' . number_format($totalAmount, 2) . '</td></tr>
         </table>
     </div>
-
-    <table class="bottom">
-        <tr>
-            <td class="notes">
-                <div class="box-title">Notes</div>
-                <div>' . $notesText . '</div>
-            </td>
-            <td style="width: 4%;"></td>
-            <td class="payment">
-                <div class="box-title">Payment Details</div>
-                <div>' . htmlspecialchars($paymentText) . '</div>
-            </td>
-        </tr>
-    </table>
 
         </td></tr>
         <tr class="footer-row"><td>
