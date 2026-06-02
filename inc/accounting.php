@@ -3700,13 +3700,9 @@ function accounting_render_invoice_pdf_bytes(array $invoice, array $lines, array
 <head>
 <meta charset="utf-8">
 <style>
-    @page { margin: 26px 34px 30px 34px; }
+    @page { margin: 26px 34px 58px 34px; }
     body { font-family: DejaVu Sans, Arial, sans-serif; color: #172033; font-size: 11.5px; margin: 0; }
     .page-shell { position: relative; z-index: 1; }
-    .invoice-page { width: 100%; min-height: 700px; border-collapse: collapse; }
-    .invoice-page > tbody > tr > td { padding: 0; vertical-align: top; }
-    .invoice-page > tbody > tr.content-row > td { height: 100%; }
-    .invoice-page > tbody > tr.footer-row > td { vertical-align: bottom; }
     .watermark-shell { position: fixed; top: 36%; left: 2%; width: 96%; text-align: center; transform: rotate(-26deg); transform-origin: center center; z-index: 0; }
     .watermark { width: 100%; text-align: center; font-weight: 900; }
     .watermark-outline { font-size: 100px; letter-spacing: 10px; color: rgba(22, 163, 74, 0.08); }
@@ -3752,19 +3748,21 @@ function accounting_render_invoice_pdf_bytes(array $invoice, array $lines, array
     .summary-table td:last-child { text-align: right; font-weight: 700; }
     .summary-table tr.total td { background: #f8fafc; font-size: 12.5px; color: #10233f; }
     .footer {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: -36px;
         text-align: center;
         font-size: 9.5px;
         color: #64748b;
         border-top: 1px solid #d9e2ec;
         padding-top: 7px;
-        margin-top: 12px;
     }
 </style>
 </head>
 <body>' . $watermarkHtml . '
+    <div class="footer">LnK Consulting, LLC dba Midwest Managed IT | billing@midwestmanagedit.com | Thank you for your business and prompt payment.</div>
     <div class="page-shell">
-    <table class="invoice-page">
-        <tr class="content-row"><td>
     <table class="header">
         <tr>
             <td class="logo-wrap"><div class="logo-block"><div class="logo-image">' . $logoHtml . '</div><div class="logo-legal">' . htmlspecialchars($companyLegalName) . '</div><div class="logo-email">' . htmlspecialchars($companyEmail) . '</div></div></td>
@@ -3816,11 +3814,6 @@ function accounting_render_invoice_pdf_bytes(array $invoice, array $lines, array
         </table>
     </div>
 
-        </td></tr>
-        <tr class="footer-row"><td>
-    <div class="footer">LnK Consulting, LLC dba Midwest Managed IT | billing@midwestmanagedit.com | Thank you for your business and prompt payment.</div>
-        </td></tr>
-    </table>
     </div>
 </body>
 </html>';
