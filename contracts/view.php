@@ -96,12 +96,31 @@ $onboardingProgress = accounting_contract_onboarding_progress($contractId);
 $currentStatus = strtoupper((string)($contract['status'] ?? 'DRAFT'));
 $hasSignedCopy = !empty($contract['signed_document_path']);
 $hasAuditCopy = !empty($contract['audit_document_path']);
+$onboardingCompletedAt = '';
+foreach ($onboardingTasks as $onboardingTask) {
+    if (!empty($onboardingTask['completed_at']) && (string)$onboardingTask['completed_at'] > $onboardingCompletedAt) {
+        $onboardingCompletedAt = (string)$onboardingTask['completed_at'];
+    }
+}
+if (!empty($contract['go_live_at'])) {
+    $onboardingCompletedAt = (string)$contract['go_live_at'];
+}
+$onboardingCompletedLabel = '—';
+if ($onboardingCompletedAt !== '') {
+    $onboardingCompletedTimestamp = strtotime($onboardingCompletedAt);
+    $onboardingCompletedLabel = $onboardingCompletedTimestamp !== false
+        ? date('Y-m-d H:i', $onboardingCompletedTimestamp)
+        : substr($onboardingCompletedAt, 0, 16);
+}
+$onboardingCompleteCollapsed = $currentStatus === 'ACTIVE' && !empty($onboardingProgress['all_complete']) && $onboardingTasks !== [];
 $canRetrySyncro = $hasSignedCopy || in_array($currentStatus, ['ONBOARDING', 'SIGNED_PENDING_ONBOARDING', 'ACTIVE'], true);
 $canCompleteOnboarding = in_array($currentStatus, ['ONBOARDING', 'SIGNED_PENDING_ONBOARDING'], true) && !empty($onboardingProgress['all_complete']);
 $esignaturesLatestSend = esignatures_latest_send($contractId);
 $esignaturesWebhookUrl = esignatures_webhook_url();
 $esignaturesWebhookLabel = esignatures_is_staging_mode() ? 'staging/test webhook URL' : 'webhook URL';
 $showEsignaturesTestButton = esignatures_is_enabled() && esignatures_test_mode();
+$showUnsignedDraftPreview = !$hasSignedCopy && in_array($currentStatus, ['DRAFT','PENDING_SIGNATURE'], true);
+$unsignedDraftPdfHref = BASE_URL . '/contracts/pdf.php?id=' . (int)$contract['contract_id'];
 $signedDocumentHref = '';
 if (!empty($contract['signed_document_path'])) {
     $signedDocumentValue = trim((string)$contract['signed_document_path']);
@@ -149,6 +168,9 @@ if (!empty($contract['signed_date'])) {
 
 
 $monthlyRecurringTotal = 0.0;
+$billingCycle = accounting_normalize_billing_cycle((string)($contract['billing_cycle'] ?? 'MONTHLY'));
+$billingCycleLabel = accounting_billing_cycle_label($billingCycle);
+$cycleRecurringTotal = 0.0;
 $baseServiceCode = '';
 $baseService = null;
 $selectedAddons = [];
@@ -175,13 +197,14 @@ foreach ($services as $svc) {
             }
         }
     }
-    if (in_array($code, ['SRVR-MGMT', 'SRVR-BKUP'], true)) {
+    if (in_array($code, ['SRVR-MGMT', 'SRVR-BKUP', 'SRVR-BK-500'], true)) {
         $coveredServers = max($coveredServers, (float)($svc['quantity'] ?? 0));
     }
 }
 if ($monthlyRecurringTotal <= 0) {
-    $monthlyRecurringTotal = (float)($contract['base_amount'] ?? 0);
+    $monthlyRecurringTotal = (float)($contract['base_amount'] ?? 0) / accounting_billing_cycle_month_multiplier($billingCycle);
 }
+$cycleRecurringTotal = round($monthlyRecurringTotal * accounting_billing_cycle_month_multiplier($billingCycle), 2);
 
 $servicePackage = null;
 if ($baseServiceCode !== '' && isset($packages[$baseServiceCode])) {
@@ -247,7 +270,7 @@ page_header((string)$contract['contract_number'], 'contracts');
 <?php if ($esignaturesStatusMessages || $esignaturesWebhookUrl !== ''): ?><div class="card" style="padding:14px;margin-bottom:16px;border:1px solid rgba(139,92,246,.28);background:rgba(76,29,149,.18);"><div style="font-weight:800;margin-bottom:8px;color:#ede9fe;">eSignatures status</div><?php if ($esignaturesStatusMessages): ?><div style="display:flex;gap:8px;flex-wrap:wrap;"><?php foreach (array_values(array_unique($esignaturesStatusMessages)) as $esignaturesStatusMessage): ?><span style="display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.10);font-size:12px;"><?= accounting_h($esignaturesStatusMessage) ?></span><?php endforeach; ?></div><?php endif; ?><?php if ($esignaturesWebhookUrl !== ''): ?><div style="font-size:12px;opacity:.78;margin-top:8px;word-break:break-all;">Configured eSignatures <?= accounting_h($esignaturesWebhookLabel) ?>: <?= accounting_h($esignaturesWebhookUrl) ?></div><?php endif; ?><?php if (!empty($esignaturesLatestSend['last_webhook_at'])): ?><div style="font-size:12px;opacity:.68;margin-top:8px;">Last eSignatures webhook <?= accounting_h((string)$esignaturesLatestSend['last_webhook_at']) ?></div><?php endif; ?></div><?php endif; ?>
 
 <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:16px;">
-  <div class="card" style="padding:16px;"><div style="font-size:13px;opacity:.78;">Monthly recurring total</div><div style="font-size:24px;font-weight:800;">$<?= number_format($monthlyRecurringTotal, 2) ?></div></div>
+  <div class="card" style="padding:16px;"><div style="font-size:13px;opacity:.78;">Billing-cycle total</div><div style="font-size:24px;font-weight:800;">$<?= number_format($cycleRecurringTotal, 2) ?></div><div style="font-size:12px;opacity:.68;margin-top:4px;"><?= accounting_h($billingCycleLabel) ?> · $<?= number_format($monthlyRecurringTotal, 2) ?>/mo base</div></div>
   <div class="card" style="padding:16px;"><div style="font-size:13px;opacity:.78;">Onboarding progress</div><div style="font-size:24px;font-weight:800;"><?= (int)($onboardingProgress['percent'] ?? 0) ?>%</div><div style="font-size:12px;opacity:.68;margin-top:4px;"><?= (int)($onboardingProgress['completed'] ?? 0) ?> of <?= (int)($onboardingProgress['required'] ?? 0) ?> required tasks complete</div></div>
   <div class="card" style="padding:16px;"><div style="font-size:13px;opacity:.78;">Billing start</div><div style="font-size:24px;font-weight:800;"><?= accounting_h((string)($contract['billing_start_date'] ?: 'Go-live pending')) ?></div></div>
   <div class="card" style="padding:16px;"><div style="font-size:13px;opacity:.78;">Linked services</div><div style="font-size:24px;font-weight:800;"><?= count($clientServices) ?></div></div>
@@ -258,7 +281,7 @@ page_header((string)$contract['contract_number'], 'contracts');
     <h2 style="margin:0 0 12px;font-size:19px;">Agreement details</h2>
     <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;">
       <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Service package</div><div><?= accounting_h((string)($servicePackage['name'] ?? $contract['sla_level'] ?: '-')) ?></div></div>
-      <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Billing cycle</div><div><?= accounting_h((string)$contract['billing_cycle']) ?></div></div>
+      <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Billing cycle</div><div><?= accounting_h($billingCycleLabel) ?></div></div>
       <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Productivity platform</div><div><?= accounting_h((string)($productivitySelection['platform_name'] ?? 'No productivity platform selected')) ?></div></div>
       <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">License level</div><div><?= accounting_h((string)($productivitySelection['license_name'] ?? 'None selected')) ?></div></div>
       <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Covered workstations</div><div><?= number_format((float)($contract['covered_devices'] ?? 0), 0) ?></div></div>
@@ -274,7 +297,11 @@ page_header((string)$contract['contract_number'], 'contracts');
       <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Auto renew</div><div><?= !empty($contract['auto_renew']) ? 'Yes' : 'No' ?></div></div>
     </div>
     <?php if (!empty($contract['notes'])): ?><div style="margin-top:14px;"><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Notes / scope</div><div><?= nl2br(accounting_h((string)$contract['notes'])) ?></div></div><?php endif; ?>
-    <?php if ($signedDocumentHref !== ''): ?><div style="margin-top:14px;display:flex;gap:12px;flex-wrap:wrap;"><a href="<?= accounting_h($signedDocumentHref) ?>" target="_blank" rel="noopener noreferrer">Open signed copy</a><?php if ($auditDocumentHref !== ''): ?><a href="<?= accounting_h($auditDocumentHref) ?>" target="_blank" rel="noopener noreferrer">Open audit trail</a><?php endif; ?></div><?php elseif ($auditDocumentHref !== ''): ?><div style="margin-top:14px;"><a href="<?= accounting_h($auditDocumentHref) ?>" target="_blank" rel="noopener noreferrer">Open audit trail</a></div><?php endif; ?>
+    <?php if ($signedDocumentHref !== ''): ?>
+      <div style="margin-top:16px;display:flex;justify-content:center;">
+        <a class="btn btn-primary" style="width:auto;padding:10px 16px;text-decoration:none;" href="<?= accounting_h($signedDocumentHref) ?>" target="_blank" rel="noopener noreferrer">Open signed copy</a>
+      </div>
+    <?php endif; ?>
   </div>
 
   <div class="card" style="padding:16px;overflow:auto;">
@@ -289,8 +316,8 @@ page_header((string)$contract['contract_number'], 'contracts');
           <div style="opacity:.72;font-size:13px;margin-top:4px;"><?= accounting_h((string)($servicePackage['description'] ?? $contract['notes'] ?? '')) ?></div>
         </div>
         <div style="text-align:right;min-width:180px;">
-          <div style="font-size:18px;font-weight:800;">$<?= number_format($monthlyRecurringTotal, 2) ?></div>
-          <div style="opacity:.68;font-size:12px;">Current monthly recurring total</div>
+          <div style="font-size:18px;font-weight:800;">$<?= number_format($cycleRecurringTotal, 2) ?></div>
+          <div style="opacity:.68;font-size:12px;"><?= accounting_h($billingCycleLabel) ?> total ($<?= number_format($monthlyRecurringTotal, 2) ?>/mo base)</div>
         </div>
       </div>
 
@@ -319,8 +346,8 @@ page_header((string)$contract['contract_number'], 'contracts');
               <div style="padding:6px 9px;border-radius:10px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.16);margin-bottom:6px;display:flex;justify-content:space-between;gap:10px;align-items:center;line-height:1.28">
                 <span><?= accounting_h((string)($svc['service_name'] ?: $svc['description'])) ?></span>
                 <div style="text-align:right;white-space:nowrap;">
-                  <strong>$<?= number_format((float)$svc['quantity'] * (float)$svc['unit_price'], 2) ?></strong>
-                  <div style="opacity:.68;font-size:12px;"><?= accounting_h(accounting_pricing_model_label((string)($svc['billing_type'] ?? 'FIXED'), true)) ?></div>
+                  <strong>$<?= number_format((float)$svc['quantity'] * accounting_cycle_unit_price((float)$svc['unit_price'], $billingCycle), 2) ?></strong>
+                  <div style="opacity:.68;font-size:12px;"><?= accounting_h(accounting_pricing_model_label((string)($svc['billing_type'] ?? 'FIXED'), true)) ?> · <?= accounting_h($billingCycleLabel) ?></div>
                 </div>
               </div>
             <?php endforeach; ?>
@@ -354,7 +381,7 @@ page_header((string)$contract['contract_number'], 'contracts');
     <?php if (!$clientServices): ?><div style="opacity:.72;">No client services linked yet.</div><?php else: ?>
     <table style="width:100%;border-collapse:collapse;">
       <thead><tr style="text-align:left;border-bottom:1px solid rgba(255,255,255,.10)"><th style="padding:10px 8px;">Description</th><th class="date" style="padding:10px 8px;">Next bill</th><th class="money" style="padding:10px 8px;">Value</th><th class="status" style="padding:10px 8px;">Status</th><th style="padding:10px 8px;">Open</th></tr></thead>
-      <tbody><?php foreach ($clientServices as $svc): ?><tr style="border-bottom:1px solid rgba(255,255,255,.06)"><td style="padding:10px 8px;"><strong><?= accounting_h((string)$svc['description']) ?></strong><div style="opacity:.65;font-size:12px;"><?= accounting_h((string)($svc['item_code'] ?: $svc['item_name'])) ?></div></td><td class="date" style="padding:10px 8px;"><?= accounting_h((string)$svc['next_bill_date']) ?></td><td class="money" style="padding:10px 8px;">$<?= number_format((float)$svc['quantity'] * (float)$svc['unit_price'], 2) ?></td><td class="status" style="padding:10px 8px;"><?= accounting_client_service_status_badge_html((string)$svc['status']) ?></td><td style="padding:10px 8px;"><a href="<?= accounting_h(BASE_URL) ?>/clients/service_view.php?id=<?= (int)$svc['client_service_id'] ?>">Open</a></td></tr><?php endforeach; ?></tbody>
+      <tbody><?php foreach ($clientServices as $svc): ?><tr style="border-bottom:1px solid rgba(255,255,255,.06)"><td style="padding:10px 8px;"><strong><?= accounting_h((string)$svc['description']) ?></strong><div style="opacity:.65;font-size:12px;"><?= accounting_h((string)($svc['item_code'] ?: $svc['item_name'])) ?></div></td><td class="date" style="padding:10px 8px;"><?= accounting_h((string)$svc['next_bill_date']) ?></td><td class="money" style="padding:10px 8px;">$<?= number_format((float)$svc['quantity'] * accounting_cycle_unit_price((float)$svc['unit_price'], (string)($svc['billing_cycle'] ?? $billingCycle)), 2) ?></td><td class="status" style="padding:10px 8px;"><?= accounting_client_service_status_badge_html((string)$svc['status']) ?></td><td style="padding:10px 8px;"><a href="<?= accounting_h(BASE_URL) ?>/clients/service_view.php?id=<?= (int)$svc['client_service_id'] ?>">Open</a></td></tr><?php endforeach; ?></tbody>
     </table>
     <?php endif; ?>
   </div>
@@ -368,6 +395,15 @@ page_header((string)$contract['contract_number'], 'contracts');
       <?php if ($esignaturesLatestSend): ?>
       <div style="padding:10px 12px;border-radius:12px;border:1px solid rgba(34,197,94,.22);background:rgba(34,197,94,.08);font-size:12px;line-height:1.45;margin-bottom:14px;">
         <strong>eSignatures:</strong> <?= accounting_h((string)($esignaturesLatestSend['status'] ?: 'sent')) ?><?php if (!empty($esignaturesLatestSend['esignatures_contract_id'])): ?> · ID <?= accounting_h((string)$esignaturesLatestSend['esignatures_contract_id']) ?><?php endif; ?><?php if (!empty($esignaturesLatestSend['test_mode'])): ?> · TEST<?php endif; ?>
+      </div>
+      <?php endif; ?>
+      <?php if ($showUnsignedDraftPreview): ?>
+      <div style="display:grid;gap:10px;margin-bottom:14px;padding:12px 14px;border-radius:12px;border:1px solid rgba(59,130,246,.24);background:rgba(59,130,246,.08);">
+        <div style="font-size:12px;opacity:.78;line-height:1.45;">Admin review only: preview or download the unsigned draft agreement generated from the current OPS contract data before sending to eSignature. The signed eSignatures copy remains the source of truth after completion.</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <a class="btn btn-secondary" target="_blank" rel="noopener" style="width:auto;padding:10px 14px;text-decoration:none;" href="<?= accounting_h($unsignedDraftPdfHref) ?>">Preview unsigned agreement</a>
+          <a class="btn btn-secondary" style="width:auto;padding:10px 14px;text-decoration:none;" href="<?= accounting_h($unsignedDraftPdfHref . '&download=1') ?>">Download draft agreement PDF</a>
+        </div>
       </div>
       <?php endif; ?>
       <?php if ($showEsignaturesTestButton && in_array($currentStatus, ['DRAFT','PENDING_SIGNATURE'], true)): ?>
@@ -447,7 +483,20 @@ page_header((string)$contract['contract_number'], 'contracts');
       <?php elseif (!$onboardingTasks): ?>
         <div style="opacity:.72;line-height:1.55;">Onboarding checklist will appear here once the contract enters onboarding.</div>
       <?php else: ?>
-        <div style="display:grid;gap:10px;">
+        <?php if ($onboardingCompleteCollapsed): ?>
+          <div style="padding:14px;border-radius:14px;border:1px solid rgba(34,197,94,.24);background:rgba(34,197,94,.08);display:flex;justify-content:space-between;gap:14px;align-items:center;flex-wrap:wrap;">
+            <div>
+              <div style="font-weight:800;color:#bbf7d0;">Onboarding complete</div>
+              <div style="font-size:13px;opacity:.82;margin-top:4px;"><?= (int)($onboardingProgress['completed'] ?? 0) ?>/<?= (int)($onboardingProgress['required'] ?? 0) ?> tasks completed</div>
+              <div style="font-size:12px;opacity:.68;margin-top:4px;">Completed <?= accounting_h($onboardingCompletedLabel) ?></div>
+            </div>
+          </div>
+          <details style="margin-top:12px;">
+            <summary style="cursor:pointer;font-weight:800;color:#dbeafe;">View onboarding details / Show checklist</summary>
+            <div style="display:grid;gap:10px;margin-top:12px;">
+        <?php else: ?>
+          <div style="display:grid;gap:10px;">
+        <?php endif; ?>
         <?php foreach ($onboardingTasks as $task): ?>
           <div id="checklist-item-<?= (int)$task['task_id'] ?>" style="padding:10px 12px;border-radius:12px;border:1px solid <?= !empty($task['is_completed']) ? 'rgba(34,197,94,.24)' : 'rgba(255,255,255,.08)' ?>;background:<?= !empty($task['is_completed']) ? 'rgba(34,197,94,.08)' : 'rgba(255,255,255,.03)' ?>;display:flex;justify-content:space-between;gap:12px;align-items:flex-start;scroll-margin-top:24px;">
             <div>
@@ -465,7 +514,10 @@ page_header((string)$contract['contract_number'], 'contracts');
             </form>
           </div>
         <?php endforeach; ?>
-        </div>
+          </div>
+        <?php if ($onboardingCompleteCollapsed): ?>
+          </details>
+        <?php endif; ?>
       <?php endif; ?>
     </div>
 

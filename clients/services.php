@@ -6,6 +6,7 @@ require_once __DIR__ . '/../inc/accounting.php';
 require_login();
 accounting_require_ready();
 csrf_check();
+accounting_ensure_productivity_service_items();
 
 if (!accounting_client_service_ready()) {
     page_header('Client Services', 'clients');
@@ -110,12 +111,12 @@ page_header('Client Services', 'clients');
       <div><label>Client</label><select name="client_id" id="svc-client"><option value="0">Select client</option><?php foreach ($clients as $client): ?><option value="<?= (int)$client['client_id'] ?>" <?= ((int)$form['client_id'] === (int)$client['client_id']) ? 'selected' : '' ?>><?= accounting_h((string)($client['dba_name'] ?: $client['legal_name'])) ?></option><?php endforeach; ?></select></div>
       <div class="split-2">
         <div><label>Contract</label><select name="contract_id" id="svc-contract"><option value="0">No contract</option></select></div>
-        <div><label>Catalog item</label><select name="item_id" id="svc-item"><option value="0">Select product/service</option><?php foreach ($catalogItems as $item): ?><option value="<?= (int)$item['item_id'] ?>" data-name="<?= accounting_h((string)$item['item_name']) ?>" data-price="<?= accounting_h((string)$item['default_unit_price']) ?>" data-cycle="<?= accounting_h((string)$item['default_billing_cycle']) ?>" data-term="<?= (int)($item['term_months'] ?? 0) ?>" data-type="<?= accounting_h((string)$item['item_type']) ?>" data-revenue="<?= (int)($item['revenue_account_id'] ?? 0) ?>" data-taxable="<?= !empty($item['is_taxable']) ? '1' : '0' ?>" <?= ((int)$form['item_id'] === (int)$item['item_id']) ? 'selected' : '' ?>><?= accounting_h((string)($item['item_code'] ?: '—')) ?> · <?= accounting_h((string)$item['item_name']) ?></option><?php endforeach; ?></select></div>
+        <div><label>Catalog item</label><select name="item_id" id="svc-item"><option value="0">Select product/service</option><?php foreach ($catalogItems as $item): ?><option value="<?= (int)$item['item_id'] ?>" data-name="<?= accounting_h((string)$item['item_name']) ?>" data-price="<?= accounting_h((string)$item['default_unit_price']) ?>" data-cycle="<?= accounting_h(accounting_normalize_billing_cycle((string)$item['default_billing_cycle'])) ?>" data-term="<?= (int)($item['term_months'] ?? 0) ?>" data-type="<?= accounting_h((string)$item['item_type']) ?>" data-revenue="<?= (int)($item['revenue_account_id'] ?? 0) ?>" data-taxable="<?= !empty($item['is_taxable']) ? '1' : '0' ?>" <?= ((int)$form['item_id'] === (int)$item['item_id']) ? 'selected' : '' ?>><?= accounting_h((string)($item['item_code'] ?: '—')) ?> · <?= accounting_h((string)$item['item_name']) ?></option><?php endforeach; ?></select></div>
       </div>
       <div><label>Description</label><input type="text" name="description" id="svc-description" value="<?= accounting_h((string)$form['description']) ?>"><div class="form-hint">Good descriptions flow through to recurring billing and invoice lines.</div></div>
       <div class="split-2">
         <div><label>Pricing model</label><select name="pricing_model" id="svc-pricing-model"><?php foreach (accounting_get_pricing_models() as $model): ?><option value="<?= accounting_h($model) ?>" <?= ((string)$form['pricing_model'] === $model) ? 'selected' : '' ?>><?= accounting_h($model) ?></option><?php endforeach; ?></select></div>
-        <div><label>Billing cycle</label><select name="billing_cycle" id="svc-cycle"><?php foreach (accounting_get_recurring_cycles() as $cycle): ?><option value="<?= accounting_h($cycle) ?>" <?= ((string)$form['billing_cycle'] === $cycle) ? 'selected' : '' ?>><?= accounting_h($cycle) ?></option><?php endforeach; ?></select></div>
+        <div><label>Billing cycle</label><select name="billing_cycle" id="svc-cycle"><?php foreach (accounting_get_recurring_cycles() as $cycle): ?><option value="<?= accounting_h($cycle) ?>" <?= (accounting_normalize_billing_cycle((string)$form['billing_cycle']) === $cycle) ? 'selected' : '' ?>><?= accounting_h(accounting_billing_cycle_label($cycle)) ?></option><?php endforeach; ?></select></div>
       </div>
       <div class="split-3">
         <div><label>Quantity</label><input type="number" step="0.01" min="0.01" name="quantity" id="svc-quantity" value="<?= accounting_h((string)$form['quantity']) ?>"></div>
@@ -164,7 +165,7 @@ page_header('Client Services', 'clients');
         <?php $isActive = strtoupper((string)($row['status'] ?? 'ACTIVE')) === 'ACTIVE'; ?>
         <tr>
           <td><strong><?= accounting_h((string)($row['dba_name'] ?: $row['legal_name'])) ?></strong><div class="muted-note"><?= accounting_h((string)($row['item_name'] ?: $row['description'])) ?></div></td>
-          <td><?= accounting_h((string)$row['pricing_model']) ?><div class="muted-note"><?= accounting_h((string)$row['billing_cycle']) ?><?= !empty($row['term_months']) ? ' · ' . (int)$row['term_months'] . ' mo term' : '' ?></div></td>
+          <td><?= accounting_h((string)$row['pricing_model']) ?><div class="muted-note"><?= accounting_h(accounting_billing_cycle_label((string)$row['billing_cycle'])) ?><?= !empty($row['term_months']) ? ' · ' . (int)$row['term_months'] . ' mo term' : '' ?></div></td>
           <td class="date"><?= accounting_h((string)$row['next_bill_date']) ?><div class="muted-note"><?= accounting_h((string)($row['recurring_last_billed_date'] ?: 'Never billed')) ?></div></td>
           <td class="money">$<?= number_format((float)$row['quantity'] * (float)$row['unit_price'], 2) ?><div class="muted-note"><?= number_format((float)$row['quantity'], 2) ?> × $<?= number_format((float)$row['unit_price'], 2) ?></div></td>
           <td class="status"><span class="badge <?= $isActive ? 'badge-active' : 'badge-inactive' ?>"><?= accounting_h((string)$row['status']) ?></span><div class="muted-note"><?= !empty($row['auto_renew']) ? 'Auto renew' : 'Manual renew' ?></div></td>
@@ -198,8 +199,15 @@ function money(n) {
   const value = Number.parseFloat(n || '0');
   return `$${value.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
 }
+function normalizeCycle(cycle) {
+  const normalized = String(cycle || 'MONTHLY').trim().toUpperCase().replace(/[\s-]+/g, '_');
+  return normalized === 'SEMI_ANNUAL' ? 'SEMIANNUAL' : normalized;
+}
 function cycleLabel(cycle) {
-  return (cycle || 'MONTHLY').replace(/_/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase());
+  return {MONTHLY: 'Monthly', QUARTERLY: 'Quarterly', SEMIANNUAL: 'Semi-annual', ANNUAL: 'Annual'}[normalizeCycle(cycle)] || 'Monthly';
+}
+function cycleMonths(cycle) {
+  return {MONTHLY: 1, QUARTERLY: 3, SEMIANNUAL: 6, ANNUAL: 12}[normalizeCycle(cycle)] || 1;
 }
 function addMonthsToDate(dateStr, months) {
   const base = new Date(dateStr + 'T00:00:00');
@@ -214,13 +222,12 @@ function suggestNextBill() {
   const cycle = svcCycle.value;
   const startDate = svcStartDate.value;
   if (!startDate) return;
-  const map = {MONTHLY: 1, QUARTERLY: 3, SEMIANNUAL: 6, ANNUAL: 12};
-  if (map[cycle]) {
-    svcNextBill.value = addMonthsToDate(startDate, map[cycle]);
+  if (cycleMonths(cycle)) {
+    svcNextBill.value = addMonthsToDate(startDate, cycleMonths(cycle));
   }
 }
 function updatePreview() {
-  const total = (parseFloat(svcQty.value || '0') || 0) * (parseFloat(svcPrice.value || '0') || 0);
+  const total = (parseFloat(svcQty.value || '0') || 0) * (parseFloat(svcPrice.value || '0') || 0) * cycleMonths(svcCycle.value);
   svcEstimatedValue.textContent = money(total);
   svcCyclePreview.textContent = cycleLabel(svcCycle.value);
   svcNextPreview.textContent = svcNextBill.value || 'Not set';

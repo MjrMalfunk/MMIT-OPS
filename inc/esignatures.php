@@ -204,27 +204,195 @@ function esignatures_storage_ready(): bool {
     return true;
 }
 function esignatures_find_monthly_amount(int $contractId, array $contract): float {
+    $fallback = (float)($contract['base_amount'] ?? 0);
+    $billingCycle = (string)($contract['billing_cycle'] ?? 'MONTHLY');
+    $cycleMultiplier = function_exists('accounting_billing_cycle_month_multiplier') ? accounting_billing_cycle_month_multiplier($billingCycle) : 1;
+    if ($cycleMultiplier > 1 && $fallback > 0) {
+        $fallback = $fallback / $cycleMultiplier;
+    }
     if ($contractId <= 0 || !db_table_exists('contract_service')) {
-        return (float)($contract['base_amount'] ?? 0);
+        return $fallback;
     }
     $st = db()->prepare('SELECT COALESCE(SUM(CASE WHEN is_included = 0 THEN quantity * unit_price ELSE 0 END), 0) FROM contract_service WHERE contract_id = ?');
     $st->execute([$contractId]);
     $total = (float)$st->fetchColumn();
-    return $total > 0 ? $total : (float)($contract['base_amount'] ?? 0);
+    return $total > 0 ? $total : $fallback;
 }
 
-function esignatures_contract_placeholder_values(array $contract, float $monthlyAmount): array {
+function esignatures_format_money(float $amount): string {
+    return number_format($amount, 2, '.', '');
+}
+
+function esignatures_format_quantity(float $quantity): string {
+    return $quantity > 0 ? number_format($quantity, 0, '.', '') : '';
+}
+
+function esignatures_service_address(array $contract): string {
+    $lines = [];
+    $addr1 = trim((string)($contract['address1'] ?? ''));
+    $addr2 = trim((string)($contract['address2'] ?? ''));
+    $city = trim((string)($contract['city'] ?? ''));
+    $state = trim((string)($contract['state'] ?? ''));
+    $postal = trim((string)($contract['postal_code'] ?? ''));
+    $country = trim((string)($contract['country'] ?? ''));
+
+    $street = trim($addr1 . ' ' . $addr2);
+    if ($street !== '') {
+        $lines[] = $street;
+    }
+    $cityLine = trim(preg_replace('/\s+/', ' ', trim($city . ', ' . $state . ' ' . $postal)) ?? '');
+    $cityLine = trim($cityLine, ', ');
+    if ($cityLine !== '') {
+        $lines[] = $cityLine;
+    }
+    if ($country !== '' && strtoupper($country) !== 'US' && strtoupper($country) !== 'USA') {
+        $lines[] = $country;
+    }
+    return implode("\n", $lines);
+}
+
+function esignatures_productivity_item_codes(): array {
+    if (!function_exists('accounting_productivity_catalog')) {
+        return [];
+    }
+    $codes = [];
+    foreach (accounting_productivity_catalog() as $platformMeta) {
+        foreach ((array)($platformMeta['licenses'] ?? []) as $licenseMeta) {
+            $code = strtoupper(trim((string)($licenseMeta['item_code'] ?? '')));
+            if ($code !== '') {
+                $codes[$code] = true;
+            }
+        }
+    }
+    return array_keys($codes);
+}
+
+function esignatures_contract_base_service_package(array $contract, array $services): ?array {
+    if (!function_exists('accounting_service_packages')) {
+        return null;
+    }
+    $packages = accounting_service_packages();
+    $baseServiceCode = '';
+    foreach ($services as $svc) {
+        $code = strtoupper(trim((string)($svc['item_code'] ?? $svc['service_code'] ?? '')));
+        if ($code !== '' && str_starts_with($code, 'MSP-')) {
+            $baseServiceCode = preg_replace('/^MSP-/', '', $code) ?? '';
+            break;
+        }
+    }
+    if ($baseServiceCode !== '' && isset($packages[$baseServiceCode])) {
+        return $packages[$baseServiceCode];
+    }
+    $serviceLevel = trim((string)($contract['sla_level'] ?? ''));
+    foreach ($packages as $pkg) {
+        if (strcasecmp((string)($pkg['name'] ?? ''), $serviceLevel) === 0) {
+            return $pkg;
+        }
+    }
+    return null;
+}
+
+function esignatures_contract_addon_labels(array $services): array {
+    $productivityCodes = esignatures_productivity_item_codes();
+    $labels = [];
+    foreach ($services as $svc) {
+        $code = strtoupper(trim((string)($svc['item_code'] ?? $svc['service_code'] ?? '')));
+        if (!empty($svc['is_included']) || $code === '' || str_starts_with($code, 'MSP-') || in_array($code, $productivityCodes, true)) {
+            continue;
+        }
+        $label = trim((string)($svc['service_name'] ?? $svc['description'] ?? ''));
+        if ($label === '') {
+            $label = $code;
+        }
+        $quantity = (float)($svc['quantity'] ?? 0);
+        if ($quantity > 0) {
+            $label .= ' (' . number_format($quantity, 0) . ')';
+        }
+        $labels[] = $label;
+    }
+    return $labels;
+}
+
+function esignatures_contract_included_service_labels(?array $servicePackage, array $services): array {
+    $labels = $servicePackage ? (array)($servicePackage['included_services'] ?? []) : [];
+    if ($labels !== []) {
+        return array_values(array_map('strval', $labels));
+    }
+    foreach ($services as $svc) {
+        if (empty($svc['is_included'])) {
+            continue;
+        }
+        $label = trim((string)($svc['service_name'] ?? $svc['description'] ?? ''));
+        if ($label !== '' && !in_array($label, $labels, true)) {
+            $labels[] = $label;
+        }
+    }
+    return array_values(array_map('strval', $labels));
+}
+
+function esignatures_contract_placeholder_values(array $contract, float $monthlyAmount, array $services = []): array {
+    if ($services !== [] && function_exists('accounting_expand_contract_service_rows')) {
+        $services = accounting_expand_contract_service_rows($services);
+    }
+
     $signerName = trim((string)($contract['first_name'] ?? '') . ' ' . (string)($contract['last_name'] ?? ''));
     $companyName = trim((string)($contract['dba_name'] ?? ''));
     if ($companyName === '') $companyName = trim((string)($contract['legal_name'] ?? ''));
     $servicePlan = trim((string)($contract['sla_level'] ?? ''));
     if ($servicePlan === '') $servicePlan = trim((string)($contract['contract_name'] ?? ''));
+    $contactEmail = trim((string)($contract['contact_email'] ?? ''));
+    if ($contactEmail === '') {
+        $contactEmail = trim((string)($contract['client_email'] ?? ''));
+    }
+
+    $billingCycle = (string)($contract['billing_cycle'] ?? 'MONTHLY');
+    $billingCycleLabel = function_exists('accounting_billing_cycle_label') ? accounting_billing_cycle_label($billingCycle) : ucfirst(strtolower(str_replace('_', '-', $billingCycle)));
+    $cycleMultiplier = function_exists('accounting_billing_cycle_month_multiplier') ? accounting_billing_cycle_month_multiplier($billingCycle) : 1;
+    $recurringTotal = round($monthlyAmount * $cycleMultiplier, 2);
+    if ($recurringTotal <= 0 && isset($contract['base_amount'])) {
+        $recurringTotal = (float)$contract['base_amount'];
+    }
+    if ($monthlyAmount <= 0 && $recurringTotal > 0) {
+        $monthlyAmount = $recurringTotal;
+    }
+
+    $servicePackage = esignatures_contract_base_service_package($contract, $services);
+    $productivitySelection = function_exists('accounting_productivity_selection_details') ? accounting_productivity_selection_details($services) : [];
+    $coveredServers = 0.0;
+    foreach ($services as $svc) {
+        $code = strtoupper(trim((string)($svc['item_code'] ?? $svc['service_code'] ?? '')));
+        if (in_array($code, ['SRVR-MGMT', 'SRVR-BKUP', 'SRVR-BK-500'], true)) {
+            $coveredServers = max($coveredServers, (float)($svc['quantity'] ?? 0));
+        }
+    }
+    $includedServices = esignatures_contract_included_service_labels($servicePackage, $services);
+    $selectedAddons = esignatures_contract_addon_labels($services);
+    $renewalTerms = !empty($contract['auto_renew'])
+        ? 'Auto-renews after initial term unless non-renewed in writing'
+        : 'No auto-renew';
 
     return [
+        'contract_number' => trim((string)($contract['contract_number'] ?? '')),
+        'contract_title' => trim((string)($contract['contract_name'] ?? '')),
         'client_name' => $signerName,
         'company_name' => $companyName,
-        'service_plan' => $servicePlan,
-        'monthly_amount' => number_format($monthlyAmount, 2, '.', ''),
+        'primary_contact' => $signerName,
+        'contact_email' => $contactEmail,
+        'service_plan' => ($servicePackage['name'] ?? '') !== '' ? (string)$servicePackage['name'] : $servicePlan,
+        'productivity_platform' => (string)($productivitySelection['platform_name'] ?? 'No productivity platform selected'),
+        'license_level' => (string)($productivitySelection['license_name'] ?? 'None selected'),
+        'billing_cycle' => $billingCycleLabel,
+        'recurring_total' => esignatures_format_money($recurringTotal),
+        'covered_workstations' => esignatures_format_quantity((float)($contract['covered_devices'] ?? 0)),
+        'covered_users' => esignatures_format_quantity((float)($contract['covered_users'] ?? 0)),
+        'covered_servers' => esignatures_format_quantity($coveredServers),
+        'start_date' => trim((string)($contract['start_date'] ?? '')),
+        'end_date' => trim((string)($contract['end_date'] ?? '')),
+        'renewal_terms' => $renewalTerms,
+        'service_address' => esignatures_service_address($contract),
+        'included_services' => implode("\n", $includedServices),
+        'selected_addons' => implode("\n", $selectedAddons),
+        'monthly_amount' => esignatures_format_money($monthlyAmount),
     ];
 }
 
@@ -258,8 +426,8 @@ function esignatures_validate_contract_for_send(array $contract, array $placehol
     return $errors;
 }
 
-function esignatures_build_payload(array $contract, float $monthlyAmount): array {
-    $placeholders = esignatures_contract_placeholder_values($contract, $monthlyAmount);
+function esignatures_build_payload(array $contract, float $monthlyAmount, array $services = []): array {
+    $placeholders = esignatures_contract_placeholder_values($contract, $monthlyAmount, $services);
     $signerEmail = trim((string)($contract['contact_email'] ?? ''));
     if ($signerEmail === '') {
         $signerEmail = trim((string)($contract['client_email'] ?? ''));
@@ -361,9 +529,10 @@ function esignatures_send_test_contract(int $contractId, ?callable $transport = 
     if (!$contract) return ['ok' => false, 'errors' => ['Contract not found.']];
 
     $monthlyAmount = esignatures_find_monthly_amount($contractId, $contract);
-    $placeholders = esignatures_contract_placeholder_values($contract, $monthlyAmount);
+    $services = function_exists('accounting_get_contract_services') ? accounting_get_contract_services($contractId) : [];
+    $placeholders = esignatures_contract_placeholder_values($contract, $monthlyAmount, $services);
     $errors = esignatures_validate_contract_for_send($contract, $placeholders);
-    $payload = esignatures_build_payload($contract, $monthlyAmount);
+    $payload = esignatures_build_payload($contract, $monthlyAmount, $services);
     if ($errors !== []) {
         esignatures_log('validation_failed', ['contract_id' => $contractId, 'errors' => $errors]);
         return ['ok' => false, 'errors' => $errors];

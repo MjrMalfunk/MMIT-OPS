@@ -26,6 +26,17 @@ $contract = [
     'sla_level' => 'Manage',
     'contract_name' => 'Demo MSP Agreement',
     'base_amount' => 199.99,
+    'contract_number' => 'MSA-0009',
+    'billing_cycle' => 'MONTHLY',
+    'covered_devices' => 12,
+    'covered_users' => 10,
+    'start_date' => '2026-01-01',
+    'end_date' => '2026-12-31',
+    'auto_renew' => 1,
+    'address1' => '123 Main St',
+    'city' => 'Springfield',
+    'state' => 'IL',
+    'postal_code' => '62701',
 ];
 
 $_SERVER['HTTP_HOST'] = 'ops.midwestmanagedit.com';
@@ -51,7 +62,37 @@ if (is_array($placeholderFields)) {
         }
     }
 }
-$placeholderFieldsHaveExpectedEntries = $placeholderFieldsByKey === [
+$expectedPlaceholderEntries = [
+    'contract_number' => 'MSA-0009',
+    'contract_title' => 'Demo MSP Agreement',
+    'client_name' => 'Demo Signer',
+    'company_name' => 'Demo Company',
+    'primary_contact' => 'Demo Signer',
+    'contact_email' => 'demo.signer@example.test',
+    'service_plan' => 'Manage',
+    'productivity_platform' => 'No productivity platform selected',
+    'license_level' => 'None selected',
+    'billing_cycle' => 'Monthly',
+    'recurring_total' => '199.99',
+    'covered_workstations' => '12',
+    'covered_users' => '10',
+    'covered_servers' => '',
+    'start_date' => '2026-01-01',
+    'end_date' => '2026-12-31',
+    'renewal_terms' => 'Auto-renews after initial term unless non-renewed in writing',
+    'service_address' => "123 Main St
+Springfield, IL 62701",
+    'included_services' => '',
+    'selected_addons' => '',
+    'monthly_amount' => '199.99',
+];
+$placeholderFieldsHaveExpectedEntries = $placeholderFieldsByKey === $expectedPlaceholderEntries;
+$placeholderFieldsPreserveLegacyEntries = array_intersect_key($placeholderFieldsByKey, [
+    'client_name' => true,
+    'company_name' => true,
+    'service_plan' => true,
+    'monthly_amount' => true,
+]) === [
     'client_name' => 'Demo Signer',
     'company_name' => 'Demo Company',
     'service_plan' => 'Manage',
@@ -75,6 +116,7 @@ $checks = [
     'metadata length is under eSignatures limit' => $metadataLengthUnderLimit,
     'placeholder_fields is a list' => $placeholderFieldsIsList,
     'placeholder_fields entries use placeholder_key and replace_with_text' => $placeholderFieldsHaveExpectedEntries,
+    'placeholder_fields preserve legacy four-field compatibility' => $placeholderFieldsPreserveLegacyEntries,
     'API token is not logged' => $tokenNotLogged,
     'live sends disabled without explicit live confirmation' => $liveDisabled,
 ];

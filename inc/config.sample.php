@@ -73,7 +73,7 @@ define('STRIPE_CHECKOUT_CANCEL_URL', BASE_URL . '/payments/pay.php?cancelled=1')
 // and sends payloads with "test":"yes"; live stays disabled unless explicitly enabled.
 define('ESIGNATURES_ENABLED', false);
 define('ESIGNATURES_API_TOKEN', '');
-define('ESIGNATURES_TEMPLATE_ID', '20086199-7b34-44a3-b0bd-08010540cda2');
+define('ESIGNATURES_TEMPLATE_ID', '');
 define('ESIGNATURES_TEST_MODE', false);
 define('ESIGNATURES_BASE_URL', 'https://esignatures.com/api');
 // Staging/test should point eSignatures contract completion events at OPS TEST.
