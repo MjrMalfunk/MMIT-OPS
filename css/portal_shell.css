@@ -789,8 +789,8 @@ input, select, textarea { padding: 10px 12px; }
 .addon-row {
   display: grid !important;
   width: 100%;
-  grid-template-columns: 24px minmax(240px, 1fr) 64px 80px 78px !important;
-  gap: 10px !important;
+  grid-template-columns: 24px minmax(260px, 1fr) minmax(82px, .34fr) minmax(104px, .42fr) minmax(132px, .52fr) !important;
+  gap: 12px !important;
   align-items: center !important;
   padding: 12px !important;
   border-radius: 14px;
@@ -829,8 +829,9 @@ input, select, textarea { padding: 10px 12px; }
 .addon-row select {
   width: 100%;
   min-width: 0;
-  padding-left: 8px;
-  padding-right: 8px;
+  min-height: 40px;
+  padding-left: 10px;
+  padding-right: 10px;
 }
 
 .portal-table { width: 100%; border-collapse: collapse; }
@@ -879,7 +880,7 @@ input, select, textarea { padding: 10px 12px; }
   .bundle-form .three-col,
   .bundle-form .two-col,
   .contract-builder-form .two-col { grid-template-columns: 1fr 1fr !important; }
-  .addon-row { grid-template-columns: 24px minmax(200px,1fr) 72px 84px !important; }
+  .addon-row { grid-template-columns: 24px minmax(200px,1fr) minmax(82px,.45fr) minmax(104px,.55fr) !important; }
   .addon-row select { grid-column: 2 / span 3; }
 }
 @media (max-width: 640px) {

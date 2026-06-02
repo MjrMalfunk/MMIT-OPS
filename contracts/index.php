@@ -237,9 +237,10 @@ page_header('Contracts', 'contracts');
         </div>
         <div>
           <label>Billing cycle</label>
-          <select name="billing_cycle" style="width:100%;padding:10px;">
-            <option value="MONTHLY" <?= $form['billing_cycle'] === 'MONTHLY' ? 'selected' : '' ?>>MONTHLY</option>
-            <option value="ANNUAL" <?= $form['billing_cycle'] === 'ANNUAL' ? 'selected' : '' ?>>ANNUAL</option>
+          <select name="billing_cycle" id="contract-billing-cycle" style="width:100%;padding:10px;">
+            <?php foreach (accounting_get_recurring_cycles() as $cycle): ?>
+              <option value="<?= accounting_h($cycle) ?>" <?= accounting_normalize_billing_cycle((string)$form['billing_cycle']) === $cycle ? 'selected' : '' ?>><?= accounting_h(accounting_billing_cycle_label($cycle)) ?></option>
+            <?php endforeach; ?>
           </select>
         </div>
       </div>
@@ -254,7 +255,7 @@ page_header('Contracts', 'contracts');
         <div><div style="font-size:12px;opacity:.8;">Service package</div><div id="package-subtotal" style="font-size:22px;font-weight:800;">$0.00</div></div>
         <div><div style="font-size:12px;opacity:.8;">Productivity licensing</div><div id="productivity-subtotal" style="font-size:22px;font-weight:800;">$0.00</div></div>
         <div><div style="font-size:12px;opacity:.8;">Infrastructure add-ons</div><div id="addon-subtotal" style="font-size:22px;font-weight:800;">$0.00</div></div>
-        <div><div style="font-size:12px;opacity:.8;">Estimated monthly recurring total</div><div id="contract-total" style="font-size:28px;font-weight:800;">$0.00</div></div>
+        <div><div style="font-size:12px;opacity:.8;">Estimated billing-cycle total</div><div id="contract-total" style="font-size:28px;font-weight:800;">$0.00</div></div>
       </div>
 
       <div><label>Agreement notes / scope</label><textarea name="notes" rows="4" style="width:100%;padding:10px;"><?= accounting_h((string)$form['notes']) ?></textarea></div>
@@ -293,11 +294,57 @@ const packageSubtotalEl = document.getElementById('package-subtotal');
 const productivitySubtotalEl = document.getElementById('productivity-subtotal');
 const addonSubtotalEl = document.getElementById('addon-subtotal');
 const totalEl = document.getElementById('contract-total');
+const billingCycleSel = document.getElementById('contract-billing-cycle');
+const billingCycles = [
+  { value: 'MONTHLY', label: 'Monthly', months: 1 },
+  { value: 'QUARTERLY', label: 'Quarterly', months: 3 },
+  { value: 'SEMIANNUAL', label: 'Semi-annual', months: 6 },
+  { value: 'ANNUAL', label: 'Annual', months: 12 },
+];
+let syncingAddonCycle = false;
 const contractName = document.getElementById('contract-name');
 const addonCard = document.getElementById('addon-card');
 const addonList = document.getElementById('addon-list');
 let lastAutoContractName = contractName ? contractName.value.trim() : '';
 const autoContractNames = new Set(Object.values(packages).map((pkg) => `${pkg.name} Agreement`));
+
+function normalizeCycle(cycle) {
+  const normalized = String(cycle || 'MONTHLY').trim().toUpperCase().replace(/[\s-]+/g, '_');
+  return normalized === 'SEMI_ANNUAL' ? 'SEMIANNUAL' : normalized;
+}
+
+function currentBillingCycle() {
+  const cycle = normalizeCycle(billingCycleSel?.value || 'MONTHLY');
+  return billingCycles.some((item) => item.value === cycle) ? cycle : 'MONTHLY';
+}
+
+function cycleMonths(cycle) {
+  return billingCycles.find((item) => item.value === normalizeCycle(cycle))?.months || 1;
+}
+
+function cycleLabel(cycle) {
+  return billingCycles.find((item) => item.value === normalizeCycle(cycle))?.label || 'Monthly';
+}
+
+function addonCycleOptions(selectedCycle) {
+  const selected = normalizeCycle(selectedCycle);
+  return billingCycles.map((cycle) => `<option value="${cycle.value}" ${cycle.value === selected ? 'selected' : ''}>${cycle.label}</option>`).join('');
+}
+
+function syncAddonCyclesToPackage(force = false) {
+  if (!addonList) return;
+  syncingAddonCycle = true;
+  const packageCycle = currentBillingCycle();
+  addonList.querySelectorAll('.addon-row').forEach((row) => {
+    const checked = row.querySelector('input[type=checkbox]');
+    const cycleSelect = row.querySelector('.addon-cycle');
+    if (!cycleSelect) return;
+    if (force || (checked?.checked && row.dataset.cycleOverridden !== '1')) {
+      cycleSelect.value = packageCycle;
+    }
+  });
+  syncingAddonCycle = false;
+}
 
 function toggleClientMode() {
   if (newClientFields && clientSel) {
@@ -595,13 +642,23 @@ function renderAddons(pkg) {
       </div>
       <input class="addon-qty" type="number" step="1" min="${isServerAddon || pricingModel === 'PER_USER' ? 0 : 1}" name="addon_qty[${addon.item_id}]" value="${defaultQty}">
       <input class="addon-price" data-autofill="1" type="number" step="0.01" min="0" name="addon_price[${addon.item_id}]" value="${defaultPrice}">
-      <select name="addon_cycle[${addon.item_id}]">
-        ${['MONTHLY','QUARTERLY','SEMIANNUAL','ANNUAL'].map((c) => `<option value="${c}" ${c === (addon.billing_cycle || 'MONTHLY') ? 'selected' : ''}>${c}</option>`).join('')}
+      <select class="addon-cycle" name="addon_cycle[${addon.item_id}]" aria-label="Billing cycle for ${addon.item_name}">
+        ${addonCycleOptions(currentBillingCycle())}
       </select>`;
     addonList.appendChild(wrap);
   });
 
-  addonList.querySelectorAll('input,select').forEach((el) => el.addEventListener('input', () => { renderNotIncluded(pkg); calcTotal(); }));
+  addonList.querySelectorAll('input,select').forEach((el) => el.addEventListener('input', () => {
+    const row = el.closest('.addon-row');
+    if (el.classList.contains('addon-cycle') && row && !syncingAddonCycle) {
+      row.dataset.cycleOverridden = '1';
+    }
+    if (el.type === 'checkbox' && row && el.checked && row.dataset.cycleOverridden !== '1') {
+      row.querySelector('.addon-cycle').value = currentBillingCycle();
+    }
+    renderNotIncluded(pkg);
+    calcTotal();
+  }));
 }
 
 function syncAddonQuantities() {
@@ -627,14 +684,14 @@ function calcTotal() {
   syncHiddenQuantity();
   const workstationQty = Math.max(1, Number(coveredDevicesInput?.value || 0));
   const packageUnit = Number(priceInput?.value || 0);
-  const packageSubtotal = workstationQty * packageUnit;
+  const packageSubtotal = workstationQty * packageUnit * cycleMonths(currentBillingCycle());
 
   let productivitySubtotal = 0;
   const platform = String(productivityPlatformSel?.value || 'NONE').toUpperCase();
   if (platform !== 'NONE') {
     const userQty = Math.max(0, Number(coveredUsersInput?.value || 0));
     const licenseUnit = Number(productivityPriceInput?.value || 0);
-    productivitySubtotal = userQty * licenseUnit;
+    productivitySubtotal = userQty * licenseUnit * cycleMonths(currentBillingCycle());
   }
 
   let addonSubtotal = 0;
@@ -644,7 +701,8 @@ function calcTotal() {
       const qtyField = row.querySelector('.addon-qty');
       const priceField = row.querySelector('.addon-price');
       if (checked && checked.checked) {
-        addonSubtotal += Number(qtyField?.value || 0) * Number(priceField?.value || 0);
+        const addonCycle = row.querySelector('.addon-cycle')?.value || currentBillingCycle();
+        addonSubtotal += Number(qtyField?.value || 0) * Number(priceField?.value || 0) * cycleMonths(addonCycle);
       }
     });
   }
@@ -668,6 +726,7 @@ function renderAll() {
 
 if (clientSel) clientSel.addEventListener('change', toggleClientMode);
 if (packageSel) packageSel.addEventListener('change', renderAll);
+if (billingCycleSel) billingCycleSel.addEventListener('change', () => { syncAddonCyclesToPackage(false); calcTotal(); });
 if (productivityPlatformSel) productivityPlatformSel.addEventListener('change', renderAll);
 if (productivityLicenseSel) productivityLicenseSel.addEventListener('change', renderProductivity);
 if (coveredDevicesInput) coveredDevicesInput.addEventListener('input', syncAddonQuantities);
