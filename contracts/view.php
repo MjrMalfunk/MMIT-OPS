@@ -96,6 +96,23 @@ $onboardingProgress = accounting_contract_onboarding_progress($contractId);
 $currentStatus = strtoupper((string)($contract['status'] ?? 'DRAFT'));
 $hasSignedCopy = !empty($contract['signed_document_path']);
 $hasAuditCopy = !empty($contract['audit_document_path']);
+$onboardingCompletedAt = '';
+foreach ($onboardingTasks as $onboardingTask) {
+    if (!empty($onboardingTask['completed_at']) && (string)$onboardingTask['completed_at'] > $onboardingCompletedAt) {
+        $onboardingCompletedAt = (string)$onboardingTask['completed_at'];
+    }
+}
+if (!empty($contract['go_live_at'])) {
+    $onboardingCompletedAt = (string)$contract['go_live_at'];
+}
+$onboardingCompletedLabel = '—';
+if ($onboardingCompletedAt !== '') {
+    $onboardingCompletedTimestamp = strtotime($onboardingCompletedAt);
+    $onboardingCompletedLabel = $onboardingCompletedTimestamp !== false
+        ? date('Y-m-d H:i', $onboardingCompletedTimestamp)
+        : substr($onboardingCompletedAt, 0, 16);
+}
+$onboardingCompleteCollapsed = $currentStatus === 'ACTIVE' && !empty($onboardingProgress['all_complete']) && $onboardingTasks !== [];
 $canRetrySyncro = $hasSignedCopy || in_array($currentStatus, ['ONBOARDING', 'SIGNED_PENDING_ONBOARDING', 'ACTIVE'], true);
 $canCompleteOnboarding = in_array($currentStatus, ['ONBOARDING', 'SIGNED_PENDING_ONBOARDING'], true) && !empty($onboardingProgress['all_complete']);
 $esignaturesLatestSend = esignatures_latest_send($contractId);
@@ -280,7 +297,11 @@ page_header((string)$contract['contract_number'], 'contracts');
       <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Auto renew</div><div><?= !empty($contract['auto_renew']) ? 'Yes' : 'No' ?></div></div>
     </div>
     <?php if (!empty($contract['notes'])): ?><div style="margin-top:14px;"><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Notes / scope</div><div><?= nl2br(accounting_h((string)$contract['notes'])) ?></div></div><?php endif; ?>
-    <?php if ($signedDocumentHref !== ''): ?><div style="margin-top:14px;display:flex;gap:12px;flex-wrap:wrap;"><a href="<?= accounting_h($signedDocumentHref) ?>" target="_blank" rel="noopener noreferrer">Open signed copy</a><?php if ($auditDocumentHref !== ''): ?><a href="<?= accounting_h($auditDocumentHref) ?>" target="_blank" rel="noopener noreferrer">Open audit trail</a><?php endif; ?></div><?php elseif ($auditDocumentHref !== ''): ?><div style="margin-top:14px;"><a href="<?= accounting_h($auditDocumentHref) ?>" target="_blank" rel="noopener noreferrer">Open audit trail</a></div><?php endif; ?>
+    <?php if ($signedDocumentHref !== ''): ?>
+      <div style="margin-top:16px;display:flex;justify-content:center;">
+        <a class="btn btn-primary" style="width:auto;padding:10px 16px;text-decoration:none;" href="<?= accounting_h($signedDocumentHref) ?>" target="_blank" rel="noopener noreferrer">Open signed copy</a>
+      </div>
+    <?php endif; ?>
   </div>
 
   <div class="card" style="padding:16px;overflow:auto;">
@@ -462,7 +483,20 @@ page_header((string)$contract['contract_number'], 'contracts');
       <?php elseif (!$onboardingTasks): ?>
         <div style="opacity:.72;line-height:1.55;">Onboarding checklist will appear here once the contract enters onboarding.</div>
       <?php else: ?>
-        <div style="display:grid;gap:10px;">
+        <?php if ($onboardingCompleteCollapsed): ?>
+          <div style="padding:14px;border-radius:14px;border:1px solid rgba(34,197,94,.24);background:rgba(34,197,94,.08);display:flex;justify-content:space-between;gap:14px;align-items:center;flex-wrap:wrap;">
+            <div>
+              <div style="font-weight:800;color:#bbf7d0;">Onboarding complete</div>
+              <div style="font-size:13px;opacity:.82;margin-top:4px;"><?= (int)($onboardingProgress['completed'] ?? 0) ?>/<?= (int)($onboardingProgress['required'] ?? 0) ?> tasks completed</div>
+              <div style="font-size:12px;opacity:.68;margin-top:4px;">Completed <?= accounting_h($onboardingCompletedLabel) ?></div>
+            </div>
+          </div>
+          <details style="margin-top:12px;">
+            <summary style="cursor:pointer;font-weight:800;color:#dbeafe;">View onboarding details / Show checklist</summary>
+            <div style="display:grid;gap:10px;margin-top:12px;">
+        <?php else: ?>
+          <div style="display:grid;gap:10px;">
+        <?php endif; ?>
         <?php foreach ($onboardingTasks as $task): ?>
           <div id="checklist-item-<?= (int)$task['task_id'] ?>" style="padding:10px 12px;border-radius:12px;border:1px solid <?= !empty($task['is_completed']) ? 'rgba(34,197,94,.24)' : 'rgba(255,255,255,.08)' ?>;background:<?= !empty($task['is_completed']) ? 'rgba(34,197,94,.08)' : 'rgba(255,255,255,.03)' ?>;display:flex;justify-content:space-between;gap:12px;align-items:flex-start;scroll-margin-top:24px;">
             <div>
@@ -480,7 +514,10 @@ page_header((string)$contract['contract_number'], 'contracts');
             </form>
           </div>
         <?php endforeach; ?>
-        </div>
+          </div>
+        <?php if ($onboardingCompleteCollapsed): ?>
+          </details>
+        <?php endif; ?>
       <?php endif; ?>
     </div>
 
