@@ -149,6 +149,9 @@ if (!empty($contract['signed_date'])) {
 
 
 $monthlyRecurringTotal = 0.0;
+$billingCycle = accounting_normalize_billing_cycle((string)($contract['billing_cycle'] ?? 'MONTHLY'));
+$billingCycleLabel = accounting_billing_cycle_label($billingCycle);
+$cycleRecurringTotal = 0.0;
 $baseServiceCode = '';
 $baseService = null;
 $selectedAddons = [];
@@ -180,8 +183,9 @@ foreach ($services as $svc) {
     }
 }
 if ($monthlyRecurringTotal <= 0) {
-    $monthlyRecurringTotal = (float)($contract['base_amount'] ?? 0);
+    $monthlyRecurringTotal = (float)($contract['base_amount'] ?? 0) / accounting_billing_cycle_month_multiplier($billingCycle);
 }
+$cycleRecurringTotal = round($monthlyRecurringTotal * accounting_billing_cycle_month_multiplier($billingCycle), 2);
 
 $servicePackage = null;
 if ($baseServiceCode !== '' && isset($packages[$baseServiceCode])) {
@@ -247,7 +251,7 @@ page_header((string)$contract['contract_number'], 'contracts');
 <?php if ($esignaturesStatusMessages || $esignaturesWebhookUrl !== ''): ?><div class="card" style="padding:14px;margin-bottom:16px;border:1px solid rgba(139,92,246,.28);background:rgba(76,29,149,.18);"><div style="font-weight:800;margin-bottom:8px;color:#ede9fe;">eSignatures status</div><?php if ($esignaturesStatusMessages): ?><div style="display:flex;gap:8px;flex-wrap:wrap;"><?php foreach (array_values(array_unique($esignaturesStatusMessages)) as $esignaturesStatusMessage): ?><span style="display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.10);font-size:12px;"><?= accounting_h($esignaturesStatusMessage) ?></span><?php endforeach; ?></div><?php endif; ?><?php if ($esignaturesWebhookUrl !== ''): ?><div style="font-size:12px;opacity:.78;margin-top:8px;word-break:break-all;">Configured eSignatures <?= accounting_h($esignaturesWebhookLabel) ?>: <?= accounting_h($esignaturesWebhookUrl) ?></div><?php endif; ?><?php if (!empty($esignaturesLatestSend['last_webhook_at'])): ?><div style="font-size:12px;opacity:.68;margin-top:8px;">Last eSignatures webhook <?= accounting_h((string)$esignaturesLatestSend['last_webhook_at']) ?></div><?php endif; ?></div><?php endif; ?>
 
 <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:16px;">
-  <div class="card" style="padding:16px;"><div style="font-size:13px;opacity:.78;">Monthly recurring total</div><div style="font-size:24px;font-weight:800;">$<?= number_format($monthlyRecurringTotal, 2) ?></div></div>
+  <div class="card" style="padding:16px;"><div style="font-size:13px;opacity:.78;">Billing-cycle total</div><div style="font-size:24px;font-weight:800;">$<?= number_format($cycleRecurringTotal, 2) ?></div><div style="font-size:12px;opacity:.68;margin-top:4px;"><?= accounting_h($billingCycleLabel) ?> · $<?= number_format($monthlyRecurringTotal, 2) ?>/mo base</div></div>
   <div class="card" style="padding:16px;"><div style="font-size:13px;opacity:.78;">Onboarding progress</div><div style="font-size:24px;font-weight:800;"><?= (int)($onboardingProgress['percent'] ?? 0) ?>%</div><div style="font-size:12px;opacity:.68;margin-top:4px;"><?= (int)($onboardingProgress['completed'] ?? 0) ?> of <?= (int)($onboardingProgress['required'] ?? 0) ?> required tasks complete</div></div>
   <div class="card" style="padding:16px;"><div style="font-size:13px;opacity:.78;">Billing start</div><div style="font-size:24px;font-weight:800;"><?= accounting_h((string)($contract['billing_start_date'] ?: 'Go-live pending')) ?></div></div>
   <div class="card" style="padding:16px;"><div style="font-size:13px;opacity:.78;">Linked services</div><div style="font-size:24px;font-weight:800;"><?= count($clientServices) ?></div></div>
@@ -258,7 +262,7 @@ page_header((string)$contract['contract_number'], 'contracts');
     <h2 style="margin:0 0 12px;font-size:19px;">Agreement details</h2>
     <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;">
       <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Service package</div><div><?= accounting_h((string)($servicePackage['name'] ?? $contract['sla_level'] ?: '-')) ?></div></div>
-      <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Billing cycle</div><div><?= accounting_h((string)$contract['billing_cycle']) ?></div></div>
+      <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Billing cycle</div><div><?= accounting_h($billingCycleLabel) ?></div></div>
       <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Productivity platform</div><div><?= accounting_h((string)($productivitySelection['platform_name'] ?? 'No productivity platform selected')) ?></div></div>
       <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">License level</div><div><?= accounting_h((string)($productivitySelection['license_name'] ?? 'None selected')) ?></div></div>
       <div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">Covered workstations</div><div><?= number_format((float)($contract['covered_devices'] ?? 0), 0) ?></div></div>
@@ -289,8 +293,8 @@ page_header((string)$contract['contract_number'], 'contracts');
           <div style="opacity:.72;font-size:13px;margin-top:4px;"><?= accounting_h((string)($servicePackage['description'] ?? $contract['notes'] ?? '')) ?></div>
         </div>
         <div style="text-align:right;min-width:180px;">
-          <div style="font-size:18px;font-weight:800;">$<?= number_format($monthlyRecurringTotal, 2) ?></div>
-          <div style="opacity:.68;font-size:12px;">Current monthly recurring total</div>
+          <div style="font-size:18px;font-weight:800;">$<?= number_format($cycleRecurringTotal, 2) ?></div>
+          <div style="opacity:.68;font-size:12px;"><?= accounting_h($billingCycleLabel) ?> total ($<?= number_format($monthlyRecurringTotal, 2) ?>/mo base)</div>
         </div>
       </div>
 
@@ -319,8 +323,8 @@ page_header((string)$contract['contract_number'], 'contracts');
               <div style="padding:6px 9px;border-radius:10px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.16);margin-bottom:6px;display:flex;justify-content:space-between;gap:10px;align-items:center;line-height:1.28">
                 <span><?= accounting_h((string)($svc['service_name'] ?: $svc['description'])) ?></span>
                 <div style="text-align:right;white-space:nowrap;">
-                  <strong>$<?= number_format((float)$svc['quantity'] * (float)$svc['unit_price'], 2) ?></strong>
-                  <div style="opacity:.68;font-size:12px;"><?= accounting_h(accounting_pricing_model_label((string)($svc['billing_type'] ?? 'FIXED'), true)) ?></div>
+                  <strong>$<?= number_format((float)$svc['quantity'] * accounting_cycle_unit_price((float)$svc['unit_price'], $billingCycle), 2) ?></strong>
+                  <div style="opacity:.68;font-size:12px;"><?= accounting_h(accounting_pricing_model_label((string)($svc['billing_type'] ?? 'FIXED'), true)) ?> · <?= accounting_h($billingCycleLabel) ?></div>
                 </div>
               </div>
             <?php endforeach; ?>
@@ -354,7 +358,7 @@ page_header((string)$contract['contract_number'], 'contracts');
     <?php if (!$clientServices): ?><div style="opacity:.72;">No client services linked yet.</div><?php else: ?>
     <table style="width:100%;border-collapse:collapse;">
       <thead><tr style="text-align:left;border-bottom:1px solid rgba(255,255,255,.10)"><th style="padding:10px 8px;">Description</th><th class="date" style="padding:10px 8px;">Next bill</th><th class="money" style="padding:10px 8px;">Value</th><th class="status" style="padding:10px 8px;">Status</th><th style="padding:10px 8px;">Open</th></tr></thead>
-      <tbody><?php foreach ($clientServices as $svc): ?><tr style="border-bottom:1px solid rgba(255,255,255,.06)"><td style="padding:10px 8px;"><strong><?= accounting_h((string)$svc['description']) ?></strong><div style="opacity:.65;font-size:12px;"><?= accounting_h((string)($svc['item_code'] ?: $svc['item_name'])) ?></div></td><td class="date" style="padding:10px 8px;"><?= accounting_h((string)$svc['next_bill_date']) ?></td><td class="money" style="padding:10px 8px;">$<?= number_format((float)$svc['quantity'] * (float)$svc['unit_price'], 2) ?></td><td class="status" style="padding:10px 8px;"><?= accounting_client_service_status_badge_html((string)$svc['status']) ?></td><td style="padding:10px 8px;"><a href="<?= accounting_h(BASE_URL) ?>/clients/service_view.php?id=<?= (int)$svc['client_service_id'] ?>">Open</a></td></tr><?php endforeach; ?></tbody>
+      <tbody><?php foreach ($clientServices as $svc): ?><tr style="border-bottom:1px solid rgba(255,255,255,.06)"><td style="padding:10px 8px;"><strong><?= accounting_h((string)$svc['description']) ?></strong><div style="opacity:.65;font-size:12px;"><?= accounting_h((string)($svc['item_code'] ?: $svc['item_name'])) ?></div></td><td class="date" style="padding:10px 8px;"><?= accounting_h((string)$svc['next_bill_date']) ?></td><td class="money" style="padding:10px 8px;">$<?= number_format((float)$svc['quantity'] * accounting_cycle_unit_price((float)$svc['unit_price'], (string)($svc['billing_cycle'] ?? $billingCycle)), 2) ?></td><td class="status" style="padding:10px 8px;"><?= accounting_client_service_status_badge_html((string)$svc['status']) ?></td><td style="padding:10px 8px;"><a href="<?= accounting_h(BASE_URL) ?>/clients/service_view.php?id=<?= (int)$svc['client_service_id'] ?>">Open</a></td></tr><?php endforeach; ?></tbody>
     </table>
     <?php endif; ?>
   </div>

@@ -311,6 +311,37 @@ function accounting_invoice_link_html(int $invoiceId, string $invoiceNumber, str
  function accounting_get_recurring_cycles(): array {
      return ['MONTHLY', 'QUARTERLY', 'SEMIANNUAL', 'ANNUAL'];
  }
+
+ function accounting_normalize_billing_cycle(string $billingCycle): string {
+     $cycle = strtoupper(trim($billingCycle));
+     $cycle = str_replace(['-', ' '], '_', $cycle);
+     if ($cycle === 'SEMI_ANNUAL') {
+         return 'SEMIANNUAL';
+     }
+     return $cycle !== '' ? $cycle : 'MONTHLY';
+ }
+
+ function accounting_billing_cycle_label(string $billingCycle): string {
+     return match (accounting_normalize_billing_cycle($billingCycle)) {
+         'QUARTERLY' => 'Quarterly',
+         'SEMIANNUAL' => 'Semi-annual',
+         'ANNUAL' => 'Annual',
+         default => 'Monthly',
+     };
+ }
+
+ function accounting_billing_cycle_month_multiplier(string $billingCycle): int {
+     return match (accounting_normalize_billing_cycle($billingCycle)) {
+         'QUARTERLY' => 3,
+         'SEMIANNUAL' => 6,
+         'ANNUAL' => 12,
+         default => 1,
+     };
+ }
+
+ function accounting_cycle_unit_price(float $monthlyUnitPrice, string $billingCycle): float {
+     return round($monthlyUnitPrice * accounting_billing_cycle_month_multiplier($billingCycle), 2);
+ }
  
  function accounting_get_term_options(): array {
      return [0 => 'Month-to-month', 3 => '3 months', 6 => '6 months', 12 => '12 months'];
@@ -2877,7 +2908,7 @@ function accounting_catalog_item_exists(): bool {
      $description = trim((string)($data['description'] ?? ''));
      $defaultUnitPrice = round((float)($data['default_unit_price'] ?? 0), 2);
      $billingMode = strtoupper(trim((string)($data['billing_mode'] ?? 'RECURRING')));
-     $billingCycle = strtoupper(trim((string)($data['default_billing_cycle'] ?? 'MONTHLY')));
+     $billingCycle = accounting_normalize_billing_cycle((string)($data['default_billing_cycle'] ?? 'MONTHLY'));
      $termMonths = (int)($data['term_months'] ?? 0);
      $revenueAccountId = (int)($data['revenue_account_id'] ?? 0);
      $categoryId = accounting_service_category_ready() ? (int)($data['category_id'] ?? 0) : 0;
@@ -2939,8 +2970,8 @@ function accounting_catalog_item_exists(): bool {
      return [
          'active_count' => (int)$pdo->query('SELECT COUNT(*) FROM recurring_service WHERE active = 1')->fetchColumn(),
          'due_today_count' => (int)$pdo->query('SELECT COUNT(*) FROM recurring_service WHERE active = 1 AND next_bill_date <= CURDATE()')->fetchColumn(),
-         'monthly_value' => (float)$pdo->query("SELECT COALESCE(SUM(quantity * unit_price),0) FROM recurring_service WHERE active = 1 AND billing_cycle = 'MONTHLY'")->fetchColumn(),
-         'annual_value' => (float)$pdo->query("SELECT COALESCE(SUM(quantity * unit_price),0) FROM recurring_service WHERE active = 1 AND billing_cycle = 'ANNUAL'")->fetchColumn(),
+         'monthly_value' => (float)$pdo->query("SELECT COALESCE(SUM(quantity * unit_price),0) FROM recurring_service WHERE active = 1")->fetchColumn(),
+         'annual_value' => (float)$pdo->query("SELECT COALESCE(SUM(quantity * unit_price) * 12,0) FROM recurring_service WHERE active = 1")->fetchColumn(),
      ];
  }
  
@@ -2968,7 +2999,7 @@ function accounting_catalog_item_exists(): bool {
      $description = trim((string)($data['description'] ?? ''));
      $itemType = strtoupper(trim((string)($data['item_type'] ?? 'SERVICE')));
      $billingType = strtoupper(trim((string)($data['billing_type'] ?? 'FIXED')));
-     $billingCycle = strtoupper(trim((string)($data['billing_cycle'] ?? 'MONTHLY')));
+     $billingCycle = accounting_normalize_billing_cycle((string)($data['billing_cycle'] ?? 'MONTHLY'));
      $quantity = (float)($data['quantity'] ?? 1);
      $unitPrice = (float)($data['unit_price'] ?? 0);
      $termMonths = (int)($data['term_months'] ?? 0);
@@ -2983,7 +3014,7 @@ function accounting_catalog_item_exists(): bool {
      if ($item) {
          if (!empty($item['billing_mode']) && strtoupper((string)$item['billing_mode']) === 'ONE_TIME') $errors[] = 'One-time catalog items cannot be assigned to recurring billing.';
          if ($description === '') $description = (string)$item['item_name'];
-         if ($billingCycle === '' || !in_array($billingCycle, accounting_get_recurring_cycles(), true)) $billingCycle = (string)$item['default_billing_cycle'];
+         if ($billingCycle === '' || !in_array($billingCycle, accounting_get_recurring_cycles(), true)) $billingCycle = accounting_normalize_billing_cycle((string)$item['default_billing_cycle']);
          if ((float)$unitPrice === 0.0) $unitPrice = (float)$item['default_unit_price'];
          if ($termMonths <= 0 && !empty($item['term_months'])) $termMonths = (int)$item['term_months'];
          if ($itemType === '') $itemType = (string)$item['item_type'];
@@ -3024,7 +3055,7 @@ function accounting_catalog_item_exists(): bool {
  }
  
  function accounting_add_billing_interval(string $currentDate, string $billingCycle): string {
-     return match ($billingCycle) {
+     return match (accounting_normalize_billing_cycle($billingCycle)) {
          'QUARTERLY' => date('Y-m-d', strtotime($currentDate . ' +3 months')),
          'SEMIANNUAL' => date('Y-m-d', strtotime($currentDate . ' +6 months')),
          'ANNUAL' => date('Y-m-d', strtotime($currentDate . ' +1 year')),
@@ -3047,7 +3078,7 @@ function accounting_recurring_invoice_group_key(array $row, string $invoiceDate)
     return implode(':', [
         (string)((int)($row['client_id'] ?? 0)),
         (string)((int)($row['contract_id'] ?? 0)),
-        strtoupper(trim((string)($row['billing_cycle'] ?? 'MONTHLY'))),
+        accounting_normalize_billing_cycle((string)($row['billing_cycle'] ?? 'MONTHLY')),
         $invoiceDate,
     ]);
 }
@@ -3093,7 +3124,7 @@ function accounting_generate_recurring_invoices(?string $asOfDate = null, int $u
                 'client_id' => (int)$row['client_id'],
                 'contract_id' => (int)($row['contract_id'] ?? 0),
                 'invoice_date' => $asOfDate,
-                'billing_cycle' => strtoupper(trim((string)($row['billing_cycle'] ?? 'MONTHLY'))),
+                'billing_cycle' => accounting_normalize_billing_cycle((string)($row['billing_cycle'] ?? 'MONTHLY')),
                 'contract_number' => (string)($row['contract_number'] ?? ''),
                 'contract_name' => (string)($row['contract_name'] ?? ''),
                 'client_name' => (string)($row['dba_name'] ?: $row['legal_name'] ?: 'Client'),
@@ -3137,7 +3168,7 @@ function accounting_generate_recurring_invoices(?string $asOfDate = null, int $u
                 $lineItemIds[] = (int)($row['item_id'] ?? 0);
                 $lineServiceCodes[] = (string)($row['service_code'] ?: $row['item_code'] ?: '');
                 $lineQuantities[] = (float)$row['quantity'];
-                $lineUnitPrices[] = (float)$row['unit_price'];
+                $lineUnitPrices[] = accounting_cycle_unit_price((float)$row['unit_price'], (string)($row['billing_cycle'] ?? 'MONTHLY'));
                 $lineRevenueAccounts[] = !empty($row['revenue_account_id']) ? (int)$row['revenue_account_id'] : $defaultRevenueAccountId;
                 $generatedFrom[] = '#' . (int)$row['recurring_service_id'];
             }
@@ -3988,8 +4019,8 @@ function accounting_client_service_summary(): array {
     $pdo = db();
     $activeCount = (int)$pdo->query("SELECT COUNT(*) FROM client_service WHERE status = 'ACTIVE'")->fetchColumn();
     $dueToday = (int)$pdo->query("SELECT COUNT(*) FROM client_service WHERE status = 'ACTIVE' AND next_bill_date <= CURDATE()") ->fetchColumn();
-    $mrr = (float)$pdo->query("SELECT COALESCE(SUM(CASE billing_cycle WHEN 'MONTHLY' THEN quantity * unit_price WHEN 'QUARTERLY' THEN (quantity * unit_price) / 3 WHEN 'SEMIANNUAL' THEN (quantity * unit_price) / 6 WHEN 'ANNUAL' THEN (quantity * unit_price) / 12 ELSE 0 END),0) FROM client_service WHERE status = 'ACTIVE'")->fetchColumn();
-    $arr = (float)$pdo->query("SELECT COALESCE(SUM(CASE billing_cycle WHEN 'MONTHLY' THEN (quantity * unit_price) * 12 WHEN 'QUARTERLY' THEN (quantity * unit_price) * 4 WHEN 'SEMIANNUAL' THEN (quantity * unit_price) * 2 WHEN 'ANNUAL' THEN quantity * unit_price ELSE 0 END),0) FROM client_service WHERE status = 'ACTIVE'")->fetchColumn();
+    $mrr = (float)$pdo->query("SELECT COALESCE(SUM(quantity * unit_price),0) FROM client_service WHERE status = 'ACTIVE'")->fetchColumn();
+    $arr = round($mrr * 12, 2);
     return ['active_count' => $activeCount, 'due_today_count' => $dueToday, 'mrr_value' => round($mrr, 2), 'arr_value' => round($arr, 2)];
 }
 
@@ -4027,7 +4058,7 @@ function accounting_create_client_service_assignment(array $data, int $userId = 
     $description = trim((string)($data['description'] ?? ''));
     $quantity = (float)($data['quantity'] ?? 0);
     $unitPrice = (float)($data['unit_price'] ?? 0);
-    $billingCycle = strtoupper(trim((string)($data['billing_cycle'] ?? 'MONTHLY')));
+    $billingCycle = accounting_normalize_billing_cycle((string)($data['billing_cycle'] ?? 'MONTHLY'));
     $termMonths = (int)($data['term_months'] ?? 0);
     $startDate = trim((string)($data['start_date'] ?? ''));
     $nextBillDate = trim((string)($data['next_bill_date'] ?? ''));
@@ -4138,7 +4169,7 @@ function accounting_proration_period_dates(array $service, string $effectiveDate
     if ($end === '' || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $end)) {
         $end = date('Y-m-d', strtotime($effectiveDate . ' +1 month'));
     }
-    $cycle = strtoupper(trim((string)($service['billing_cycle'] ?? 'MONTHLY')));
+    $cycle = accounting_normalize_billing_cycle((string)($service['billing_cycle'] ?? 'MONTHLY'));
     $modifier = match ($cycle) {
         'QUARTERLY' => '-3 months',
         'SEMIANNUAL' => '-6 months',
@@ -4225,7 +4256,7 @@ function accounting_update_client_service(int $clientServiceId, array $data, int
     if (!$service) return ['ok' => false, 'errors' => ['Client service not found.']];
     $quantity = (float)($data['quantity'] ?? $service['quantity'] ?? 0);
     $unitPrice = (float)($data['unit_price'] ?? $service['unit_price'] ?? 0);
-    $billingCycle = strtoupper(trim((string)($data['billing_cycle'] ?? $service['billing_cycle'] ?? 'MONTHLY')));
+    $billingCycle = accounting_normalize_billing_cycle((string)($data['billing_cycle'] ?? $service['billing_cycle'] ?? 'MONTHLY'));
     $termMonths = (int)($data['term_months'] ?? $service['term_months'] ?? 0);
     $description = trim((string)($data['description'] ?? $service['description'] ?? ''));
     $startDate = trim((string)($data['start_date'] ?? $service['start_date'] ?? ''));
@@ -4306,7 +4337,7 @@ function accounting_update_recurring_item(int $recurringServiceId, array $data, 
     if (!$item) return ['ok' => false, 'errors' => ['Recurring item not found.']];
     $quantity = (float)($data['quantity'] ?? $item['quantity'] ?? 0);
     $unitPrice = (float)($data['unit_price'] ?? $item['unit_price'] ?? 0);
-    $billingCycle = strtoupper(trim((string)($data['billing_cycle'] ?? $item['billing_cycle'] ?? 'MONTHLY')));
+    $billingCycle = accounting_normalize_billing_cycle((string)($data['billing_cycle'] ?? $item['billing_cycle'] ?? 'MONTHLY'));
     $description = trim((string)($data['description'] ?? $item['description'] ?? ''));
     $startDate = trim((string)($data['start_date'] ?? $item['start_date'] ?? ''));
     $nextBillDate = trim((string)($data['next_bill_date'] ?? $item['next_bill_date'] ?? ''));
@@ -4634,7 +4665,7 @@ function accounting_save_bundle(array $data, ?int $bundleId = null): array {
     $description = trim((string)($data['description'] ?? ''));
     $pricingModel = strtoupper(trim((string)($data['pricing_model'] ?? 'FIXED')));
     $defaultUnitPrice = round((float)($data['default_unit_price'] ?? 0), 2);
-    $billingCycle = strtoupper(trim((string)($data['default_billing_cycle'] ?? 'MONTHLY')));
+    $billingCycle = accounting_normalize_billing_cycle((string)($data['default_billing_cycle'] ?? 'MONTHLY'));
     $termMonths = (int)($data['term_months'] ?? 0);
     $revenueAccountId = (int)($data['revenue_account_id'] ?? 0);
     $baseItemId = (int)($data['base_item_id'] ?? 0);
@@ -5512,7 +5543,7 @@ function accounting_contract_summary(): array {
     return [
         'active_count' => (int)$pdo->query("SELECT COUNT(*) FROM contract WHERE status = 'ACTIVE'")->fetchColumn(),
         'draft_count' => (int)$pdo->query("SELECT COUNT(*) FROM contract WHERE status = 'DRAFT'")->fetchColumn(),
-        'mrr_value' => (float)$pdo->query("SELECT COALESCE(SUM(base_amount),0) FROM contract WHERE status IN ('ACTIVE','DRAFT') AND billing_cycle = 'MONTHLY'")->fetchColumn(),
+        'mrr_value' => (float)$pdo->query("SELECT COALESCE(SUM(CASE WHEN billing_cycle = 'QUARTERLY' THEN base_amount / 3 WHEN billing_cycle IN ('SEMIANNUAL','SEMI_ANNUAL') THEN base_amount / 6 WHEN billing_cycle = 'ANNUAL' THEN base_amount / 12 ELSE base_amount END),0) FROM contract WHERE status IN ('ACTIVE','DRAFT')")->fetchColumn(),
         'expiring_count' => (int)$pdo->query("SELECT COUNT(*) FROM contract WHERE status IN ('ACTIVE','DRAFT') AND end_date IS NOT NULL AND end_date <= DATE_ADD(CURDATE(), INTERVAL 90 DAY)")->fetchColumn(),
     ];
 }
@@ -6585,7 +6616,7 @@ function accounting_generate_contract_initial_invoice(int $contractId, int $user
         $lineItemIds[] = (int)($row['item_id'] ?? 0);
         $lineServiceCodes[] = (string)($row['service_code'] ?: $row['item_code'] ?: '');
         $lineQuantities[] = (float)$row['quantity'];
-        $lineUnitPrices[] = (float)$row['unit_price'];
+        $lineUnitPrices[] = accounting_cycle_unit_price((float)$row['unit_price'], (string)($row['billing_cycle'] ?? 'MONTHLY'));
         $lineRevenueAccounts[] = !empty($row['revenue_account_id']) ? (int)$row['revenue_account_id'] : $defaultRevenueAccountId;
         $generatedFrom[] = '#' . (int)$row['recurring_service_id'];
     }
@@ -6874,7 +6905,7 @@ function accounting_create_contract_bundle(array $data, int $userId = 0): array 
     $coveredDevices = round((float)($data['covered_devices'] ?? 0), 2);
     $serverCount = round((float)($data['server_count'] ?? 0), 2);
     $unitPrice = round((float)($data['unit_price'] ?? ($package['default_unit_price'] ?? 0)), 2);
-    $billingCycle = strtoupper(trim((string)($data['billing_cycle'] ?? ($package['default_billing_cycle'] ?? 'MONTHLY'))));
+    $billingCycle = accounting_normalize_billing_cycle((string)($data['billing_cycle'] ?? ($package['default_billing_cycle'] ?? 'MONTHLY')));
     $status = strtoupper(trim((string)($data['status'] ?? 'DRAFT')));
     $contractName = trim((string)($data['contract_name'] ?? (($package['name'] ?? 'Managed Services') . ' Agreement')));
     $notes = trim((string)($data['notes'] ?? ''));
@@ -6908,7 +6939,7 @@ function accounting_create_contract_bundle(array $data, int $userId = 0): array 
     if ($serverCount < 0) $errors[] = 'Covered servers cannot be negative.';
     if ($unitPrice < 0) $errors[] = 'Unit price cannot be negative.';
     if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $startDate)) $errors[] = 'Start date must be valid.';
-    if (!in_array($billingCycle, ['MONTHLY', 'QUARTERLY', 'SEMIANNUAL', 'ANNUAL'], true)) $errors[] = 'Billing cycle must be valid.';
+    if (!in_array($billingCycle, accounting_get_recurring_cycles(), true)) $errors[] = 'Billing cycle must be valid.';
     if (!in_array($status, array_keys(accounting_contract_status_options()), true)) $status = 'DRAFT';
     if (($productivity['platform'] ?? 'NONE') !== 'NONE' && $coveredUsers <= 0) {
         $errors[] = 'Covered users must be greater than zero when a productivity platform is selected.';
@@ -6948,7 +6979,7 @@ function accounting_create_contract_bundle(array $data, int $userId = 0): array 
 
         $contractNumber = accounting_next_contract_number($pdo, $clientId);
         $endDate = $termMonths > 0 ? date('Y-m-d', strtotime($startDate . ' +' . $termMonths . ' months')) : null;
-        $baseAmount = round($quantity * $unitPrice, 2);
+        $baseAmount = round($quantity * accounting_cycle_unit_price($unitPrice, $billingCycle), 2);
         if ($packagePricingModel === 'PER_DEVICE') {
             $coveredDevices = max(1, $quantity);
         } elseif ($packagePricingModel === 'PER_USER') {
@@ -7011,7 +7042,10 @@ function accounting_create_contract_bundle(array $data, int $userId = 0): array 
             }
             $defaultAddonPrice = accounting_default_addon_unit_price($addonCode, $unitPrice, $addon);
             $addonPrice = round((float)($data['addon_price'][$addonItemId] ?? $defaultAddonPrice), 2);
-            $addonCycle = strtoupper(trim((string)($data['addon_cycle'][$addonItemId] ?? ($addon['billing_cycle'] ?? $billingCycle))));
+            $addonCycle = accounting_normalize_billing_cycle((string)($data['addon_cycle'][$addonItemId] ?? $billingCycle));
+            if (!in_array($addonCycle, accounting_get_recurring_cycles(), true)) {
+                $addonCycle = $billingCycle;
+            }
             $addonTaxable = !empty($addon['taxable']) ? 1 : 0;
             $addonRevenue = (int)($addon['revenue_account_id'] ?? $revenueAccountId);
             $line->execute([$contractId, (int)($package['bundle_id'] ?? 0) ?: null, $addonItemId, (string)($addon['item_code'] ?: null), (string)$addon['item_name'], (string)($addon['description'] ?: $addon['item_name']), $addonPricingModel, $addonQty, $addonPrice, $addonTaxable, 0, $sort]);

@@ -95,11 +95,11 @@ accounting_subnav('recurring');
         <div><label>Client</label><select name="client_id" id="recurring-client"><option value="0">Select client</option><?php foreach ($clients as $client): ?><option value="<?= (int)$client['client_id'] ?>" <?= ((int)$form['client_id'] === (int)$client['client_id']) ? 'selected' : '' ?>><?= accounting_h((string)($client['dba_name'] ?: $client['legal_name'])) ?></option><?php endforeach; ?></select></div>
         <div class="split-2">
           <div><label>Contract</label><select name="contract_id" id="recurring-contract"><option value="0">No contract</option></select></div>
-          <div><label>Catalog item</label><select name="item_id" id="recurring-item"><option value="0">Manual / no catalog item</option><?php foreach ($catalogItems as $item): ?><option value="<?= (int)$item['item_id'] ?>" data-type="<?= accounting_h((string)$item['item_type']) ?>" data-name="<?= accounting_h((string)$item['item_name']) ?>" data-price="<?= accounting_h((string)$item['default_unit_price']) ?>" data-cycle="<?= accounting_h((string)$item['default_billing_cycle']) ?>" data-term="<?= (int)($item['term_months'] ?? 0) ?>" <?= ((int)$form['item_id'] === (int)$item['item_id']) ? 'selected' : '' ?>><?= accounting_h((string)($item['item_code'] ?: '—')) ?> · <?= accounting_h((string)$item['item_name']) ?></option><?php endforeach; ?></select></div>
+          <div><label>Catalog item</label><select name="item_id" id="recurring-item"><option value="0">Manual / no catalog item</option><?php foreach ($catalogItems as $item): ?><option value="<?= (int)$item['item_id'] ?>" data-type="<?= accounting_h((string)$item['item_type']) ?>" data-name="<?= accounting_h((string)$item['item_name']) ?>" data-price="<?= accounting_h((string)$item['default_unit_price']) ?>" data-cycle="<?= accounting_h(accounting_normalize_billing_cycle((string)$item['default_billing_cycle'])) ?>" data-term="<?= (int)($item['term_months'] ?? 0) ?>" <?= ((int)$form['item_id'] === (int)$item['item_id']) ? 'selected' : '' ?>><?= accounting_h((string)($item['item_code'] ?: '—')) ?> · <?= accounting_h((string)$item['item_name']) ?></option><?php endforeach; ?></select></div>
         </div>
         <div class="split-2">
           <div><label>Item type</label><select name="item_type" id="recurring-item-type"><?php foreach (accounting_get_catalog_item_types() as $type): ?><option value="<?= accounting_h($type) ?>" <?= ((string)$form['item_type'] === $type) ? 'selected' : '' ?>><?= accounting_h($type) ?></option><?php endforeach; ?></select></div>
-          <div><label>Billing cycle</label><select name="billing_cycle" id="recurring-cycle"><?php foreach (accounting_get_recurring_cycles() as $cycle): ?><option value="<?= accounting_h($cycle) ?>" <?= ((string)$form['billing_cycle'] === $cycle) ? 'selected' : '' ?>><?= accounting_h($cycle) ?></option><?php endforeach; ?></select></div>
+          <div><label>Billing cycle</label><select name="billing_cycle" id="recurring-cycle"><?php foreach (accounting_get_recurring_cycles() as $cycle): ?><option value="<?= accounting_h($cycle) ?>" <?= (accounting_normalize_billing_cycle((string)$form['billing_cycle']) === $cycle) ? 'selected' : '' ?>><?= accounting_h(accounting_billing_cycle_label($cycle)) ?></option><?php endforeach; ?></select></div>
         </div>
         <div><label>Description</label><input type="text" name="description" id="recurring-description" value="<?= accounting_h((string)$form['description']) ?>"><div class="form-hint">This becomes the recurring line item description on future invoice drafts.</div></div>
         <div class="split-3">
@@ -150,7 +150,7 @@ accounting_subnav('recurring');
         <?php $isActive = !empty($row['active']); ?>
         <tr>
           <td><strong><?= accounting_h((string)($row['dba_name'] ?: $row['legal_name'])) ?></strong><div class="muted-note"><?= accounting_h((string)($row['item_name'] ?: $row['description'])) ?></div></td>
-          <td><?= accounting_h((string)$row['billing_cycle']) ?><div class="muted-note"><?= accounting_h((string)$row['item_type']) ?><?= !empty($row['term_months']) ? ' · ' . (int)$row['term_months'] . ' mo term' : '' ?></div></td>
+          <td><?= accounting_h(accounting_billing_cycle_label((string)$row['billing_cycle'])) ?><div class="muted-note"><?= accounting_h((string)$row['item_type']) ?><?= !empty($row['term_months']) ? ' · ' . (int)$row['term_months'] . ' mo term' : '' ?></div></td>
           <td class="date"><?= accounting_h((string)$row['next_bill_date']) ?><div class="muted-note"><?= accounting_h((string)($row['last_billed_date'] ?: 'Never billed')) ?></div></td>
           <td class="money">$<?= number_format((float)$row['quantity'] * (float)$row['unit_price'], 2) ?><div class="muted-note"><?= number_format((float)$row['quantity'], 2) ?> × $<?= number_format((float)$row['unit_price'], 2) ?></div></td>
           <td class="status"><?= accounting_recurring_status_badge_html(!empty($row['active'])) ?><div class="muted-note"><?= !empty($row['auto_renew']) ? 'Auto renew' : 'Manual renew' ?></div></td>
@@ -182,8 +182,15 @@ function money(n) {
   const value = Number.parseFloat(n || '0');
   return `$${value.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
 }
+function normalizeCycle(cycle) {
+  const normalized = String(cycle || 'MONTHLY').trim().toUpperCase().replace(/[\s-]+/g, '_');
+  return normalized === 'SEMI_ANNUAL' ? 'SEMIANNUAL' : normalized;
+}
 function cycleLabel(cycle) {
-  return (cycle || 'MONTHLY').replace(/_/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase());
+  return {MONTHLY: 'Monthly', QUARTERLY: 'Quarterly', SEMIANNUAL: 'Semi-annual', ANNUAL: 'Annual'}[normalizeCycle(cycle)] || 'Monthly';
+}
+function cycleMonths(cycle) {
+  return {MONTHLY: 1, QUARTERLY: 3, SEMIANNUAL: 6, ANNUAL: 12}[normalizeCycle(cycle)] || 1;
 }
 function addMonthsToDate(dateStr, months) {
   const base = new Date(dateStr + 'T00:00:00');
@@ -198,11 +205,10 @@ function suggestNextBill() {
   const cycle = cycleSelect.value;
   const startDate = startDateInput.value;
   if (!startDate) return;
-  const map = {MONTHLY: 1, QUARTERLY: 3, SEMI_ANNUAL: 6, ANNUAL: 12};
-  if (map[cycle]) nextBillInput.value = addMonthsToDate(startDate, map[cycle]);
+  if (cycleMonths(cycle)) nextBillInput.value = addMonthsToDate(startDate, cycleMonths(cycle));
 }
 function updateRecurringPreview() {
-  const total = (parseFloat(qtyInput.value || '0') || 0) * (parseFloat(priceInput.value || '0') || 0);
+  const total = (parseFloat(qtyInput.value || '0') || 0) * (parseFloat(priceInput.value || '0') || 0) * cycleMonths(cycleSelect.value);
   estimateEl.textContent = money(total);
   impactEl.textContent = total > 0
     ? `This recurring item will generate draft invoices at ${cycleLabel(cycleSelect.value).toLowerCase()} value ${money(total)}.`
