@@ -19,6 +19,23 @@ OPS currently sends one external client signer only. OPS does **not** send a Mid
 
 The local PDF generator remains useful for admin review of the unsigned draft packet, but the automated eSignature send relies on the provider-side template and merge placeholders above.
 
+
+## Live template build steps
+
+Use `docs/esignatures-live-template-source.md` as the copy-ready source for the live/staging eSignatures.com provider-side Managed Services Agreement template. Build the provider template from that source instead of the temporary demo template.
+
+1. In eSignatures.com, create a new provider-side template for the MMIT Managed Services Agreement Packet.
+2. Copy the content from `docs/esignatures-live-template-source.md` into the provider template editor.
+3. Verify the included Support Policy / SLA and Master Managed Services Agreement terms still match the current OPS `SLA_v2_packet` and `MSA_v2_packet` text from `accounting_contract_default_templates()` in `inc/accounting.php` or the current OPS contract template records if they have been updated administratively.
+4. Add one external client signer only. OPS populates that signer from `signers[0].name` and `signers[0].email`. OPS currently does not send a second MMIT/LnK signer, a signer role key, signer title, sender identity, or countersigner metadata.
+5. Add the client signing controls for that one signer: a client signature field is required; client printed name, title, date, and an acknowledgment checkbox are recommended when supported by the provider template editor.
+6. Add merge placeholders exactly matching the OPS payload names in the placeholder table below. Do not rename, capitalize, space, or prefix/suffix the placeholder keys.
+7. Use `{{recurring_total}}` as the main displayed agreement total with the label “Recurring total for selected billing cycle.” Do not use `{{monthly_amount}}` as the primary displayed total because OPS supports Monthly, Quarterly, Semi-annual, and Annual billing cycles.
+8. Keep `{{monthly_amount}}` available only as a documented legacy/backward-compatible placeholder for older or temporary templates.
+9. Do not include DRAFT, DEMO, “test agreement,” old Agreement Packet PDF / Legal Reference PDF button language, or any production-looking template ID placeholder in the provider template.
+10. Save the provider template, then copy the real provider template ID into OPS staging private config only. Do not commit the real provider template ID to the repo.
+11. Send a staging test contract, sign as the test signer, and verify that OPS receives the signed/completed webhook and attaches or references the signed copy.
+
 ## Merge placeholders
 
 Configure these provider-side merge placeholders exactly as shown.
