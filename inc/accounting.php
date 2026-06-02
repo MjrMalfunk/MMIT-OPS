@@ -3651,7 +3651,7 @@ function accounting_render_invoice_pdf_bytes(array $invoice, array $lines, array
                 $mime = 'image/jpeg';
             }
             $data = base64_encode((string)file_get_contents($candidate));
-            $logoHtml = '<img src="data:' . $mime . ';base64,' . $data . '" style="max-width:300px; height:auto;">';
+            $logoHtml = '<img src="data:' . $mime . ';base64,' . $data . '" style="max-width:330px; height:auto;">';
             break;
         }
     }
@@ -3711,9 +3711,13 @@ function accounting_render_invoice_pdf_bytes(array $invoice, array $lines, array
 <head>
 <meta charset="utf-8">
 <style>
-    @page { margin: 34px 38px 58px 38px; }
-    body { font-family: DejaVu Sans, Arial, sans-serif; color: #172033; font-size: 12px; padding-bottom: 64px; }
+    @page { margin: 26px 34px 30px 34px; }
+    body { font-family: DejaVu Sans, Arial, sans-serif; color: #172033; font-size: 11.5px; margin: 0; }
     .page-shell { position: relative; z-index: 1; }
+    .invoice-page { width: 100%; min-height: 716px; border-collapse: collapse; }
+    .invoice-page > tbody > tr > td { padding: 0; vertical-align: top; }
+    .invoice-page > tbody > tr.content-row > td { height: 100%; }
+    .invoice-page > tbody > tr.footer-row > td { vertical-align: bottom; }
     .watermark-shell { position: fixed; top: 36%; left: 2%; width: 96%; text-align: center; transform: rotate(-26deg); transform-origin: center center; z-index: 0; }
     .watermark { width: 100%; text-align: center; font-weight: 900; }
     .watermark-outline { font-size: 100px; letter-spacing: 10px; color: rgba(22, 163, 74, 0.08); }
@@ -3722,62 +3726,61 @@ function accounting_render_invoice_pdf_bytes(array $invoice, array $lines, array
     .watermark-sub { display: block; width: 100%; text-align: center; }
     .watermark-sub-outline { font-size: 22px; font-weight: 800; letter-spacing: 3px; color: rgba(22, 163, 74, 0.08); }
     .watermark-sub-main { position: absolute; top: 2px; left: 0; font-size: 19px; font-weight: 800; letter-spacing: 4px; color: rgba(22, 163, 74, 0.17); }
-    .header { width: 100%; border-collapse: collapse; margin-bottom: 24px; }
+    .header { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
     .header td { vertical-align: top; }
-    .logo-wrap { width: 52%; text-align: left; }
-    .logo-block { display: inline-block; width: 320px; text-align: center; }
-    .logo-image img { display: block; margin: 0 auto; max-width: 300px; height: auto; }
-    .logo-legal { margin-top: 8px; text-align: left; padding-left: 10px; font-size: 9.5px; color: #334155; }
-    .logo-email { margin-top: 4px; text-align: left; padding-left: 10px; font-size: 10px; color: #4b5563; }
+    .logo-wrap { width: 54%; text-align: left; }
+    .logo-block { display: inline-block; width: 344px; text-align: center; }
+    .logo-image img { display: block; margin: 0 auto; max-width: 330px; height: auto; }
+    .logo-legal { margin-top: 5px; text-align: left; padding-left: 8px; font-size: 9px; color: #334155; }
+    .logo-email { margin-top: 2px; text-align: left; padding-left: 8px; font-size: 9.5px; color: #4b5563; }
     .company-fallback { font-size: 24px; font-weight: 700; color: #10233f; }
-    .invoice-wrap { width: 48%; text-align: right; }
-    .invoice-title { font-size: 28px; font-weight: 800; color: #10233f; letter-spacing: 0.8px; margin: 0; }
-    .invoice-number { font-size: 14px; font-weight: 700; color: #10233f; text-align: right; margin-top: 8px; }
-    .status-pill { display: inline-block; margin-top: 10px; padding: 6px 14px; border-radius: 999px; font-size: 10px; font-weight: 700; letter-spacing: 0.6px; }
+    .invoice-wrap { width: 46%; text-align: right; }
+    .invoice-title { font-size: 27px; font-weight: 800; color: #10233f; letter-spacing: 0.8px; margin: 0; }
+    .invoice-number { font-size: 13px; font-weight: 700; color: #10233f; text-align: right; margin-top: 6px; }
+    .status-pill { display: inline-block; margin-top: 7px; padding: 5px 12px; border-radius: 999px; font-size: 10px; font-weight: 700; letter-spacing: 0.6px; }
     .status-pill.draft { background: #e5e7eb; color: #475569; }
     .status-pill.issued { background: #dbeafe; color: #0f766e; }
     .status-pill.paid { background: #dcfce7; color: #166534; }
-    .meta { width: 100%; border-collapse: separate; border-spacing: 0; margin-bottom: 24px; }
-    .meta-box, .billto-box { border: 1px solid #d9e2ec; border-radius: 12px; }
-    .box-title { font-size: 11px; font-weight: 700; color: #64748b; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.6px; }
-    .billto-box { width: 52%; padding: 16px; }
-    .meta-box { width: 42%; padding: 16px; }
-    .bill-line { margin-bottom: 3px; }
-    .bill-line.name { font-weight: 700; color: #10233f; margin-bottom: 8px; }
-    .meta-row { margin-bottom: 8px; }
+    .meta { width: 100%; border-collapse: separate; border-spacing: 0; margin-bottom: 14px; }
+    .meta-box, .billto-box { border: 1px solid #d9e2ec; border-radius: 10px; }
+    .box-title { font-size: 10px; font-weight: 700; color: #64748b; margin-bottom: 7px; text-transform: uppercase; letter-spacing: 0.55px; }
+    .billto-box { width: 52%; padding: 11px 13px; }
+    .meta-box { width: 42%; padding: 11px 13px; }
+    .bill-line { margin-bottom: 2px; }
+    .bill-line.name { font-weight: 700; color: #10233f; margin-bottom: 5px; }
+    .meta-row { margin-bottom: 5px; }
     .meta-label { display: inline-block; width: 92px; color: #64748b; font-weight: 700; }
-    table.lines { width: 100%; border-collapse: collapse; margin-top: 8px; }
-    .lines thead th { background: #10233f; color: #fff; padding: 10px 12px; font-size: 11px; text-align: left; }
+    table.lines { width: 100%; border-collapse: collapse; margin-top: 4px; }
+    .lines thead th { background: #10233f; color: #fff; padding: 8px 10px; font-size: 10.5px; text-align: left; }
     .lines thead th.num { text-align: right; }
-    .lines tbody td { border-bottom: 1px solid #e5e7eb; padding: 11px 12px; vertical-align: top; }
+    .lines tbody td { border-bottom: 1px solid #e5e7eb; padding: 8px 10px; vertical-align: top; }
     .lines tbody td.num { text-align: right; white-space: nowrap; }
     .desc-main { font-weight: 700; color: #172033; margin-bottom: 2px; }
     .desc-sub { font-size: 10px; color: #64748b; }
-    .summary-wrap { width: 100%; margin-top: 18px; }
-    .summary-table { width: 44%; margin-left: auto; border-collapse: collapse; }
-    .summary-table td { padding: 7px 10px; border-bottom: 1px solid #e5e7eb; }
+    .summary-wrap { width: 100%; margin-top: 12px; }
+    .summary-table { width: 42%; margin-left: auto; border-collapse: collapse; }
+    .summary-table td { padding: 5px 9px; border-bottom: 1px solid #e5e7eb; }
     .summary-table td:last-child { text-align: right; font-weight: 700; }
-    .summary-table tr.total td { background: #f8fafc; font-size: 13px; color: #10233f; }
-    .bottom { margin-top: 26px; width: 100%; border-collapse: separate; border-spacing: 0; }
+    .summary-table tr.total td { background: #f8fafc; font-size: 12.5px; color: #10233f; }
+    .bottom { margin-top: 14px; width: 100%; border-collapse: separate; border-spacing: 0; page-break-inside: avoid; }
     .bottom td { vertical-align: top; }
-    .notes, .payment { border: 1px solid #d9e2ec; border-radius: 12px; padding: 14px 16px; }
+    .notes, .payment { border: 1px solid #d9e2ec; border-radius: 10px; padding: 10px 12px; font-size: 10.5px; line-height: 1.35; }
     .notes { width: 48%; }
-    .payment { width: 48%; }
+    .payment { width: 48%; overflow-wrap: anywhere; word-break: break-word; }
     .footer {
-        position: fixed;
-        left: 0;
-        right: 0;
-        bottom: 4px;
         text-align: center;
-        font-size: 10px;
+        font-size: 9.5px;
         color: #64748b;
         border-top: 1px solid #d9e2ec;
-        padding-top: 8px;
+        padding-top: 7px;
+        margin-top: 12px;
     }
 </style>
 </head>
 <body>' . $watermarkHtml . '
     <div class="page-shell">
+    <table class="invoice-page">
+        <tr class="content-row"><td>
     <table class="header">
         <tr>
             <td class="logo-wrap"><div class="logo-block"><div class="logo-image">' . $logoHtml . '</div><div class="logo-legal">' . htmlspecialchars($companyLegalName) . '</div><div class="logo-email">' . htmlspecialchars($companyEmail) . '</div></div></td>
@@ -3843,7 +3846,11 @@ function accounting_render_invoice_pdf_bytes(array $invoice, array $lines, array
         </tr>
     </table>
 
+        </td></tr>
+        <tr class="footer-row"><td>
     <div class="footer">LnK Consulting, LLC dba Midwest Managed IT | billing@midwestmanagedit.com | Thank you for your business and prompt payment.</div>
+        </td></tr>
+    </table>
     </div>
 </body>
 </html>';
