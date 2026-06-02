@@ -102,6 +102,8 @@ $esignaturesLatestSend = esignatures_latest_send($contractId);
 $esignaturesWebhookUrl = esignatures_webhook_url();
 $esignaturesWebhookLabel = esignatures_is_staging_mode() ? 'staging/test webhook URL' : 'webhook URL';
 $showEsignaturesTestButton = esignatures_is_enabled() && esignatures_test_mode();
+$showUnsignedDraftPreview = !$hasSignedCopy && in_array($currentStatus, ['DRAFT','PENDING_SIGNATURE'], true);
+$unsignedDraftPdfHref = BASE_URL . '/contracts/pdf.php?id=' . (int)$contract['contract_id'];
 $signedDocumentHref = '';
 if (!empty($contract['signed_document_path'])) {
     $signedDocumentValue = trim((string)$contract['signed_document_path']);
@@ -372,6 +374,15 @@ page_header((string)$contract['contract_number'], 'contracts');
       <?php if ($esignaturesLatestSend): ?>
       <div style="padding:10px 12px;border-radius:12px;border:1px solid rgba(34,197,94,.22);background:rgba(34,197,94,.08);font-size:12px;line-height:1.45;margin-bottom:14px;">
         <strong>eSignatures:</strong> <?= accounting_h((string)($esignaturesLatestSend['status'] ?: 'sent')) ?><?php if (!empty($esignaturesLatestSend['esignatures_contract_id'])): ?> · ID <?= accounting_h((string)$esignaturesLatestSend['esignatures_contract_id']) ?><?php endif; ?><?php if (!empty($esignaturesLatestSend['test_mode'])): ?> · TEST<?php endif; ?>
+      </div>
+      <?php endif; ?>
+      <?php if ($showUnsignedDraftPreview): ?>
+      <div style="display:grid;gap:10px;margin-bottom:14px;padding:12px 14px;border-radius:12px;border:1px solid rgba(59,130,246,.24);background:rgba(59,130,246,.08);">
+        <div style="font-size:12px;opacity:.78;line-height:1.45;">Admin review only: preview or download the unsigned draft agreement generated from the current OPS contract data before sending to eSignature. The signed eSignatures copy remains the source of truth after completion.</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <a class="btn btn-secondary" target="_blank" rel="noopener" style="width:auto;padding:10px 14px;text-decoration:none;" href="<?= accounting_h($unsignedDraftPdfHref) ?>">Preview unsigned agreement</a>
+          <a class="btn btn-secondary" style="width:auto;padding:10px 14px;text-decoration:none;" href="<?= accounting_h($unsignedDraftPdfHref . '&download=1') ?>">Download draft agreement PDF</a>
+        </div>
       </div>
       <?php endif; ?>
       <?php if ($showEsignaturesTestButton && in_array($currentStatus, ['DRAFT','PENDING_SIGNATURE'], true)): ?>

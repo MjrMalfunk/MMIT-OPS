@@ -8,11 +8,12 @@ if ($contractId <= 0) { http_response_code(404); exit('Contract not found'); }
 $contract = accounting_get_contract($contractId);
 if (!$contract) { http_response_code(404); exit('Contract not found'); }
 $services = accounting_get_contract_services($contractId);
-$filename = preg_replace('/[^A-Za-z0-9._-]/', '_', (string)$contract['contract_number']) . '.pdf';
+$filename = preg_replace('/[^A-Za-z0-9._-]/', '_', (string)$contract['contract_number']) . '-unsigned-draft.pdf';
+$download = strtolower(trim((string)($_GET['download'] ?? ''))) !== '';
 try {
     $pdf = accounting_render_contract_pdf_bytes($contract, $services);
     header('Content-Type: application/pdf');
-    header('Content-Disposition: inline; filename="' . $filename . '"');
+    header('Content-Disposition: ' . ($download ? 'attachment' : 'inline') . '; filename="' . $filename . '"');
     header('Cache-Control: private, max-age=0, must-revalidate');
     echo $pdf;
     exit;
