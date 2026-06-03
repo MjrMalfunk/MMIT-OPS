@@ -37,6 +37,16 @@ page_header('Admin', 'admin');
       </div>
     </section>
 
+
+    <section class="card admin-card">
+      <div style="opacity:.72;text-transform:uppercase;letter-spacing:.08em;font-size:12px;">Syncro onboarding</div>
+      <h2 style="margin:10px 0 10px;">Production mover</h2>
+      <p class="admin-card-copy">Dry-run-first manual moves for READY onboarding assets into allowlisted MMIT production folders.</p>
+      <div class="admin-card-actions">
+        <a class="btn btn-secondary btn-inline" style="text-decoration:none;" href="<?= htmlspecialchars(BASE_URL) ?>/admin/syncro_production_mover.php">Open production mover</a>
+      </div>
+    </section>
+
     <section class="card admin-card">
       <div style="opacity:.72;text-transform:uppercase;letter-spacing:.08em;font-size:12px;">Go-live</div>
       <h2 style="margin:10px 0 10px;">Controlled maintenance</h2>
