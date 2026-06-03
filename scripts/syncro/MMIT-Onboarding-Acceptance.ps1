@@ -142,6 +142,32 @@ function Get-MMITOnboardingRoute {
     $isManage = @('manage', 'manageit') -contains $serviceTierKey
     $isProtect = @('protect', 'protectit') -contains $serviceTierKey
     $isGovern = @('govern', 'governit') -contains $serviceTierKey
+    $serviceTierValid = ($isManage -or $isProtect -or $isGovern)
+    $assetRoleValid = ($isWorkstation -or $isServer)
+    $routeValidationFailures = New-Object System.Collections.Generic.List[string]
+    $routeValidationLines = New-Object System.Collections.Generic.List[string]
+
+    $serviceTierText = ConvertTo-MMITText $serviceTierRaw
+    if ($serviceTierText -eq '') {
+        $routeValidationFailures.Add('ServiceTier')
+        $routeValidationLines.Add('Route validation: FAIL - missing ServiceTier')
+    } elseif (-not $serviceTierValid) {
+        $routeValidationFailures.Add('ServiceTier')
+        $routeValidationLines.Add(("Route validation: FAIL - unrecognized ServiceTier '{0}'" -f $serviceTierText))
+    }
+
+    $assetRoleText = ConvertTo-MMITText $assetRoleRaw
+    if ($assetRoleText -eq '') {
+        $routeValidationFailures.Add('AssetRole')
+        $routeValidationLines.Add('Route validation: FAIL - missing AssetRole')
+    } elseif (-not $assetRoleValid) {
+        $routeValidationFailures.Add('AssetRole')
+        $routeValidationLines.Add(("Route validation: FAIL - unrecognized AssetRole '{0}'" -f $assetRoleText))
+    }
+
+    if ($routeValidationFailures.Count -eq 0) {
+        $routeValidationLines.Add('Route validation: PASS')
+    }
 
     $huntressRequired = ($isProtect -or $isGovern)
     $scoutDnsRequired = $dnsRequired -or ($isProtect -or $isGovern)
@@ -154,12 +180,12 @@ function Get-MMITOnboardingRoute {
         $coveRequired = $backupRequired
     }
 
-    $serviceTierText = ConvertTo-MMITText $serviceTierRaw
-    if ($serviceTierText -eq '') {
-        $serviceTierText = 'unspecified service tier'
+    $serviceTierReasonText = $serviceTierText
+    if ($serviceTierReasonText -eq '') {
+        $serviceTierReasonText = 'unspecified service tier'
     }
 
-    $huntressReason = if ($huntressRequired) { 'required for Protect/Govern IT' } else { "not required for $serviceTierText" }
+    $huntressReason = if ($huntressRequired) { 'required for Protect/Govern IT' } else { "not required for $serviceTierReasonText" }
     $scoutDnsReason = if ($scoutDnsRequired) {
         if ($dnsRequired) { 'DNS filtering selected' } else { 'required for Protect/Govern IT' }
     } elseif ($dnsFieldPresent) {
@@ -174,10 +200,14 @@ function Get-MMITOnboardingRoute {
     }
 
     return [ordered]@{
-        ServiceTier = ConvertTo-MMITText $serviceTierRaw
+        ServiceTier = $serviceTierText
         ServiceTierKey = $serviceTierKey
-        AssetRole = ConvertTo-MMITText $assetRoleRaw
+        ServiceTierValid = $serviceTierValid
+        AssetRole = $assetRoleText
         AssetRoleKey = $assetRoleKey
+        AssetRoleValid = $assetRoleValid
+        RouteValidationFailures = @($routeValidationFailures)
+        RouteValidationLines = @($routeValidationLines)
         BackupRequired = $backupRequired
         LabAsset = ConvertTo-MMITBoolean $labRaw
         ProductionFolderTarget = ConvertTo-MMITText $targetRaw
@@ -221,6 +251,14 @@ function Get-MMITOnboardingDecision {
     $route = Get-MMITOnboardingRoute -CustomFields $CustomFields
     $failures = New-Object System.Collections.Generic.List[string]
     $summaryLines = New-Object System.Collections.Generic.List[string]
+
+    foreach ($routeFailure in @($route.RouteValidationFailures)) {
+        $failures.Add($routeFailure)
+    }
+
+    foreach ($routeValidationLine in @($route.RouteValidationLines)) {
+        $summaryLines.Add($routeValidationLine)
+    }
 
     foreach ($checkName in @('Defender', 'ScoutDNS', 'Huntress', 'CoveAgent', 'CoveBackupComplete')) {
         $requirement = $route.Requirements[$checkName]
@@ -396,7 +434,10 @@ function Test-MMITInstalledProgram {
     foreach ($path in $registryPaths) {
         $items = Get-ItemProperty -Path $path -ErrorAction SilentlyContinue
         foreach ($item in @($items)) {
-            $displayName = ConvertTo-MMITText $item.DisplayName
+            $displayName = ''
+            if ($null -ne $item -and $null -ne $item.PSObject.Properties['DisplayName']) {
+                $displayName = ConvertTo-MMITText $item.DisplayName
+            }
             if ($displayName -eq '') {
                 continue
             }

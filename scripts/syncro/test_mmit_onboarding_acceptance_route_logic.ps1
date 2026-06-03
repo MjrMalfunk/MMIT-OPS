@@ -102,4 +102,53 @@ Assert-Equal $governAliasDecision.Status 'READY' 'Govern alias server no-backup 
 Assert-Equal $governAliasDecision.Route.Requirements.ScoutDNS.Required $true 'Govern alias ScoutDNS required'
 Assert-Equal $governAliasDecision.Route.Requirements.CoveAgent.Required $false 'Server alias Cove skipped when backup not selected'
 
+$missingRouteFields = @{
+    'MMIT Backup Required' = $false
+    'MMIT DNS Filtering Required' = $true
+}
+$missingRouteDecision = Get-MMITOnboardingDecision -CustomFields $missingRouteFields -CheckResults @{ Defender = 'PASS'; ScoutDNS = 'PASS'; Huntress = 'FAIL'; CoveAgent = 'FAIL'; CoveBackupComplete = 'FAIL' }
+Assert-Equal $missingRouteDecision.Status 'NOT_READY' 'Missing route values status'
+Assert-Equal $missingRouteDecision.ReadyToMove 'No' 'Missing route values ready to move'
+Assert-Equal ($missingRouteDecision.Failures -contains 'ServiceTier') $true 'Missing route ServiceTier failure included'
+Assert-Equal ($missingRouteDecision.Failures -contains 'AssetRole') $true 'Missing route AssetRole failure included'
+Assert-Equal ($missingRouteDecision.Summary -like '*Route validation: FAIL - missing ServiceTier*') $true 'Missing ServiceTier summary line'
+Assert-Equal ($missingRouteDecision.Summary -like '*Route validation: FAIL - missing AssetRole*') $true 'Missing AssetRole summary line'
+
+$invalidRouteFields = @{
+    'MMIT Service Tier' = 'Unknown IT'
+    'MMIT Asset Role' = 'Kiosk'
+    'MMIT Backup Required' = $false
+}
+$invalidRouteDecision = Get-MMITOnboardingDecision -CustomFields $invalidRouteFields -CheckResults @{ Defender = 'PASS'; ScoutDNS = 'PASS'; Huntress = 'FAIL'; CoveAgent = 'FAIL'; CoveBackupComplete = 'FAIL' }
+Assert-Equal $invalidRouteDecision.Status 'NOT_READY' 'Invalid route values status'
+Assert-Equal ($invalidRouteDecision.Summary -like "*Route validation: FAIL - unrecognized ServiceTier 'Unknown IT'*") $true 'Invalid ServiceTier summary line'
+Assert-Equal ($invalidRouteDecision.Summary -like "*Route validation: FAIL - unrecognized AssetRole 'Kiosk'*") $true 'Invalid AssetRole summary line'
+
+$manageDnsReadyFields = @{
+    'MMIT Service Tier' = 'Manage IT'
+    'MMIT Asset Role' = 'Workstation'
+    'MMIT Backup Required' = $false
+    'MMIT DNS Filtering Required' = $true
+}
+$manageDnsReadyDecision = Get-MMITOnboardingDecision -CustomFields $manageDnsReadyFields -CheckResults @{ Defender = 'PASS'; ScoutDNS = 'PASS'; Huntress = 'FAIL'; CoveAgent = 'FAIL'; CoveBackupComplete = 'FAIL' }
+Assert-Equal $manageDnsReadyDecision.Status 'READY' 'Manage IT workstation with DNS selected and ScoutDNS passing status'
+Assert-Equal $manageDnsReadyDecision.Route.Requirements.ScoutDNS.Required $true 'Manage IT DNS selected ScoutDNS required'
+Assert-Equal $manageDnsReadyDecision.Route.Requirements.Huntress.Required $false 'Manage IT DNS selected Huntress skipped'
+Assert-Equal $manageDnsReadyDecision.Route.Requirements.CoveAgent.Required $false 'Manage IT DNS selected Cove skipped'
+Assert-Equal ($manageDnsReadyDecision.Summary -like '*Route validation: PASS*') $true 'Valid route validation pass line'
+
+function Get-ItemProperty {
+    param(
+        [string]$Path,
+        [string]$ErrorAction
+    )
+
+    return @(
+        [pscustomobject]@{ Publisher = 'Missing DisplayName Corp' },
+        [pscustomobject]@{ DisplayName = 'ScoutDNS Agent' }
+    )
+}
+
+Assert-Equal (Test-MMITInstalledProgram -NamePatterns @('*ScoutDNS*')) $true 'Installed program skips items without DisplayName under strict mode'
+
 Write-Output 'MMIT onboarding acceptance route logic tests passed.'
