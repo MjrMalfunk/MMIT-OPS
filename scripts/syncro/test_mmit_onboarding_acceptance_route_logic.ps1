@@ -71,4 +71,35 @@ Assert-Equal ($manageDnsDecision.Failures -contains 'ScoutDNS') $true 'Manage IT
 Assert-Equal ($manageDnsDecision.Failures -contains 'Huntress') $false 'Skipped Huntress excluded from failures'
 Assert-Equal ($manageDnsDecision.Failures -contains 'CoveAgent') $false 'Skipped Cove excluded from failures'
 
+
+$aliasFields = @{
+    'MMIT Service Tier' = 'Manage'
+    'MMIT Asset Role' = 'Workstations'
+    'MMIT Backup Required' = $false
+}
+$aliasDecision = Get-MMITOnboardingDecision -CustomFields $aliasFields -CheckResults @{ Defender = 'PASS'; ScoutDNS = 'FAIL'; Huntress = 'FAIL'; CoveAgent = 'FAIL'; CoveBackupComplete = 'FAIL' }
+Assert-Equal $aliasDecision.Status 'READY' 'Manage/Workstations alias status'
+Assert-Equal $aliasDecision.Route.Requirements.ScoutDNS.Required $false 'Manage alias ScoutDNS not required without DNS field'
+Assert-Equal $aliasDecision.Route.Requirements.Huntress.Required $false 'Manage alias Huntress not required'
+
+$protectAliasFields = @{
+    'MMIT Service Tier' = 'Protect'
+    'MMIT Asset Role' = 'Servers'
+    'MMIT Backup Required' = $true
+}
+$protectAliasDecision = Get-MMITOnboardingDecision -CustomFields $protectAliasFields -CheckResults @{ Defender = 'PASS'; ScoutDNS = 'PASS'; Huntress = 'PASS'; CoveAgent = 'PASS'; CoveBackupComplete = 'PASS' }
+Assert-Equal $protectAliasDecision.Status 'READY' 'Protect/Servers alias status'
+Assert-Equal $protectAliasDecision.Route.Requirements.Huntress.Required $true 'Protect alias Huntress required'
+Assert-Equal $protectAliasDecision.Route.Requirements.CoveAgent.Required $true 'Servers alias Cove required when backup selected'
+
+$governAliasFields = @{
+    'MMIT Service Tier' = 'Govern'
+    'MMIT Asset Role' = 'Server'
+    'MMIT Backup Required' = $false
+}
+$governAliasDecision = Get-MMITOnboardingDecision -CustomFields $governAliasFields -CheckResults @{ Defender = 'PASS'; ScoutDNS = 'PASS'; Huntress = 'PASS'; CoveAgent = 'FAIL'; CoveBackupComplete = 'FAIL' }
+Assert-Equal $governAliasDecision.Status 'READY' 'Govern alias server no-backup status'
+Assert-Equal $governAliasDecision.Route.Requirements.ScoutDNS.Required $true 'Govern alias ScoutDNS required'
+Assert-Equal $governAliasDecision.Route.Requirements.CoveAgent.Required $false 'Server alias Cove skipped when backup not selected'
+
 Write-Output 'MMIT onboarding acceptance route logic tests passed.'
