@@ -5,17 +5,6 @@
 # updates onboarding custom fields, and creates the ready/move ticket once when
 # the route-aware acceptance decision is READY.
 
-param(
-    [string]$ServiceTier = $env:ServiceTier,
-    [string]$AssetRole = $env:AssetRole,
-    [AllowNull()][object]$BackupRequired = $env:BackupRequired,
-    [AllowNull()][object]$LabAsset = $env:LabAsset,
-    [string]$ProductionFolderTarget = $env:ProductionFolderTarget,
-    [AllowNull()][object]$DnsFilteringRequired = $env:DnsFilteringRequired,
-    [string]$ReadyTicketSubject = '',
-    [string]$MarkerPath = $env:MMIT_ONBOARDING_READY_MARKER_PATH,
-    [switch]$WhatIfSyncro
-)
 Set-StrictMode -Version 2.0
 
 Write-Output "MMIT-Onboarding-Acceptance version: route-aware-full-20260603"
@@ -304,14 +293,16 @@ function Get-MMITFirstValue {
     param([string[]]$Names)
 
     foreach ($name in $Names) {
-        $variable = Get-Variable -Name $name -Scope Global -ErrorAction SilentlyContinue
-        if ($null -ne $variable -and (ConvertTo-MMITText $variable.Value) -ne '') {
-            return (ConvertTo-MMITText $variable.Value)
+        foreach ($scope in @('Script', 'Global')) {
+            $variable = Get-Variable -Name $name -Scope $scope -ErrorAction SilentlyContinue
+            if ($null -ne $variable -and (ConvertTo-MMITText $variable.Value) -ne '') {
+                return $variable.Value
+            }
         }
 
         $environmentValue = [Environment]::GetEnvironmentVariable($name)
         if ((ConvertTo-MMITText $environmentValue) -ne '') {
-            return (ConvertTo-MMITText $environmentValue)
+            return $environmentValue
         }
     }
 
@@ -355,6 +346,20 @@ function Get-MMITSyncroSubdomain {
     return $subdomain
 }
 
+function Get-MMITRuntimeValue {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Names,
+        [AllowNull()][object]$Default = ''
+    )
+
+    $value = Get-MMITFirstValue -Names $Names
+    if ((ConvertTo-MMITText $value) -ne '') {
+        return $value
+    }
+
+    return $Default
+}
+
 function Get-MMITParameterOrFallbackValue {
     param(
         [AllowNull()][object]$ConfiguredValue,
@@ -390,7 +395,7 @@ function Get-MMITAssetCustomFieldsFromInputs {
         'MMIT Backup Required' = Get-MMITParameterOrFallbackValue -ConfiguredValue $BackupRequired -FallbackNames @('MMIT Backup Required', 'MMIT_BACKUP_REQUIRED', 'BackupRequired') -Default $false
         'MMIT Lab Asset' = Get-MMITParameterOrFallbackValue -ConfiguredValue $LabAsset -FallbackNames @('MMIT Lab Asset', 'MMIT_LAB_ASSET', 'LabAsset') -Default $false
         'MMIT Production Folder Target' = Get-MMITParameterOrFallbackValue -ConfiguredValue $ProductionFolderTarget -FallbackNames @('MMIT Production Folder Target', 'MMIT_PRODUCTION_FOLDER_TARGET', 'ProductionFolderTarget') -Default ''
-        'MMIT DNS Filtering Required' = Get-MMITParameterOrFallbackValue -ConfiguredValue $DnsFilteringRequired -FallbackNames @('MMIT DNS Filtering Required', 'MMIT_DNS_FILTERING_REQUIRED', 'DnsFilteringRequired') -Default $false
+        'MMIT DNS Filtering Required' = Get-MMITParameterOrFallbackValue -ConfiguredValue $DnsFilteringRequired -FallbackNames @('MMIT DNS Filtering Required', 'MMIT_DNS_FILTERING_REQUIRED', 'DNSFilteringRequired', 'DnsFilteringRequired') -Default $false
     }
 }
 
@@ -725,14 +730,24 @@ function Invoke-MMITOnboardingAcceptance {
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
+    $runtimeServiceTier = Get-MMITRuntimeValue -Names @('ServiceTier', 'MMIT Service Tier', 'MMIT_SERVICE_TIER')
+    $runtimeAssetRole = Get-MMITRuntimeValue -Names @('AssetRole', 'MMIT Asset Role', 'MMIT_ASSET_ROLE')
+    $runtimeBackupRequired = Get-MMITRuntimeValue -Names @('BackupRequired', 'MMIT Backup Required', 'MMIT_BACKUP_REQUIRED') -Default $false
+    $runtimeLabAsset = Get-MMITRuntimeValue -Names @('LabAsset', 'MMIT Lab Asset', 'MMIT_LAB_ASSET') -Default $false
+    $runtimeProductionFolderTarget = Get-MMITRuntimeValue -Names @('ProductionFolderTarget', 'MMIT Production Folder Target', 'MMIT_PRODUCTION_FOLDER_TARGET')
+    $runtimeDnsFilteringRequired = Get-MMITRuntimeValue -Names @('DNSFilteringRequired', 'DnsFilteringRequired', 'MMIT DNS Filtering Required', 'MMIT_DNS_FILTERING_REQUIRED') -Default $false
+    $runtimeReadyTicketSubject = Get-MMITRuntimeValue -Names @('ReadyTicketSubject', 'MMIT_READY_TICKET_SUBJECT')
+    $runtimeMarkerPath = Get-MMITRuntimeValue -Names @('MarkerPath', 'MMIT_ONBOARDING_READY_MARKER_PATH')
+    $runtimeWhatIfSyncro = ConvertTo-MMITBoolean (Get-MMITRuntimeValue -Names @('WhatIfSyncro', 'MMIT_WHAT_IF_SYNCRO') -Default $false)
+
     Invoke-MMITOnboardingAcceptance `
-        -ServiceTier $ServiceTier `
-        -AssetRole $AssetRole `
-        -BackupRequired $BackupRequired `
-        -LabAsset $LabAsset `
-        -ProductionFolderTarget $ProductionFolderTarget `
-        -DnsFilteringRequired $DnsFilteringRequired `
-        -MarkerPath $MarkerPath `
-        -ReadyTicketSubject $ReadyTicketSubject `
-        -WhatIfSyncro:$WhatIfSyncro
+        -ServiceTier $runtimeServiceTier `
+        -AssetRole $runtimeAssetRole `
+        -BackupRequired $runtimeBackupRequired `
+        -LabAsset $runtimeLabAsset `
+        -ProductionFolderTarget $runtimeProductionFolderTarget `
+        -DnsFilteringRequired $runtimeDnsFilteringRequired `
+        -MarkerPath $runtimeMarkerPath `
+        -ReadyTicketSubject $runtimeReadyTicketSubject `
+        -WhatIfSyncro:$runtimeWhatIfSyncro
 }
