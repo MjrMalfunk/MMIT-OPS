@@ -6,15 +6,16 @@
 # the route-aware acceptance decision is READY.
 
 param(
-    [string]$SyncroApiBaseUrl = $env:SYNCRO_API_BASE_URL,
-    [string]$SyncroApiKey = $env:SYNCRO_API_KEY,
-    [string]$AssetId = $env:SYNCRO_ASSET_ID,
-    [string]$CustomerId = $env:SYNCRO_CUSTOMER_ID,
-    [string]$ReadyTicketSubject = 'MMIT onboarding acceptance ready to move',
+    [string]$ServiceTier = $env:ServiceTier,
+    [string]$AssetRole = $env:AssetRole,
+    [AllowNull()][object]$BackupRequired = $env:BackupRequired,
+    [AllowNull()][object]$LabAsset = $env:LabAsset,
+    [string]$ProductionFolderTarget = $env:ProductionFolderTarget,
+    [AllowNull()][object]$DnsFilteringRequired = $env:DnsFilteringRequired,
+    [string]$ReadyTicketSubject = '',
     [string]$MarkerPath = $env:MMIT_ONBOARDING_READY_MARKER_PATH,
     [switch]$WhatIfSyncro
 )
-
 Set-StrictMode -Version 2.0
 
 Write-Output "MMIT-Onboarding-Acceptance version: route-aware-full-20260603"
@@ -279,225 +280,96 @@ function Get-MMITFirstValue {
     return ''
 }
 
-function Get-MMITSyncroApiBaseUrl {
-    param([string]$ConfiguredBaseUrl)
-
-    $baseUrl = ConvertTo-MMITText $ConfiguredBaseUrl
-    if ($baseUrl -eq '') {
-        $baseUrl = Get-MMITFirstValue -Names @('SYNCRO_API_BASE_URL', 'SyncroApiBaseUrl')
+function Get-MMITComputerName {
+    $computerName = ConvertTo-MMITText $env:COMPUTERNAME
+    if ($computerName -eq '') {
+        $computerName = ConvertTo-MMITText ([Environment]::MachineName)
     }
-
-    if ($baseUrl -eq '') {
-        $subdomain = Get-MMITFirstValue -Names @('SYNCRO_SUBDOMAIN', 'SyncroSubdomain')
-        if ($subdomain -ne '') {
-            $baseUrl = 'https://{0}.syncromsp.com/api/v1' -f (($subdomain -replace '^https?://', '') -replace '\.syncromsp\.com.*$', '')
-        }
+    if ($computerName -eq '') {
+        return 'unknown-computer'
     }
-
-    return $baseUrl.TrimEnd('/')
+    return $computerName
 }
 
-function Call-SyncroApi {
+function Import-MMITSyncroModule {
+    $modulePath = ConvertTo-MMITText $env:SyncroModule
+    if ($modulePath -eq '') {
+        throw 'Syncro module path is missing. Syncro must provide the SyncroModule environment variable.'
+    }
+    if (-not (Test-Path -LiteralPath $modulePath)) {
+        throw ('Syncro module path does not exist: {0}' -f $modulePath)
+    }
+
+    Import-Module -Name $modulePath -Force -ErrorAction Stop
+
+    foreach ($commandName in @('Set-Asset-Field', 'Create-Syncro-Ticket', 'Log-Activity')) {
+        if ($null -eq (Get-Command -Name $commandName -ErrorAction SilentlyContinue)) {
+            throw ('Imported Syncro module is missing required helper: {0}' -f $commandName)
+        }
+    }
+}
+
+function Get-MMITSyncroSubdomain {
+    $subdomain = Get-MMITFirstValue -Names @('RepairTechSyncroSubDomain', 'SYNCRO_SUBDOMAIN', 'SyncroSubdomain')
+    if ($subdomain -eq '') {
+        throw 'Syncro subdomain is missing. Syncro must provide the RepairTechSyncroSubDomain environment variable.'
+    }
+    return $subdomain
+}
+
+function Get-MMITParameterOrFallbackValue {
     param(
-        [Parameter(Mandatory = $true)][ValidateSet('GET', 'POST', 'PUT', 'PATCH', 'DELETE')][string]$Method,
-        [Parameter(Mandatory = $true)][string]$Path,
-        [AllowNull()][object]$Body = $null,
-        [hashtable]$Query = @{},
-        [switch]$WhatIf
+        [AllowNull()][object]$ConfiguredValue,
+        [Parameter(Mandatory = $true)][string[]]$FallbackNames,
+        [AllowNull()][object]$Default = ''
     )
 
-    $baseUrl = Get-MMITSyncroApiBaseUrl -ConfiguredBaseUrl $script:MMITSyncroApiBaseUrl
-    $apiKey = ConvertTo-MMITText $script:MMITSyncroApiKey
-    if ($apiKey -eq '') {
-        $apiKey = Get-MMITFirstValue -Names @('SYNCRO_API_KEY', 'SyncroApiKey')
+    if ($null -ne $ConfiguredValue -and (ConvertTo-MMITText $ConfiguredValue) -ne '') {
+        return $ConfiguredValue
     }
 
-    if ($baseUrl -eq '') {
-        throw 'Syncro API base URL is missing. Set SYNCRO_API_BASE_URL or SYNCRO_SUBDOMAIN.'
+    $value = Get-MMITFirstValue -Names $FallbackNames
+    if ($value -ne '') {
+        return $value
     }
 
-    if ($apiKey -eq '') {
-        throw 'Syncro API key is missing. Set SYNCRO_API_KEY or pass -SyncroApiKey.'
-    }
-
-    $relativePath = $Path.TrimStart('/')
-    $uriBuilder = [System.UriBuilder]::new(('{0}/{1}' -f $baseUrl, $relativePath))
-    if ($Query.Count -gt 0) {
-        $queryParts = New-Object System.Collections.Generic.List[string]
-        foreach ($key in $Query.Keys) {
-            if ($null -ne $Query[$key]) {
-                $queryParts.Add(('{0}={1}' -f [System.Uri]::EscapeDataString([string]$key), [System.Uri]::EscapeDataString([string]$Query[$key])))
-            }
-        }
-        $uriBuilder.Query = ($queryParts -join '&')
-    }
-
-    $headers = @{
-        Authorization = ('Bearer {0}' -f $apiKey)
-        Accept = 'application/json'
-    }
-
-    if ($WhatIf) {
-        Write-Output ('WHATIF Syncro API {0} {1}' -f $Method, $uriBuilder.Uri.AbsoluteUri)
-        if ($null -ne $Body) {
-            Write-Output ($Body | ConvertTo-Json -Depth 12)
-        }
-        return [ordered]@{ what_if = $true; method = $Method; path = $relativePath }
-    }
-
-    $invokeArgs = @{
-        Method = $Method
-        Uri = $uriBuilder.Uri.AbsoluteUri
-        Headers = $headers
-        ContentType = 'application/json'
-        ErrorAction = 'Stop'
-    }
-
-    if ($null -ne $Body) {
-        $invokeArgs.Body = ($Body | ConvertTo-Json -Depth 12)
-    }
-
-    return Invoke-RestMethod @invokeArgs
+    return $Default
 }
 
-function ConvertFrom-MMITSyncroCustomFieldList {
-    param([AllowNull()][object]$CustomFields)
-
-    $fields = @{}
-    if ($null -eq $CustomFields) {
-        return $fields
-    }
-
-    if ($CustomFields -is [System.Collections.IDictionary]) {
-        foreach ($key in $CustomFields.Keys) {
-            $fields[[string]$key] = $CustomFields[$key]
-        }
-        return $fields
-    }
-
-    foreach ($field in @($CustomFields)) {
-        $name = ''
-        $value = $null
-        if ($field -is [System.Collections.IDictionary]) {
-            if ($field.Contains('name')) { $name = ConvertTo-MMITText $field['name'] }
-            if ($name -eq '' -and $field.Contains('field_name')) { $name = ConvertTo-MMITText $field['field_name'] }
-            if ($name -eq '' -and $field.Contains('label')) { $name = ConvertTo-MMITText $field['label'] }
-            if ($field.Contains('value')) { $value = $field['value'] }
-        } else {
-            if ($null -ne $field.PSObject.Properties['name']) { $name = ConvertTo-MMITText $field.name }
-            if ($name -eq '' -and $null -ne $field.PSObject.Properties['field_name']) { $name = ConvertTo-MMITText $field.field_name }
-            if ($name -eq '' -and $null -ne $field.PSObject.Properties['label']) { $name = ConvertTo-MMITText $field.label }
-            if ($null -ne $field.PSObject.Properties['value']) { $value = $field.value }
-        }
-
-        if ($name -ne '') {
-            $fields[$name] = $value
-        }
-    }
-
-    return $fields
-}
-
-function Get-MMITAssetId {
-    param([string]$ConfiguredAssetId)
-
-    $id = ConvertTo-MMITText $ConfiguredAssetId
-    if ($id -ne '') {
-        return $id
-    }
-
-    return Get-MMITFirstValue -Names @(
-        'SYNCRO_ASSET_ID',
-        'ASSET_ID',
-        'asset_id',
-        'AssetId',
-        'SyncroAssetId',
-        'customer_asset_id',
-        'CustomerAssetId'
-    )
-}
-
-function Get-MMITCustomerId {
+function Get-MMITAssetCustomFieldsFromInputs {
     param(
-        [string]$ConfiguredCustomerId,
-        [AllowNull()][object]$Asset
+        [AllowNull()][object]$ServiceTier,
+        [AllowNull()][object]$AssetRole,
+        [AllowNull()][object]$BackupRequired,
+        [AllowNull()][object]$LabAsset,
+        [AllowNull()][object]$ProductionFolderTarget,
+        [AllowNull()][object]$DnsFilteringRequired
     )
 
-    $id = ConvertTo-MMITText $ConfiguredCustomerId
-    if ($id -ne '') {
-        return $id
+    return @{
+        'MMIT Service Tier' = Get-MMITParameterOrFallbackValue -ConfiguredValue $ServiceTier -FallbackNames @('MMIT Service Tier', 'MMIT_SERVICE_TIER', 'ServiceTier') -Default ''
+        'MMIT Asset Role' = Get-MMITParameterOrFallbackValue -ConfiguredValue $AssetRole -FallbackNames @('MMIT Asset Role', 'MMIT_ASSET_ROLE', 'AssetRole') -Default ''
+        'MMIT Backup Required' = Get-MMITParameterOrFallbackValue -ConfiguredValue $BackupRequired -FallbackNames @('MMIT Backup Required', 'MMIT_BACKUP_REQUIRED', 'BackupRequired') -Default $false
+        'MMIT Lab Asset' = Get-MMITParameterOrFallbackValue -ConfiguredValue $LabAsset -FallbackNames @('MMIT Lab Asset', 'MMIT_LAB_ASSET', 'LabAsset') -Default $false
+        'MMIT Production Folder Target' = Get-MMITParameterOrFallbackValue -ConfiguredValue $ProductionFolderTarget -FallbackNames @('MMIT Production Folder Target', 'MMIT_PRODUCTION_FOLDER_TARGET', 'ProductionFolderTarget') -Default ''
+        'MMIT DNS Filtering Required' = Get-MMITParameterOrFallbackValue -ConfiguredValue $DnsFilteringRequired -FallbackNames @('MMIT DNS Filtering Required', 'MMIT_DNS_FILTERING_REQUIRED', 'DnsFilteringRequired') -Default $false
     }
-
-    $id = Get-MMITFirstValue -Names @('SYNCRO_CUSTOMER_ID', 'CUSTOMER_ID', 'customer_id', 'CustomerId', 'SyncroCustomerId')
-    if ($id -ne '') {
-        return $id
-    }
-
-    if ($null -ne $Asset) {
-        foreach ($propertyName in @('customer_id', 'customerId', 'CustomerId')) {
-            if ($null -ne $Asset.PSObject.Properties[$propertyName]) {
-                $id = ConvertTo-MMITText $Asset.$propertyName
-                if ($id -ne '') {
-                    return $id
-                }
-            }
-        }
-    }
-
-    return ''
-}
-
-function Get-MMITSyncroAsset {
-    param([Parameter(Mandatory = $true)][string]$AssetId)
-
-    $response = Call-SyncroApi -Method GET -Path ('customer_assets/{0}' -f $AssetId) -WhatIf:$script:MMITWhatIfSyncro
-    if ($null -ne $response.PSObject.Properties['asset']) {
-        return $response.asset
-    }
-    if ($null -ne $response.PSObject.Properties['customer_asset']) {
-        return $response.customer_asset
-    }
-    return $response
-}
-
-function Get-MMITAssetCustomFields {
-    param([AllowNull()][object]$Asset)
-
-    $fields = @{}
-    if ($null -ne $Asset) {
-        foreach ($propertyName in @('properties', 'custom_fields', 'custom_fields_values', 'custom_field_values')) {
-            if ($null -ne $Asset.PSObject.Properties[$propertyName]) {
-                $fields = ConvertFrom-MMITSyncroCustomFieldList -CustomFields $Asset.$propertyName
-                if ($fields.Count -gt 0) {
-                    return $fields
-                }
-            }
-        }
-    }
-
-    foreach ($fieldName in $script:MMITRequiredCustomFields) {
-        $value = Get-MMITFirstValue -Names @($fieldName, ($fieldName -replace '[^A-Za-z0-9]+', '_').ToUpperInvariant())
-        if ($value -ne '') {
-            $fields[$fieldName] = $value
-        }
-    }
-
-    return $fields
 }
 
 function Update-MMITSyncroAssetCustomFields {
     param(
-        [Parameter(Mandatory = $true)][string]$AssetId,
-        [Parameter(Mandatory = $true)][hashtable]$CustomFields
+        [Parameter(Mandatory = $true)][hashtable]$CustomFields,
+        [Parameter(Mandatory = $true)][string]$Subdomain
     )
 
-    $body = @{
-        asset = @{
-            properties = $CustomFields
+    foreach ($fieldName in $CustomFields.Keys) {
+        if ($script:MMITWhatIfSyncro) {
+            Write-Output ('WHATIF Set-Asset-Field -Name ''{0}'' -Value ''{1}'' -Subdomain ''{2}''' -f $fieldName, $CustomFields[$fieldName], $Subdomain)
+            continue
         }
-    }
 
-    return Call-SyncroApi -Method PUT -Path ('customer_assets/{0}' -f $AssetId) -Body $body -WhatIf:$script:MMITWhatIfSyncro
+        Set-Asset-Field -Name $fieldName -Value $CustomFields[$fieldName] -Subdomain $Subdomain
+    }
 }
 
 function Test-MMITWindowsServiceRunning {
@@ -596,7 +468,7 @@ function Get-MMITLocalCheckResults {
 function Get-MMITMarkerPath {
     param(
         [string]$ConfiguredMarkerPath,
-        [string]$AssetId
+        [string]$ComputerName
     )
 
     $path = ConvertTo-MMITText $ConfiguredMarkerPath
@@ -604,8 +476,13 @@ function Get-MMITMarkerPath {
         return $path
     }
 
-    $safeAssetId = if ((ConvertTo-MMITText $AssetId) -ne '') { ($AssetId -replace '[^A-Za-z0-9_.-]+', '_') } else { 'unknown-asset' }
-    return (Join-Path $env:ProgramData ('MMIT\OnboardingAcceptance\ready-ticket-{0}.marker' -f $safeAssetId))
+    $programData = ConvertTo-MMITText $env:ProgramData
+    if ($programData -eq '') {
+        $programData = 'C:\ProgramData'
+    }
+
+    $safeComputerName = if ((ConvertTo-MMITText $ComputerName) -ne '') { ($ComputerName -replace '[^A-Za-z0-9_.-]+', '_') } else { 'unknown-computer' }
+    return (Join-Path $programData ('MMIT\OnboardingAcceptance\ready-ticket-{0}.marker' -f $safeComputerName))
 }
 
 function Test-MMITReadyTicketMarker {
@@ -617,7 +494,7 @@ function Test-MMITReadyTicketMarker {
 function Set-MMITReadyTicketMarker {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$TicketId
+        [AllowEmptyString()][string]$TicketId
     )
 
     $directory = Split-Path -Path $Path -Parent
@@ -631,67 +508,104 @@ function Set-MMITReadyTicketMarker {
     ) | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
+function Get-MMITTicketIdFromResponse {
+    param([AllowNull()][object]$Response)
+
+    if ($null -eq $Response) {
+        return ''
+    }
+
+    foreach ($propertyName in @('id', 'number', 'ticket_id', 'ticket_number')) {
+        if ($null -ne $Response.PSObject.Properties[$propertyName]) {
+            $ticketId = ConvertTo-MMITText $Response.$propertyName
+            if ($ticketId -ne '') {
+                return $ticketId
+            }
+        }
+    }
+
+    foreach ($containerName in @('ticket', 'data')) {
+        if ($null -ne $Response.PSObject.Properties[$containerName]) {
+            $ticketId = Get-MMITTicketIdFromResponse -Response $Response.$containerName
+            if ($ticketId -ne '') {
+                return $ticketId
+            }
+        }
+    }
+
+    $text = ConvertTo-MMITText $Response
+    if ($text -ne '') {
+        return $text
+    }
+
+    return ''
+}
+
+function Add-MMITReadyMoveTicketComment {
+    param(
+        [Parameter(Mandatory = $true)][string]$TicketIdOrNumber,
+        [Parameter(Mandatory = $true)][string]$Subject,
+        [Parameter(Mandatory = $true)][string]$Body,
+        [Parameter(Mandatory = $true)][string]$Subdomain
+    )
+
+    if ($null -eq (Get-Command -Name 'Create-Syncro-Ticket-Comment' -ErrorAction SilentlyContinue)) {
+        return
+    }
+
+    Create-Syncro-Ticket-Comment `
+        -Body $Body `
+        -DoNotEmail $true `
+        -Hidden $false `
+        -Subdomain $Subdomain `
+        -Subject $Subject `
+        -TicketIdOrNumber $TicketIdOrNumber | Out-Null
+}
+
 function New-MMITReadyMoveTicket {
     param(
-        [Parameter(Mandatory = $true)][string]$AssetId,
-        [AllowNull()][string]$CustomerId,
-        [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Decision
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Decision,
+        [Parameter(Mandatory = $true)][string]$Subdomain,
+        [Parameter(Mandatory = $true)][string]$ComputerName
     )
 
     $subject = $script:MMITReadyTicketSubject
     $bodyText = @(
         'MMIT onboarding acceptance is READY.',
         '',
-        ('Asset ID: {0}' -f $AssetId),
-        ('Customer ID: {0}' -f (ConvertTo-MMITText $CustomerId)),
+        ('Computer Name: {0}' -f $ComputerName),
         '',
         'Do not move assets from this acceptance script. Use the production move/deploy process after reviewing the target folder.',
         '',
         $Decision.Summary
     ) -join [Environment]::NewLine
 
-    $ticket = @{
-        subject = $subject
-        problem_type = 'Onboarding'
-        status = 'New'
-        priority = 'Normal'
-        comment = @{
-            body = $bodyText
-            hidden = $false
-            do_not_email = $true
-        }
-        custom_fields = @{
-            'MMIT Onboarding Status' = $Decision.Status
-            'MMIT Ready To Move' = $Decision.ReadyToMove
-        }
-    }
-
-    if ((ConvertTo-MMITText $CustomerId) -ne '') {
-        $ticket.customer_id = $CustomerId
-    }
-    if ((ConvertTo-MMITText $AssetId) -ne '') {
-        $ticket.asset_id = $AssetId
-        $ticket.customer_asset_id = $AssetId
-    }
-
-    $response = Call-SyncroApi -Method POST -Path 'tickets' -Body @{ ticket = $ticket } -WhatIf:$script:MMITWhatIfSyncro
-    if ($null -ne $response.PSObject.Properties['ticket'] -and $null -ne $response.ticket.PSObject.Properties['id']) {
-        return (ConvertTo-MMITText $response.ticket.id)
-    }
-    if ($null -ne $response.PSObject.Properties['id']) {
-        return (ConvertTo-MMITText $response.id)
-    }
     if ($script:MMITWhatIfSyncro) {
+        Write-Output ('WHATIF Create-Syncro-Ticket -IssueType ''Onboarding'' -Status ''New'' -Subdomain ''{0}'' -Subject ''{1}''' -f $Subdomain, $subject)
         return 'WHATIF'
     }
-    return ''
+
+    $response = Create-Syncro-Ticket `
+        -IssueType 'Onboarding' `
+        -Status 'New' `
+        -Subdomain $Subdomain `
+        -Subject $subject
+
+    $ticketId = Get-MMITTicketIdFromResponse -Response $response
+    if ($ticketId -ne '') {
+        Add-MMITReadyMoveTicketComment -TicketIdOrNumber $ticketId -Subject $subject -Body $bodyText -Subdomain $Subdomain
+    } else {
+        Log-Activity -EventName 'MMIT Onboarding Acceptance Ready' -Message $bodyText -Subdomain $Subdomain
+    }
+
+    return $ticketId
 }
 
 function Write-MMITOnboardingAcceptanceResult {
     param(
         [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Decision,
-        [Parameter(Mandatory = $true)][string]$AssetId,
-        [AllowNull()][string]$CustomerId,
+        [Parameter(Mandatory = $true)][string]$Subdomain,
+        [Parameter(Mandatory = $true)][string]$ComputerName,
         [string]$MarkerPath
     )
 
@@ -702,7 +616,17 @@ function Write-MMITOnboardingAcceptanceResult {
         'MMIT Ready To Move' = $Decision.ReadyToMove
         'MMIT Onboarding Result' = $Decision.Summary
     }
-    Update-MMITSyncroAssetCustomFields -AssetId $AssetId -CustomFields $fieldUpdates | Out-Null
+
+    $fieldsUpdated = $false
+    Update-MMITSyncroAssetCustomFields -CustomFields $fieldUpdates -Subdomain $Subdomain | Out-Null
+    $fieldsUpdated = $true
+    Write-Output ('Syncro fields updated: {0}' -f $fieldsUpdated)
+
+    if ($script:MMITWhatIfSyncro) {
+        Write-Output ('WHATIF Log-Activity -EventName ''MMIT Onboarding Acceptance'' -Subdomain ''{0}''' -f $Subdomain)
+    } else {
+        Log-Activity -EventName 'MMIT Onboarding Acceptance' -Message $Decision.Summary -Subdomain $Subdomain
+    }
 
     if ($Decision.Status -ne 'READY') {
         Write-Output 'Asset is not READY; ready/move ticket was not created.'
@@ -710,11 +634,11 @@ function Write-MMITOnboardingAcceptanceResult {
     }
 
     if (Test-MMITReadyTicketMarker -Path $MarkerPath) {
-        Write-Output ('Ready/move ticket already created; marker exists at {0}.' -f $MarkerPath)
+        Write-Output ('Ready/move ticket skipped: marker exists at {0}.' -f $MarkerPath)
         return
     }
 
-    $ticketId = New-MMITReadyMoveTicket -AssetId $AssetId -CustomerId $CustomerId -Decision $Decision
+    $ticketId = New-MMITReadyMoveTicket -Decision $Decision -Subdomain $Subdomain -ComputerName $ComputerName
     if ($script:MMITWhatIfSyncro) {
         Write-Output ('WHATIF ready/move ticket would be marked once. Ticket ID: {0}. Marker: {1}' -f $ticketId, $MarkerPath)
         return
@@ -726,41 +650,47 @@ function Write-MMITOnboardingAcceptanceResult {
 
 function Invoke-MMITOnboardingAcceptance {
     param(
-        [string]$SyncroApiBaseUrl,
-        [string]$SyncroApiKey,
-        [string]$AssetId,
-        [string]$CustomerId,
+        [AllowNull()][object]$ServiceTier,
+        [AllowNull()][object]$AssetRole,
+        [AllowNull()][object]$BackupRequired,
+        [AllowNull()][object]$LabAsset,
+        [AllowNull()][object]$ProductionFolderTarget,
+        [AllowNull()][object]$DnsFilteringRequired,
         [string]$MarkerPath,
         [string]$ReadyTicketSubject,
         [switch]$WhatIfSyncro
     )
 
-    $script:MMITSyncroApiBaseUrl = $SyncroApiBaseUrl
-    $script:MMITSyncroApiKey = $SyncroApiKey
     $script:MMITWhatIfSyncro = [bool]$WhatIfSyncro
-    $script:MMITReadyTicketSubject = if ((ConvertTo-MMITText $ReadyTicketSubject) -ne '') { $ReadyTicketSubject } else { 'MMIT onboarding acceptance ready to move' }
+    $computerName = Get-MMITComputerName
+    $script:MMITReadyTicketSubject = if ((ConvertTo-MMITText $ReadyTicketSubject) -ne '') { $ReadyTicketSubject } else { ('MMIT onboarding acceptance ready to move - {0}' -f $computerName) }
 
-    $resolvedAssetId = Get-MMITAssetId -ConfiguredAssetId $AssetId
-    if ($resolvedAssetId -eq '') {
-        throw 'Unable to determine Syncro asset ID. Set SYNCRO_ASSET_ID, ASSET_ID, or pass -AssetId.'
-    }
+    Import-MMITSyncroModule
+    $subdomain = Get-MMITSyncroSubdomain
 
-    $asset = Get-MMITSyncroAsset -AssetId $resolvedAssetId
-    $customFields = Get-MMITAssetCustomFields -Asset $asset
-    $resolvedCustomerId = Get-MMITCustomerId -ConfiguredCustomerId $CustomerId -Asset $asset
+    $customFields = Get-MMITAssetCustomFieldsFromInputs `
+        -ServiceTier $ServiceTier `
+        -AssetRole $AssetRole `
+        -BackupRequired $BackupRequired `
+        -LabAsset $LabAsset `
+        -ProductionFolderTarget $ProductionFolderTarget `
+        -DnsFilteringRequired $DnsFilteringRequired
+
     $localChecks = Get-MMITLocalCheckResults
     $decision = Get-MMITOnboardingDecision -CustomFields $customFields -CheckResults $localChecks
-    $resolvedMarkerPath = Get-MMITMarkerPath -ConfiguredMarkerPath $MarkerPath -AssetId $resolvedAssetId
+    $resolvedMarkerPath = Get-MMITMarkerPath -ConfiguredMarkerPath $MarkerPath -ComputerName $computerName
 
-    Write-MMITOnboardingAcceptanceResult -Decision $decision -AssetId $resolvedAssetId -CustomerId $resolvedCustomerId -MarkerPath $resolvedMarkerPath
+    Write-MMITOnboardingAcceptanceResult -Decision $decision -Subdomain $subdomain -ComputerName $computerName -MarkerPath $resolvedMarkerPath
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
     Invoke-MMITOnboardingAcceptance `
-        -SyncroApiBaseUrl $SyncroApiBaseUrl `
-        -SyncroApiKey $SyncroApiKey `
-        -AssetId $AssetId `
-        -CustomerId $CustomerId `
+        -ServiceTier $ServiceTier `
+        -AssetRole $AssetRole `
+        -BackupRequired $BackupRequired `
+        -LabAsset $LabAsset `
+        -ProductionFolderTarget $ProductionFolderTarget `
+        -DnsFilteringRequired $DnsFilteringRequired `
         -MarkerPath $MarkerPath `
         -ReadyTicketSubject $ReadyTicketSubject `
         -WhatIfSyncro:$WhatIfSyncro
