@@ -17,6 +17,8 @@ param(
 
 Set-StrictMode -Version 2.0
 
+Write-Output "MMIT-Onboarding-Acceptance version: route-aware-full-20260603"
+
 $script:MMITRequiredCustomFields = @(
     'MMIT Service Tier',
     'MMIT Asset Role',
