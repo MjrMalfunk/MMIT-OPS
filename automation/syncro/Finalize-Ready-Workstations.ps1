@@ -352,11 +352,11 @@ function Find-ReadyAssetsForLane {
         $PagesScanned++
 
         if (!$Assets -or $Assets.Count -eq 0) {
-            Write-Log "Scanned $LaneName page $Page: no assets returned; stopping lane scan. pages_scanned=$PagesScanned assets_scanned=$AssetsScanned skipped=$AssetsSkipped candidates=$($Candidates.Count)"
+            Write-Log "Scanned $LaneName page ${Page}: no assets returned; stopping lane scan. pages_scanned=$PagesScanned assets_scanned=$AssetsScanned skipped=$AssetsSkipped candidates=$($Candidates.Count)"
             break
         }
 
-        Write-Log "Scanned $LaneName page $Page: assets_returned=$($Assets.Count) pages_scanned=$PagesScanned"
+        Write-Log "Scanned $LaneName page ${Page}: assets_returned=$($Assets.Count) pages_scanned=$PagesScanned"
 
         foreach ($Asset in $Assets) {
             $AssetsScanned++
