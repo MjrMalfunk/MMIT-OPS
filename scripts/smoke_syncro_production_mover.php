@@ -2,13 +2,20 @@
 declare(strict_types=1);
 
 // Smoke checks for the MMIT Syncro production mover helpers. This intentionally
-// avoids bootstrap/config secrets and must not perform network requests.
-define('APP_ENV', 'staging');
-define('BASE_URL', 'https://ops-test.midwestmanagedit.com');
+// avoids bootstrap/config secrets and external network requests.
+define('APP_ENV', 'production');
+define('BASE_URL', 'https://ops.midwestmanagedit.com');
 define('SYNCRO_SUBDOMAIN', 'example');
 define('SYNCRO_API_KEY', 'smoke-test-key-not-secret');
 define('SYNCRO_BASE_URL', 'https://127.0.0.1/never-called/');
 define('MMIT_SYNCRO_PRODUCTION_MOVER_DISABLE_METADATA_FETCH', true);
+
+$GLOBALS['smoke_syncro_staging_mode'] = false;
+
+function ops_is_staging_env(): bool
+{
+    return !empty($GLOBALS['smoke_syncro_staging_mode']);
+}
 
 require_once __DIR__ . '/../inc/syncro_production_mover.php';
 
@@ -93,14 +100,14 @@ smoke_assert($badShapeDebug !== false && str_contains($badShapeDebug, '[redacted
 $definitionShape = [
     'asset_type_fields' => [
         ['id' => 901, 'name' => 'MMIT Onboarding Status', 'options' => [['id' => 135355, 'name' => 'READY']]],
-        ['id' => 902, 'name' => 'MMIT Ready To Move', 'options' => [['id' => 135359, 'name' => 'Yes']]],
+        ['id' => 902, 'name' => 'MMIT Ready To Move', 'option_definition' => ['values' => [['key' => 135359, 'display_name' => 'Yes']]]],
     ],
 ];
 $definitionMap = syncro_production_move_collect_option_definitions($definitionShape);
 $definitionStatus = syncro_production_move_resolve_custom_field_value('MMIT Onboarding Status', 135355, $definitionMap);
 $definitionReady = syncro_production_move_resolve_custom_field_value('MMIT Ready To Move', 135359, $definitionMap);
 smoke_assert(($definitionStatus['value'] ?? null) === 'READY' && ($definitionStatus['source'] ?? null) === 'option_definition', 'metadata option definition resolves status label', $failed);
-smoke_assert(($definitionReady['value'] ?? null) === 'Yes' && ($definitionReady['source'] ?? null) === 'option_definition', 'metadata option definition resolves ready label', $failed);
+smoke_assert(($definitionReady['value'] ?? null) === 'Yes' && ($definitionReady['source'] ?? null) === 'option_definition', 'metadata option_definition resolves ready label', $failed);
 
 $liveNumericAsset = $readyAsset;
 $liveNumericAsset['properties']['MMIT Onboarding Status'] = 135355;
@@ -132,6 +139,19 @@ $dryRun = syncro_production_move_asset(35912652, 12561086, 4211, true, false, $r
 smoke_assert(($dryRun['ok'] ?? null) === true, 'dry-run succeeds without network', $failed);
 smoke_assert(($dryRun['dry_run'] ?? null) === true, 'dry-run marked', $failed);
 smoke_assert(($dryRun['payload']['changes']['update_asset'][0]['change']['policy_folder_id'] ?? null) === 5027864, 'dry-run payload target', $failed);
+
+$GLOBALS['smoke_syncro_staging_mode'] = true;
+$stagingBlocked = syncro_production_move_asset(35912652, 12561086, 4211, false, false, $readyAsset);
+smoke_assert(($stagingBlocked['ok'] ?? null) === true, 'staging write disabled guarded result is ok for UI', $failed);
+smoke_assert(($stagingBlocked['staging_guarded'] ?? null) === true, 'staging write disabled result is marked guarded', $failed);
+smoke_assert(($stagingBlocked['production_move_succeeded'] ?? true) === false, 'staging write disabled is not production success', $failed);
+smoke_assert(isset($stagingBlocked['payload']) && !isset($stagingBlocked['write']) && str_contains((string)($stagingBlocked['message'] ?? ''), 'Would move MANAGE-WS-02 to Production/Workstations (#5027864).'), 'staging guarded message and payload', $failed);
+
+$GLOBALS['smoke_syncro_staging_mode'] = false;
+$realWriteFailure = syncro_production_move_asset(35912652, 12561086, 4211, false, false, $readyAsset);
+smoke_assert(($realWriteFailure['ok'] ?? null) === false, 'real write failure remains failure', $failed);
+smoke_assert(($realWriteFailure['staging_guarded'] ?? false) === false, 'real write failure is not staging guarded', $failed);
+smoke_assert(str_starts_with((string)($realWriteFailure['message'] ?? ''), 'Move failed for MANAGE-WS-02:'), 'real write failure message remains hard failure', $failed);
 
 $alreadyAsset = $readyAsset;
 $alreadyAsset['policy_folder_id'] = 5027864;

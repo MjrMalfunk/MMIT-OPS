@@ -114,10 +114,17 @@ page_header('Syncro Production Mover', 'admin');
 <?php endif; ?>
 
 <?php if ($result !== null): ?>
+  <?php
+    $isGuardedStaging = !empty($result['staging_guarded']);
+    $resultBorder = $isGuardedStaging ? '#bae6fd' : (!empty($result['ok']) ? '#bbf7d0' : '#fecaca');
+    $resultBackground = $isGuardedStaging ? '#f0f9ff' : (!empty($result['ok']) ? '#f0fdf4' : '#fff1f2');
+    $resultColor = $isGuardedStaging ? '#075985' : (!empty($result['ok']) ? '#166534' : '#991b1b');
+    $resultLabel = $isGuardedStaging ? 'Execution guarded by staging mode' : ((!empty($result['dry_run']) ? 'Dry run' : 'Execution') . ' ' . (!empty($result['ok']) ? 'passed' : 'failed'));
+  ?>
   <section class="card" style="margin-top:18px;padding:18px;">
     <h2 style="margin:0 0 12px;font-size:18px;">Mover result</h2>
-    <div style="padding:14px 16px;border:1px solid <?= !empty($result['ok']) ? '#bbf7d0' : '#fecaca' ?>;background:<?= !empty($result['ok']) ? '#f0fdf4' : '#fff1f2' ?>;color:<?= !empty($result['ok']) ? '#166534' : '#991b1b' ?>;border-radius:14px;">
-      <strong><?= !empty($result['dry_run']) ? 'Dry run' : 'Execution' ?> <?= !empty($result['ok']) ? 'passed' : 'failed' ?>.</strong>
+    <div style="padding:14px 16px;border:1px solid <?= $resultBorder ?>;background:<?= $resultBackground ?>;color:<?= $resultColor ?>;border-radius:14px;">
+      <strong><?= htmlspecialchars($resultLabel) ?>.</strong>
       <div style="margin-top:6px;"><?= htmlspecialchars((string)($result['message'] ?? implode(' ', (array)($result['errors'] ?? [])))) ?></div>
     </div>
     <?php if (!empty($result['warnings'])): ?>
