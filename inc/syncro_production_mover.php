@@ -120,6 +120,217 @@ function syncro_production_move_asset_list(array $response): array
     return [];
 }
 
+
+function syncro_production_move_is_numeric_option_value(mixed $value): bool
+{
+    if (is_int($value)) {
+        return true;
+    }
+    if (!is_string($value)) {
+        return false;
+    }
+    $text = syncro_production_move_normalize_text($value);
+    return $text !== '' && preg_match('/^\d+$/', $text) === 1;
+}
+
+function syncro_production_move_temporary_option_fallback_map(): array
+{
+    // Temporary safety net for the live MMIT dropdown option IDs observed before
+    // Syncro /settings metadata resolution was added. Metadata definitions are
+    // always preferred; these entries only run when a numeric option cannot be
+    // resolved from Syncro's custom-field definitions/options.
+    return [
+        syncro_normalize_match_text(MMIT_SYNCRO_FIELD_ONBOARDING_STATUS) => [
+            '135355' => 'READY',
+        ],
+        syncro_normalize_match_text(MMIT_SYNCRO_FIELD_READY_TO_MOVE) => [
+            '135359' => 'Yes',
+        ],
+    ];
+}
+
+function syncro_production_move_option_label_from_row(mixed $row): string
+{
+    if (is_string($row) || is_numeric($row) || is_bool($row)) {
+        return syncro_production_move_normalize_text($row);
+    }
+    if (!is_array($row)) {
+        return '';
+    }
+    foreach (['label', 'name', 'display_value', 'displayValue', 'value_text', 'valueText', 'text', 'title', 'value'] as $key) {
+        if (array_key_exists($key, $row) && !is_array($row[$key])) {
+            $label = syncro_production_move_normalize_text($row[$key]);
+            if ($label !== '' && !syncro_production_move_is_numeric_option_value($label)) {
+                return $label;
+            }
+        }
+    }
+    return '';
+}
+
+function syncro_production_move_option_id_from_row(mixed $key, mixed $row): string
+{
+    if (is_string($key) && syncro_production_move_is_numeric_option_value($key)) {
+        return syncro_production_move_normalize_text($key);
+    }
+    if (!is_array($row)) {
+        return '';
+    }
+    foreach (['id', 'option_id', 'optionId', 'field_option_id', 'fieldOptionId', 'answer_id', 'answerId', 'value'] as $idKey) {
+        if (array_key_exists($idKey, $row) && syncro_production_move_is_numeric_option_value($row[$idKey])) {
+            return syncro_production_move_normalize_text($row[$idKey]);
+        }
+    }
+    return '';
+}
+
+function syncro_production_move_definition_field_name(array $row): string
+{
+    foreach (['name', 'field_name', 'fieldName', 'label', 'title'] as $key) {
+        if (array_key_exists($key, $row) && !is_array($row[$key])) {
+            $name = syncro_production_move_normalize_text($row[$key]);
+            if ($name !== '' && !syncro_production_move_is_numeric_option_value($name)) {
+                return $name;
+            }
+        }
+    }
+    return '';
+}
+
+function syncro_production_move_definition_id(array $row): string
+{
+    foreach (['id', 'field_definition_id', 'fieldDefinitionId', 'asset_type_field_id', 'assetTypeFieldId', 'custom_field_id', 'customFieldId'] as $key) {
+        if (array_key_exists($key, $row) && syncro_production_move_is_numeric_option_value($row[$key])) {
+            return syncro_production_move_normalize_text($row[$key]);
+        }
+    }
+    return '';
+}
+
+function syncro_production_move_add_definition_options(array &$definitions, string $fieldName, mixed $options): void
+{
+    $fieldKey = syncro_normalize_match_text($fieldName);
+    if ($fieldKey === '' || !is_array($options)) {
+        return;
+    }
+    foreach ($options as $key => $row) {
+        $optionId = syncro_production_move_option_id_from_row($key, $row);
+        $label = syncro_production_move_option_label_from_row($row);
+        if ($optionId !== '' && $label !== '') {
+            $definitions[$fieldKey][$optionId] = $label;
+        }
+    }
+}
+
+function syncro_production_move_collect_option_definitions(mixed $data): array
+{
+    $definitions = [];
+    $fieldNamesById = [];
+    $walk = function (mixed $node) use (&$walk, &$definitions, &$fieldNamesById): void {
+        if (!is_array($node)) {
+            return;
+        }
+
+        $fieldName = syncro_production_move_definition_field_name($node);
+        $definitionId = syncro_production_move_definition_id($node);
+        if ($fieldName !== '' && $definitionId !== '') {
+            $fieldNamesById[$definitionId] = $fieldName;
+        }
+
+        if ($fieldName !== '') {
+            foreach (['options', 'choices', 'answers', 'dropdown_options', 'dropdownOptions', 'field_options', 'fieldOptions', 'possible_values', 'possibleValues', 'values', 'selections'] as $optionsKey) {
+                if (isset($node[$optionsKey]) && is_array($node[$optionsKey])) {
+                    syncro_production_move_add_definition_options($definitions, $fieldName, $node[$optionsKey]);
+                }
+            }
+        }
+
+        foreach ($node as $child) {
+            $walk($child);
+        }
+    };
+
+    $walk($data);
+
+    // Some Syncro settings shapes split fields and option answers into separate
+    // arrays. Link any answer row carrying a field ID back to the field name.
+    $linkAnswers = function (mixed $node) use (&$linkAnswers, &$definitions, &$fieldNamesById): void {
+        if (!is_array($node)) {
+            return;
+        }
+        foreach (['field_definition_id', 'fieldDefinitionId', 'asset_type_field_id', 'assetTypeFieldId', 'custom_field_id', 'customFieldId', 'field_id', 'fieldId'] as $fieldIdKey) {
+            if (array_key_exists($fieldIdKey, $node) && syncro_production_move_is_numeric_option_value($node[$fieldIdKey])) {
+                $fieldId = syncro_production_move_normalize_text($node[$fieldIdKey]);
+                $fieldName = $fieldNamesById[$fieldId] ?? '';
+                $optionId = syncro_production_move_option_id_from_row('', $node);
+                $label = syncro_production_move_option_label_from_row($node);
+                if ($fieldName !== '' && $optionId !== '' && $label !== '') {
+                    $definitions[syncro_normalize_match_text($fieldName)][$optionId] = $label;
+                }
+            }
+        }
+        foreach ($node as $child) {
+            $linkAnswers($child);
+        }
+    };
+    $linkAnswers($data);
+
+    return $definitions;
+}
+
+function syncro_production_move_custom_field_option_definitions(): array
+{
+    static $definitions = null;
+    if ($definitions !== null) {
+        return $definitions;
+    }
+    $definitions = [];
+
+    if (defined('MMIT_SYNCRO_PRODUCTION_MOVER_DISABLE_METADATA_FETCH') && MMIT_SYNCRO_PRODUCTION_MOVER_DISABLE_METADATA_FETCH) {
+        return $definitions;
+    }
+
+    $settings = syncro_api_request('GET', 'settings');
+    if (empty($settings['ok'])) {
+        syncro_debug_log('production_mover_custom_field_metadata_unavailable', [
+            'errors' => array_map('syncro_production_move_mask_secrets', (array)($settings['errors'] ?? [])),
+        ]);
+        return $definitions;
+    }
+
+    $definitions = syncro_production_move_collect_option_definitions($settings['data'] ?? []);
+    return $definitions;
+}
+
+function syncro_production_move_resolve_custom_field_value(string $fieldName, mixed $rawValue, ?array $optionDefinitions = null): array
+{
+    $value = syncro_production_move_custom_field_value($rawValue);
+    $normalized = syncro_production_move_normalize_text($value);
+
+    if ($normalized === '') {
+        return ['value' => '', 'source' => 'empty'];
+    }
+
+    if (!syncro_production_move_is_numeric_option_value($normalized)) {
+        $source = is_array($rawValue) ? 'embedded_display' : 'direct';
+        return ['value' => $normalized, 'source' => $source];
+    }
+
+    $optionId = $normalized;
+    $fieldKey = syncro_normalize_match_text($fieldName);
+    $definitions = $optionDefinitions ?? syncro_production_move_custom_field_option_definitions();
+    if (isset($definitions[$fieldKey][$optionId])) {
+        return ['value' => $definitions[$fieldKey][$optionId], 'source' => 'option_definition'];
+    }
+
+    $fallbacks = syncro_production_move_temporary_option_fallback_map();
+    if (isset($fallbacks[$fieldKey][$optionId])) {
+        return ['value' => $fallbacks[$fieldKey][$optionId], 'source' => 'fallback'];
+    }
+
+    return ['value' => $optionId, 'source' => 'unresolved_numeric'];
+}
+
 function syncro_production_move_custom_field_value(mixed $field): mixed
 {
     if (!is_array($field)) {
@@ -164,7 +375,7 @@ function syncro_production_move_extract_custom_fields(array $asset): array
     foreach ($sources as $source) {
         foreach ($source as $key => $value) {
             if (is_string($key)) {
-                $fields[$key] = syncro_production_move_custom_field_value($value);
+                $fields[$key] = syncro_production_move_resolve_custom_field_value($key, $value)['value'];
                 continue;
             }
             if (!is_array($value)) {
@@ -174,7 +385,7 @@ function syncro_production_move_extract_custom_fields(array $asset): array
             if ($name === '') {
                 continue;
             }
-            $fields[$name] = syncro_production_move_custom_field_value($value);
+            $fields[$name] = syncro_production_move_resolve_custom_field_value($name, $value)['value'];
         }
     }
     return $fields;
@@ -218,11 +429,15 @@ function syncro_production_move_custom_field_debug(array $asset, array $fieldNam
             if ($wanted && !in_array(syncro_normalize_match_text($candidateName), $wanted, true)) {
                 continue;
             }
+            $resolution = syncro_production_move_resolve_custom_field_value($candidateName, $value);
             $debug[] = [
                 'source' => $sourceKey,
                 'key' => is_string($key) ? $key : (int)$key,
                 'name' => $candidateName,
+                'raw_value' => syncro_production_move_redact_debug_value($value),
                 'parsed_value' => syncro_production_move_normalize_text(syncro_production_move_custom_field_value($value)),
+                'resolved_value' => $resolution['value'],
+                'resolution_source' => $resolution['source'],
                 'raw' => syncro_production_move_redact_debug_value($value),
             ];
         }
@@ -296,13 +511,11 @@ function syncro_production_move_validate_asset(array $asset): array
         'target_folder_id' => $targetFolderId,
         'current_folder_id' => syncro_production_move_asset_folder_id($asset),
     ];
-    if ($errors) {
-        $validation['custom_field_debug'] = syncro_production_move_custom_field_debug($asset, [
-            MMIT_SYNCRO_FIELD_ONBOARDING_STATUS,
-            MMIT_SYNCRO_FIELD_READY_TO_MOVE,
-            MMIT_SYNCRO_FIELD_PRODUCTION_TARGET,
-        ]);
-    }
+    $validation['custom_field_debug'] = syncro_production_move_custom_field_debug($asset, [
+        MMIT_SYNCRO_FIELD_ONBOARDING_STATUS,
+        MMIT_SYNCRO_FIELD_READY_TO_MOVE,
+        MMIT_SYNCRO_FIELD_PRODUCTION_TARGET,
+    ]);
     return $validation;
 }
 

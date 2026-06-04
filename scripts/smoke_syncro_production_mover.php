@@ -8,6 +8,7 @@ define('BASE_URL', 'https://ops-test.midwestmanagedit.com');
 define('SYNCRO_SUBDOMAIN', 'example');
 define('SYNCRO_API_KEY', 'smoke-test-key-not-secret');
 define('SYNCRO_BASE_URL', 'https://127.0.0.1/never-called/');
+define('MMIT_SYNCRO_PRODUCTION_MOVER_DISABLE_METADATA_FETCH', true);
 
 require_once __DIR__ . '/../inc/syncro_production_mover.php';
 
@@ -87,6 +88,40 @@ $badShapeValidation = syncro_production_move_validate_asset($badShapeAsset);
 $badShapeDebug = json_encode($badShapeValidation['custom_field_debug'] ?? []);
 smoke_assert(($badShapeValidation['ok'] ?? null) === false, 'bad shape fails validation', $failed);
 smoke_assert($badShapeDebug !== false && str_contains($badShapeDebug, '[redacted]') && !str_contains($badShapeDebug, 'smoke-test-key-not-secret'), 'custom field debug masks secrets', $failed);
+
+
+$definitionShape = [
+    'asset_type_fields' => [
+        ['id' => 901, 'name' => 'MMIT Onboarding Status', 'options' => [['id' => 135355, 'name' => 'READY']]],
+        ['id' => 902, 'name' => 'MMIT Ready To Move', 'options' => [['id' => 135359, 'name' => 'Yes']]],
+    ],
+];
+$definitionMap = syncro_production_move_collect_option_definitions($definitionShape);
+$definitionStatus = syncro_production_move_resolve_custom_field_value('MMIT Onboarding Status', 135355, $definitionMap);
+$definitionReady = syncro_production_move_resolve_custom_field_value('MMIT Ready To Move', 135359, $definitionMap);
+smoke_assert(($definitionStatus['value'] ?? null) === 'READY' && ($definitionStatus['source'] ?? null) === 'option_definition', 'metadata option definition resolves status label', $failed);
+smoke_assert(($definitionReady['value'] ?? null) === 'Yes' && ($definitionReady['source'] ?? null) === 'option_definition', 'metadata option definition resolves ready label', $failed);
+
+$liveNumericAsset = $readyAsset;
+$liveNumericAsset['properties']['MMIT Onboarding Status'] = 135355;
+$liveNumericAsset['properties']['MMIT Ready To Move'] = 135359;
+$liveNumericAsset['properties']['MMIT Production Folder Target'] = 'Production/Workstations';
+$liveNumericValidation = syncro_production_move_validate_asset($liveNumericAsset);
+$liveNumericDebug = json_encode($liveNumericValidation['custom_field_debug'] ?? []);
+smoke_assert(($liveNumericValidation['ok'] ?? null) === true, 'live numeric option ID shape validates through temporary fallback', $failed);
+smoke_assert(($liveNumericValidation['status'] ?? null) === 'READY', 'live numeric status option ID resolves to READY', $failed);
+smoke_assert(($liveNumericValidation['ready_to_move'] ?? null) === 'Yes', 'live numeric ready option ID resolves to Yes', $failed);
+smoke_assert(($liveNumericValidation['target'] ?? null) === 'Production/Workstations', 'live target string remains unchanged', $failed);
+smoke_assert($liveNumericDebug !== false && str_contains($liveNumericDebug, 'fallback'), 'live numeric debug shows fallback source', $failed);
+
+$unresolvedNumericAsset = $readyAsset;
+$unresolvedNumericAsset['properties']['MMIT Onboarding Status'] = 999999;
+$unresolvedNumericValidation = syncro_production_move_validate_asset($unresolvedNumericAsset);
+$unresolvedNumericDebug = json_encode($unresolvedNumericValidation['custom_field_debug'] ?? []);
+$unresolvedNumericMove = syncro_production_move_asset(35912652, 12561086, 4211, true, false, $unresolvedNumericAsset);
+smoke_assert(($unresolvedNumericValidation['ok'] ?? null) === false, 'unresolved numeric option ID fails validation safely', $failed);
+smoke_assert($unresolvedNumericDebug !== false && str_contains($unresolvedNumericDebug, 'unresolved_numeric'), 'unresolved numeric debug source is shown', $failed);
+smoke_assert(($unresolvedNumericMove['ok'] ?? null) === false && !isset($unresolvedNumericMove['payload']), 'unresolved numeric dry run does not attempt move payload', $failed);
 
 $payload = syncro_production_move_policy_assignment_payload(12561086, 5027864);
 smoke_assert(($payload['changes']['update_asset'][0]['id'] ?? null) === 12561086, 'payload asset id', $failed);
