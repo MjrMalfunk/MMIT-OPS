@@ -120,6 +120,37 @@ function syncro_production_move_asset_list(array $response): array
     return [];
 }
 
+function syncro_production_move_custom_field_value(mixed $field): mixed
+{
+    if (!is_array($field)) {
+        return $field;
+    }
+
+    foreach ([
+        'display_value',
+        'displayValue',
+        'value_text',
+        'valueText',
+        'text',
+        'field_value',
+        'fieldValue',
+        'content',
+        'answer',
+        'selected_value',
+        'selectedValue',
+        'value',
+    ] as $key) {
+        if (array_key_exists($key, $field) && !is_array($field[$key])) {
+            $value = syncro_production_move_normalize_text($field[$key]);
+            if ($value !== '') {
+                return $field[$key];
+            }
+        }
+    }
+
+    return '';
+}
+
 function syncro_production_move_extract_custom_fields(array $asset): array
 {
     $fields = [];
@@ -133,24 +164,70 @@ function syncro_production_move_extract_custom_fields(array $asset): array
     foreach ($sources as $source) {
         foreach ($source as $key => $value) {
             if (is_string($key)) {
-                if (is_array($value) && array_key_exists('value', $value)) {
-                    $fields[$key] = $value['value'];
-                } else {
-                    $fields[$key] = $value;
-                }
+                $fields[$key] = syncro_production_move_custom_field_value($value);
                 continue;
             }
             if (!is_array($value)) {
                 continue;
             }
-            $name = (string)($value['name'] ?? $value['field_name'] ?? $value['label'] ?? '');
+            $name = (string)($value['name'] ?? $value['field_name'] ?? $value['fieldName'] ?? $value['label'] ?? $value['title'] ?? '');
             if ($name === '') {
                 continue;
             }
-            $fields[$name] = $value['value'] ?? $value['field_value'] ?? $value['content'] ?? '';
+            $fields[$name] = syncro_production_move_custom_field_value($value);
         }
     }
     return $fields;
+}
+
+function syncro_production_move_redact_debug_value(mixed $value): mixed
+{
+    if (is_array($value)) {
+        $redacted = [];
+        foreach ($value as $key => $child) {
+            $keyText = (string)$key;
+            if (preg_match('/api[_-]?key|authorization|bearer|token|secret|password/i', $keyText) === 1) {
+                $redacted[$key] = '[redacted]';
+                continue;
+            }
+            $redacted[$key] = syncro_production_move_redact_debug_value($child);
+        }
+        return $redacted;
+    }
+
+    if (is_string($value)) {
+        return syncro_production_move_mask_secrets($value);
+    }
+
+    return $value;
+}
+
+function syncro_production_move_custom_field_debug(array $asset, array $fieldNames = []): array
+{
+    $wanted = array_filter(array_map('syncro_normalize_match_text', $fieldNames));
+    $debug = [];
+    foreach (['custom_fields', 'properties', 'asset_properties', 'fields'] as $sourceKey) {
+        if (!isset($asset[$sourceKey]) || !is_array($asset[$sourceKey])) {
+            continue;
+        }
+        foreach ($asset[$sourceKey] as $key => $value) {
+            $candidateName = is_string($key) ? $key : '';
+            if ($candidateName === '' && is_array($value)) {
+                $candidateName = (string)($value['name'] ?? $value['field_name'] ?? $value['fieldName'] ?? $value['label'] ?? $value['title'] ?? '');
+            }
+            if ($wanted && !in_array(syncro_normalize_match_text($candidateName), $wanted, true)) {
+                continue;
+            }
+            $debug[] = [
+                'source' => $sourceKey,
+                'key' => is_string($key) ? $key : (int)$key,
+                'name' => $candidateName,
+                'parsed_value' => syncro_production_move_normalize_text(syncro_production_move_custom_field_value($value)),
+                'raw' => syncro_production_move_redact_debug_value($value),
+            ];
+        }
+    }
+    return $debug;
 }
 
 function syncro_production_move_custom_field(array $asset, string $name): string
@@ -210,7 +287,7 @@ function syncro_production_move_validate_asset(array $asset): array
         $errors[] = MMIT_SYNCRO_FIELD_PRODUCTION_TARGET . ' must be Production/Workstations or Production/Servers.';
     }
 
-    return [
+    $validation = [
         'ok' => !$errors,
         'errors' => $errors,
         'status' => $status,
@@ -219,6 +296,14 @@ function syncro_production_move_validate_asset(array $asset): array
         'target_folder_id' => $targetFolderId,
         'current_folder_id' => syncro_production_move_asset_folder_id($asset),
     ];
+    if ($errors) {
+        $validation['custom_field_debug'] = syncro_production_move_custom_field_debug($asset, [
+            MMIT_SYNCRO_FIELD_ONBOARDING_STATUS,
+            MMIT_SYNCRO_FIELD_READY_TO_MOVE,
+            MMIT_SYNCRO_FIELD_PRODUCTION_TARGET,
+        ]);
+    }
+    return $validation;
 }
 
 function syncro_production_move_fetch_asset(int $customerId, int $assetId): array
