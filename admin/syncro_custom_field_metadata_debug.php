@@ -25,7 +25,7 @@ page_header('Syncro Custom Field Metadata Debug', 'admin');
   <div>
     <h1 style="margin:0 0 8px;font-size:28px;">Syncro custom field metadata debug</h1>
     <div style="opacity:.78;max-width:940px;line-height:1.55;">
-      Admin-only, read-only diagnostic for MMIT asset custom-field dropdown/list metadata. It calls the existing OPS Syncro API integration for <code>GET /settings</code>, extracts only MMIT-relevant field metadata, and masks any secret-looking values.
+      Admin-only, read-only diagnostic for MMIT asset custom-field dropdown/list metadata. It calls the existing OPS Syncro API integration for <code>GET /settings</code>, extracts only MMIT-relevant field metadata, and masks any secret-looking values. Syncro may return numeric select_box IDs on assets even when this settings response omits option lists, so OPS uses a controlled MMIT select-option compatibility map after metadata resolution is attempted.
     </div>
   </div>
   <a class="btn btn-secondary" style="width:auto;padding:10px 14px;text-decoration:none;" href="<?= htmlspecialchars(BASE_URL) ?>/admin/index.php">Back to admin</a>
@@ -56,7 +56,7 @@ page_header('Syncro Custom Field Metadata Debug', 'admin');
       <div style="padding:12px;border:1px solid rgba(255,255,255,.12);border-radius:14px;background:rgba(255,255,255,.03);"><strong>Custom field definitions</strong><br><span style="opacity:.75;"><?= !empty($diagnostic['contains_custom_field_definitions']) ? 'Present' : 'Not detected' ?></span></div>
       <div style="padding:12px;border:1px solid rgba(255,255,255,.12);border-radius:14px;background:rgba(255,255,255,.03);"><strong>Asset custom fields</strong><br><span style="opacity:.75;"><?= !empty($diagnostic['asset_custom_fields_present']) ? 'Present' : 'Not detected' ?></span></div>
     </div>
-    <div style="font-size:12px;opacity:.72;margin-bottom:8px;">Secret-masked, MMIT-scoped metadata only. If option lists are absent here, check the listed existing repo Syncro readers to confirm whether asset responses include embedded display values, but they are not definition/option sources.</div>
+    <div style="font-size:12px;opacity:.72;margin-bottom:8px;">Secret-masked, MMIT-scoped metadata only. Option definitions are preferred when present; if option lists are absent here, numeric select_box IDs can still resolve through the controlled MMIT select-option compatibility map for known MMIT fields. Existing asset readers may include assigned values/display values, but they are not reusable definition/option sources.</div>
     <pre style="white-space:pre-wrap;overflow:auto;padding:12px;border-radius:12px;background:rgba(0,0,0,.22);border:1px solid rgba(255,255,255,.12);"><?= htmlspecialchars(json_encode($diagnostic, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) ?: '') ?></pre>
   </section>
 <?php endif; ?>

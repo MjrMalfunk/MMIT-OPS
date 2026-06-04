@@ -127,11 +127,11 @@ $liveNumericAsset['properties']['MMIT Ready To Move'] = 135359;
 $liveNumericAsset['properties']['MMIT Production Folder Target'] = 'Production/Workstations';
 $liveNumericValidation = syncro_production_move_validate_asset($liveNumericAsset);
 $liveNumericDebug = json_encode($liveNumericValidation['custom_field_debug'] ?? []);
-smoke_assert(($liveNumericValidation['ok'] ?? null) === true, 'live numeric option ID shape validates through temporary fallback', $failed);
+smoke_assert(($liveNumericValidation['ok'] ?? null) === true, 'live numeric option ID shape validates through configured option map', $failed);
 smoke_assert(($liveNumericValidation['status'] ?? null) === 'READY', 'live numeric status option ID resolves to READY', $failed);
 smoke_assert(($liveNumericValidation['ready_to_move'] ?? null) === 'Yes', 'live numeric ready option ID resolves to Yes', $failed);
 smoke_assert(($liveNumericValidation['target'] ?? null) === 'Production/Workstations', 'live target string remains unchanged', $failed);
-smoke_assert($liveNumericDebug !== false && str_contains($liveNumericDebug, 'fallback'), 'live numeric debug shows fallback source', $failed);
+smoke_assert($liveNumericDebug !== false && str_contains($liveNumericDebug, 'configured_option_map'), 'live numeric debug shows configured option map source', $failed);
 
 $unresolvedNumericAsset = $readyAsset;
 $unresolvedNumericAsset['properties']['MMIT Onboarding Status'] = 999999;
