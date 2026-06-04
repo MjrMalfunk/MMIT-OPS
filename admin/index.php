@@ -44,6 +44,7 @@ page_header('Admin', 'admin');
       <p class="admin-card-copy">Dry-run-first manual moves for READY onboarding assets into allowlisted MMIT production folders.</p>
       <div class="admin-card-actions">
         <a class="btn btn-secondary btn-inline" style="text-decoration:none;" href="<?= htmlspecialchars(BASE_URL) ?>/admin/syncro_production_mover.php">Open production mover</a>
+        <a class="btn btn-secondary btn-inline" style="text-decoration:none;" href="<?= htmlspecialchars(BASE_URL) ?>/admin/syncro_custom_field_metadata_debug.php">Debug field metadata</a>
       </div>
     </section>
 

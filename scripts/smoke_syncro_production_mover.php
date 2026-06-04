@@ -109,6 +109,18 @@ $definitionReady = syncro_production_move_resolve_custom_field_value('MMIT Ready
 smoke_assert(($definitionStatus['value'] ?? null) === 'READY' && ($definitionStatus['source'] ?? null) === 'option_definition', 'metadata option definition resolves status label', $failed);
 smoke_assert(($definitionReady['value'] ?? null) === 'Yes' && ($definitionReady['source'] ?? null) === 'option_definition', 'metadata option_definition resolves ready label', $failed);
 
+$metadataDiagnostic = syncro_production_move_settings_metadata_diagnostic($definitionShape);
+$diagnosticFields = [];
+foreach (($metadataDiagnostic['fields'] ?? []) as $diagnosticField) {
+    $diagnosticFields[(string)($diagnosticField['target_field'] ?? '')] = $diagnosticField;
+}
+smoke_assert(($metadataDiagnostic['contains_custom_field_definitions'] ?? null) === true, 'metadata diagnostic detects custom field definitions', $failed);
+smoke_assert(($metadataDiagnostic['asset_custom_fields_present'] ?? null) === true, 'metadata diagnostic detects asset custom fields', $failed);
+smoke_assert(($diagnosticFields['MMIT Onboarding Status']['found_in_settings'] ?? null) === true, 'metadata diagnostic finds onboarding status', $failed);
+smoke_assert(($diagnosticFields['MMIT Onboarding Status']['resolver_has_option_ids'] ?? null) === true, 'metadata diagnostic reports resolver option ids', $failed);
+smoke_assert(($diagnosticFields['MMIT Ready To Move']['metadata_entries'][0]['option_list_present'] ?? null) === true, 'metadata diagnostic reports option list path', $failed);
+smoke_assert(($diagnosticFields['MMIT Production Folder Target']['found_in_settings'] ?? null) === false, 'metadata diagnostic reports missing production target metadata', $failed);
+
 $liveNumericAsset = $readyAsset;
 $liveNumericAsset['properties']['MMIT Onboarding Status'] = 135355;
 $liveNumericAsset['properties']['MMIT Ready To Move'] = 135359;
