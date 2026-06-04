@@ -147,10 +147,74 @@ smoke_assert(($payload['changes']['update_asset'][0]['id'] ?? null) === 12561086
 smoke_assert(($payload['changes']['update_asset'][0]['change']['policy_folder_id'] ?? null) === 5027864, 'payload folder id', $failed);
 smoke_assert(($payload['changes']['add_folder'] ?? null) === [], 'payload add_folder empty', $failed);
 
+$dryRunRequests = [];
+$GLOBALS['syncro_production_move_api_request_handler'] = static function (string $method, string $path, array $query, ?array $payload) use (&$dryRunRequests): array {
+    $dryRunRequests[] = compact('method', 'path', 'query', 'payload');
+    return ['ok' => false, 'status' => 500, 'errors' => ['dry run should not write']];
+};
 $dryRun = syncro_production_move_asset(35912652, 12561086, 4211, true, false, $readyAsset);
 smoke_assert(($dryRun['ok'] ?? null) === true, 'dry-run succeeds without network', $failed);
 smoke_assert(($dryRun['dry_run'] ?? null) === true, 'dry-run marked', $failed);
 smoke_assert(($dryRun['payload']['changes']['update_asset'][0]['change']['policy_folder_id'] ?? null) === 5027864, 'dry-run payload target', $failed);
+smoke_assert(($dryRun['asset_update_payload']['policy_folder_id'] ?? null) === 5027864, 'dry-run shows asset update payload target', $failed);
+smoke_assert($dryRunRequests === [], 'dry-run produces no Syncro write', $failed);
+unset($GLOBALS['syncro_production_move_api_request_handler']);
+
+$successRequests = [];
+$movedAsset = $readyAsset;
+$GLOBALS['syncro_production_move_api_request_handler'] = static function (string $method, string $path, array $query, ?array $payload) use (&$successRequests, &$movedAsset): array {
+    $successRequests[] = compact('method', 'path', 'query', 'payload');
+    if ($method === 'PUT' && $path === 'customer_assets/12561086' && isset($payload['policy_folder_id'])) {
+        $movedAsset['policy_folder_id'] = (int)$payload['policy_folder_id'];
+        return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => $movedAsset]];
+    }
+    if ($method === 'GET' && $path === 'customer_assets/12561086') {
+        return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => $movedAsset]];
+    }
+    if ($method === 'PUT' && $path === 'customer_assets/12561086' && isset($payload['properties'])) {
+        return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => $movedAsset]];
+    }
+    if ($method === 'POST' && $path === 'tickets/4211/comments') {
+        return ['ok' => true, 'status' => 201, 'data' => ['comment' => ['id' => 88]]];
+    }
+    return ['ok' => false, 'status' => 500, 'errors' => ['unexpected request ' . $method . ' ' . $path]];
+};
+$successfulPut = syncro_production_move_asset(35912652, 12561086, 4211, false, false, $readyAsset);
+smoke_assert(($successfulPut['ok'] ?? null) === true, 'successful PUT move succeeds', $failed);
+smoke_assert(($successfulPut['move_diagnostic']['method'] ?? null) === 'PUT', 'successful move diagnostic method', $failed);
+smoke_assert(($successfulPut['move_diagnostic']['path'] ?? null) === '/api/v1/customer_assets/12561086', 'successful move diagnostic path', $failed);
+smoke_assert(($successfulPut['move_diagnostic']['http_status'] ?? null) === 200, 'successful move diagnostic status', $failed);
+smoke_assert(($successfulPut['move_diagnostic']['payload']['policy_folder_id'] ?? null) === 5027864, 'successful move diagnostic payload', $failed);
+smoke_assert(($successfulPut['verified_policy_folder_id'] ?? null) === 5027864, 'successful PUT re-fetch verifies policy folder', $failed);
+$successWriteIndex = null;
+$successVerifyIndex = null;
+foreach ($successRequests as $index => $request) {
+    if (($request['method'] ?? '') === 'GET' && ($request['path'] ?? '') === 'customer_assets/12561086') {
+        $successVerifyIndex = $successVerifyIndex ?? $index;
+    }
+    if (($request['method'] ?? '') === 'PUT' && isset($request['payload']['properties'][MMIT_SYNCRO_FIELD_AUTO_MOVE_RESULT])) {
+        $successWriteIndex = $successWriteIndex ?? $index;
+    }
+}
+smoke_assert($successVerifyIndex !== null && $successWriteIndex !== null && $successVerifyIndex < $successWriteIndex, 'success writes result only after verification fetch', $failed);
+unset($GLOBALS['syncro_production_move_api_request_handler']);
+
+$GLOBALS['syncro_production_move_api_request_handler'] = static function (string $method, string $path, array $query, ?array $payload): array {
+    return ['ok' => false, 'status' => 422, 'errors' => ['policy_folder_id is invalid'], 'raw_body' => '{"errors":["policy_folder_id is invalid"]}'];
+};
+$invalidFolderPut = syncro_production_move_asset(35912652, 12561086, 4211, false, false, $readyAsset);
+smoke_assert(($invalidFolderPut['ok'] ?? null) === false, '422 invalid folder remains failure', $failed);
+smoke_assert(($invalidFolderPut['move_diagnostic']['http_status'] ?? null) === 422, '422 diagnostic status captured', $failed);
+smoke_assert(str_contains((string)($invalidFolderPut['message'] ?? ''), 'policy_folder_id is invalid'), '422 response excerpt displayed', $failed);
+unset($GLOBALS['syncro_production_move_api_request_handler']);
+
+$GLOBALS['syncro_production_move_api_request_handler'] = static function (string $method, string $path, array $query, ?array $payload): array {
+    return ['ok' => false, 'status' => 404, 'errors' => ['Not Found'], 'raw_body' => '{"error":"Not Found"}'];
+};
+$notFoundPut = syncro_production_move_asset(35912652, 12561086, 4211, false, false, $readyAsset);
+smoke_assert(($notFoundPut['ok'] ?? null) === false, '404 remains hard failure', $failed);
+smoke_assert(($notFoundPut['move_diagnostic']['http_status'] ?? null) === 404, '404 diagnostic status captured', $failed);
+unset($GLOBALS['syncro_production_move_api_request_handler']);
 
 $GLOBALS['smoke_syncro_staging_mode'] = true;
 $stagingBlocked = syncro_production_move_asset(35912652, 12561086, 4211, false, false, $readyAsset);
