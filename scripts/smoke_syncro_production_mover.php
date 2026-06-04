@@ -38,6 +38,56 @@ $validation = syncro_production_move_validate_asset($readyAsset);
 smoke_assert(($validation['ok'] ?? null) === true, 'ready asset validates', $failed);
 smoke_assert(($validation['target_folder_id'] ?? null) === 5027864, 'ready asset target folder id', $failed);
 
+$syncroObjectAsset = [
+    'id' => 12561086,
+    'name' => 'MANAGE-WS-02',
+    'policy_folder_id' => 5027867,
+    'custom_fields' => [
+        [
+            'id' => 135355,
+            'field_definition_id' => 135355,
+            'name' => 'MMIT Onboarding Status',
+            'value' => 135355,
+            'display_value' => 'READY',
+        ],
+        [
+            'id' => 135359,
+            'field_definition_id' => 135359,
+            'name' => 'MMIT Ready To Move',
+            'value' => 135359,
+            'display_value' => 'Yes',
+        ],
+        [
+            'id' => 135360,
+            'field_definition_id' => 135360,
+            'name' => 'MMIT Production Folder Target',
+            'value' => 'Production/Workstations',
+        ],
+    ],
+];
+$syncroObjectFields = syncro_production_move_extract_custom_fields($syncroObjectAsset);
+smoke_assert(($syncroObjectFields['MMIT Onboarding Status'] ?? null) === 'READY', 'object status value is display value not id', $failed);
+smoke_assert(($syncroObjectFields['MMIT Ready To Move'] ?? null) === 'Yes', 'object ready value is display value not id', $failed);
+smoke_assert(($syncroObjectFields['MMIT Production Folder Target'] ?? null) === 'Production/Workstations', 'object target value is actual target', $failed);
+$syncroObjectValidation = syncro_production_move_validate_asset($syncroObjectAsset);
+smoke_assert(($syncroObjectValidation['ok'] ?? null) === true, 'Syncro object-shaped fields validate', $failed);
+smoke_assert(($syncroObjectValidation['status'] ?? null) === 'READY', 'validation status is READY not id', $failed);
+smoke_assert(($syncroObjectValidation['ready_to_move'] ?? null) === 'Yes', 'validation ready is Yes not id', $failed);
+
+$keyedObjectAsset = $readyAsset;
+$keyedObjectAsset['properties']['MMIT Onboarding Status'] = ['id' => 135355, 'value' => 135355, 'value_text' => 'READY'];
+$keyedObjectAsset['properties']['MMIT Ready To Move'] = ['id' => 135359, 'value' => 135359, 'text' => 'Yes'];
+$keyedObjectValidation = syncro_production_move_validate_asset($keyedObjectAsset);
+smoke_assert(($keyedObjectValidation['status'] ?? null) === 'READY', 'keyed object status is READY not id', $failed);
+smoke_assert(($keyedObjectValidation['ready_to_move'] ?? null) === 'Yes', 'keyed object ready is Yes not id', $failed);
+
+$badShapeAsset = $readyAsset;
+$badShapeAsset['properties']['MMIT Onboarding Status'] = ['api_key' => 'smoke-test-key-not-secret', 'value' => 'NOT_READY'];
+$badShapeValidation = syncro_production_move_validate_asset($badShapeAsset);
+$badShapeDebug = json_encode($badShapeValidation['custom_field_debug'] ?? []);
+smoke_assert(($badShapeValidation['ok'] ?? null) === false, 'bad shape fails validation', $failed);
+smoke_assert($badShapeDebug !== false && str_contains($badShapeDebug, '[redacted]') && !str_contains($badShapeDebug, 'smoke-test-key-not-secret'), 'custom field debug masks secrets', $failed);
+
 $payload = syncro_production_move_policy_assignment_payload(12561086, 5027864);
 smoke_assert(($payload['changes']['update_asset'][0]['id'] ?? null) === 12561086, 'payload asset id', $failed);
 smoke_assert(($payload['changes']['update_asset'][0]['change']['policy_folder_id'] ?? null) === 5027864, 'payload folder id', $failed);
