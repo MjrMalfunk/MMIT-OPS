@@ -163,16 +163,38 @@ function Resolve-CustomFieldValue {
 function Get-AssetsFromResponse {
     param([object]$Response)
 
-    foreach ($Name in @("assets", "customer_assets", "records", "items", "results", "data")) {
-        $Assets = Get-ObjectPropertyValue -Object $Response -Names @($Name)
-        if ($Assets) {
-            return @($Assets)
-        }
+    $RawAssets = Get-ObjectPropertyValue -Object $Response -Names @(
+        "customer_assets",
+        "assets",
+        "data"
+    )
+
+    if ($null -eq $RawAssets) {
+        return @()
     }
 
-    $Asset = Get-SingleAssetFromResponse -Response $Response
-    if ($Asset) {
-        return @($Asset)
+    if ($RawAssets -is [string]) {
+        return @()
+    }
+
+    if ($RawAssets -is [System.Collections.IDictionary]) {
+        if ($RawAssets.Contains("id") -or $RawAssets.Contains("asset_id")) {
+            return @($RawAssets)
+        }
+
+        return @()
+    }
+
+    if ($RawAssets -is [System.Array]) {
+        return @($RawAssets | Where-Object { $null -ne $_ })
+    }
+
+    if ($RawAssets -is [System.Collections.IEnumerable]) {
+        return @($RawAssets | Where-Object { $null -ne $_ })
+    }
+
+    if (Get-ObjectPropertyValue -Object $RawAssets -Names @("id", "asset_id")) {
+        return @($RawAssets)
     }
 
     return @()
