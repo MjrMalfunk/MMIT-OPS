@@ -3,11 +3,80 @@ declare(strict_types=1);
 
 // Smoke checks for the MMIT Syncro production mover helpers. This intentionally
 // avoids bootstrap/config secrets and external network requests.
+$smokePort = 19000 + (getmypid() % 1000);
+$smokeDir = sys_get_temp_dir() . '/mmit-syncro-mover-smoke-' . getmypid();
+if (!is_dir($smokeDir) && !mkdir($smokeDir, 0700, true) && !is_dir($smokeDir)) {
+    fwrite(STDERR, 'Unable to create smoke server temp directory.' . PHP_EOL);
+    exit(1);
+}
+$smokeRouter = $smokeDir . '/router.php';
+$smokeLog = $smokeDir . '/requests.jsonl';
+$routerSource = <<<'PHP'
+<?php
+$body = file_get_contents('php://input') ?: '';
+file_put_contents(getenv('SMOKE_SYNCRO_REQUEST_LOG'), json_encode([
+    'method' => $_SERVER['REQUEST_METHOD'] ?? '',
+    'uri' => $_SERVER['REQUEST_URI'] ?? '',
+    'body' => $body,
+], JSON_UNESCAPED_SLASHES) . PHP_EOL, FILE_APPEND);
+header('Content-Type: application/json');
+$path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'PATCH' && $path === '/api/v1/customers/35912652/policy_assignments') {
+    http_response_code(404);
+    echo json_encode(['error' => 'Not Found', 'api_key' => $_GET['api_key'] ?? '']);
+    return;
+}
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'PUT' && $path === '/api/v1/customer_assets/12561086') {
+    http_response_code(200);
+    echo json_encode(['ok' => true]);
+    return;
+}
+http_response_code(404);
+echo json_encode(['error' => 'Unexpected smoke route']);
+PHP;
+file_put_contents($smokeRouter, $routerSource);
+$smokeServer = proc_open(
+    [PHP_BINARY, '-S', '127.0.0.1:' . $smokePort, $smokeRouter],
+    [['file', '/dev/null', 'r'], ['pipe', 'w'], ['pipe', 'w']],
+    $smokePipes,
+    $smokeDir,
+    ['SMOKE_SYNCRO_REQUEST_LOG' => $smokeLog]
+);
+if (!is_resource($smokeServer)) {
+    fwrite(STDERR, 'Unable to start smoke Syncro API server.' . PHP_EOL);
+    exit(1);
+}
+register_shutdown_function(static function () use (&$smokeServer, &$smokePipes): void {
+    if (is_resource($smokeServer)) {
+        proc_terminate($smokeServer);
+        proc_close($smokeServer);
+    }
+    foreach ($smokePipes ?? [] as $pipe) {
+        if (is_resource($pipe)) {
+            fclose($pipe);
+        }
+    }
+});
+$serverReady = false;
+for ($i = 0; $i < 50; $i++) {
+    $socket = @fsockopen('127.0.0.1', $smokePort, $errno, $errstr, 0.1);
+    if (is_resource($socket)) {
+        fclose($socket);
+        $serverReady = true;
+        break;
+    }
+    usleep(100000);
+}
+if (!$serverReady) {
+    fwrite(STDERR, 'Smoke Syncro API server did not become ready.' . PHP_EOL);
+    exit(1);
+}
+
 define('APP_ENV', 'production');
 define('BASE_URL', 'https://ops.midwestmanagedit.com');
 define('SYNCRO_SUBDOMAIN', 'example');
 define('SYNCRO_API_KEY', 'smoke-test-key-not-secret');
-define('SYNCRO_BASE_URL', 'https://127.0.0.1/never-called/');
+define('SYNCRO_BASE_URL', 'http://127.0.0.1:' . $smokePort . '/api/v1/');
 define('MMIT_SYNCRO_PRODUCTION_MOVER_DISABLE_METADATA_FETCH', true);
 
 $GLOBALS['smoke_syncro_staging_mode'] = false;
@@ -158,12 +227,38 @@ smoke_assert(($stagingBlocked['ok'] ?? null) === true, 'staging write disabled g
 smoke_assert(($stagingBlocked['staging_guarded'] ?? null) === true, 'staging write disabled result is marked guarded', $failed);
 smoke_assert(($stagingBlocked['production_move_succeeded'] ?? true) === false, 'staging write disabled is not production success', $failed);
 smoke_assert(isset($stagingBlocked['payload']) && !isset($stagingBlocked['write']) && str_contains((string)($stagingBlocked['message'] ?? ''), 'Would move MANAGE-WS-02 to Production/Workstations (#5027864).'), 'staging guarded message and payload', $failed);
+smoke_assert(($stagingBlocked['move_diagnostics']['request_method'] ?? null) === 'PATCH', 'staging guard diagnostics include method', $failed);
+smoke_assert(($stagingBlocked['move_diagnostics']['request_path'] ?? null) === '/api/v1/customers/35912652/policy_assignments', 'staging guard diagnostics include request path', $failed);
+smoke_assert(($stagingBlocked['move_diagnostics']['http_status'] ?? null) === 'STAGING_BLOCKED', 'staging guard diagnostics include guarded status', $failed);
+smoke_assert(($stagingBlocked['move_diagnostics']['policy_assignment_payload'] ?? null) === $payload, 'staging guard diagnostics payload unchanged', $failed);
 
 $GLOBALS['smoke_syncro_staging_mode'] = false;
 $realWriteFailure = syncro_production_move_asset(35912652, 12561086, 4211, false, false, $readyAsset);
+$realWriteDiagnostics = (array)($realWriteFailure['move_diagnostics'] ?? []);
+$realWritePayload = (array)($realWriteDiagnostics['policy_assignment_payload'] ?? []);
 smoke_assert(($realWriteFailure['ok'] ?? null) === false, 'real write failure remains failure', $failed);
 smoke_assert(($realWriteFailure['staging_guarded'] ?? false) === false, 'real write failure is not staging guarded', $failed);
 smoke_assert(str_starts_with((string)($realWriteFailure['message'] ?? ''), 'Move failed for MANAGE-WS-02:'), 'real write failure message remains hard failure', $failed);
+smoke_assert(($realWriteDiagnostics['request_method'] ?? null) === 'PATCH', 'failed write diagnostics include method', $failed);
+smoke_assert(($realWriteDiagnostics['request_path'] ?? null) === '/api/v1/customers/35912652/policy_assignments', 'failed write diagnostics include api request path', $failed);
+smoke_assert(($realWriteDiagnostics['http_status'] ?? null) === 404, 'failed write diagnostics include HTTP 404', $failed);
+smoke_assert(str_contains((string)($realWriteDiagnostics['response_excerpt'] ?? ''), 'Not Found'), 'failed write diagnostics include response excerpt', $failed);
+smoke_assert(!str_contains(json_encode($realWriteDiagnostics, JSON_UNESCAPED_SLASHES) ?: '', 'smoke-test-key-not-secret'), 'failed write diagnostics mask secrets', $failed);
+smoke_assert($realWritePayload === $payload, 'failed write diagnostics payload remains unchanged', $failed);
+smoke_assert(($realWriteFailure['move']['status'] ?? null) === 404 && ($realWriteFailure['ok'] ?? null) === false, 'real HTTP 404 remains hard failure', $failed);
+
+$smokeRequests = is_file($smokeLog) ? array_filter(explode(PHP_EOL, trim((string)file_get_contents($smokeLog)))) : [];
+$policyAssignmentRequest = null;
+foreach ($smokeRequests as $smokeRequestLine) {
+    $decodedRequest = json_decode($smokeRequestLine, true);
+    if (is_array($decodedRequest) && str_starts_with((string)($decodedRequest['uri'] ?? ''), '/api/v1/customers/35912652/policy_assignments')) {
+        $policyAssignmentRequest = $decodedRequest;
+        break;
+    }
+}
+$decodedMoveBody = json_decode((string)($policyAssignmentRequest['body'] ?? ''), true);
+smoke_assert(($policyAssignmentRequest['method'] ?? null) === 'PATCH', 'smoke server saw PATCH policy assignment write', $failed);
+smoke_assert($decodedMoveBody === $payload, 'smoke server saw unchanged move payload', $failed);
 
 $alreadyAsset = $readyAsset;
 $alreadyAsset['policy_folder_id'] = 5027864;
