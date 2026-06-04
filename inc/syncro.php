@@ -59,6 +59,53 @@ function syncro_flatten_errors(mixed $value, string $prefix = ''): array
 }
 
 
+
+function syncro_sanitized_request_path(string $url): string
+{
+    $path = parse_url($url, PHP_URL_PATH);
+    $path = is_string($path) && $path !== '' ? $path : '/';
+    $query = parse_url($url, PHP_URL_QUERY);
+    if (!is_string($query) || $query === '') {
+        return $path;
+    }
+
+    parse_str($query, $params);
+    unset($params['api_key']);
+    if (!$params) {
+        return $path;
+    }
+
+    return $path . '?' . http_build_query($params);
+}
+
+function syncro_redacted_response_excerpt(mixed $body, int $limit = 500): string
+{
+    $text = is_string($body) ? $body : json_encode($body, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if (!is_string($text)) {
+        $text = '';
+    }
+    $text = syncro_mask_secrets($text);
+    $text = preg_replace('/\s+/u', ' ', $text) ?? $text;
+    $text = trim($text);
+    if ($text === '') {
+        return '';
+    }
+    if (mb_strlen($text, 'UTF-8') <= $limit) {
+        return $text;
+    }
+    return mb_substr($text, 0, $limit, 'UTF-8') . '…';
+}
+
+function syncro_mask_secrets(string $message): string
+{
+    $message = preg_replace('/(api[_-]?key=)[^\s&]+/i', '$1[redacted]', $message) ?? $message;
+    $message = preg_replace('/(authorization\s*[:=]\s*)(bearer\s+)?[^\s,;]+/i', '$1[redacted]', $message) ?? $message;
+    if (defined('SYNCRO_API_KEY') && trim((string)SYNCRO_API_KEY) !== '') {
+        $message = str_replace((string)SYNCRO_API_KEY, '[redacted]', $message);
+    }
+    return trim($message);
+}
+
 function syncro_is_staging_mode(): bool
 {
     if (function_exists('ops_is_staging_env') && ops_is_staging_env()) {
@@ -123,7 +170,13 @@ function syncro_block_staging_write_if_needed(string $method, string $path): ?ar
         'status' => 'STAGING_BLOCKED',
     ]);
 
-    return syncro_staging_blocked_result();
+    $blocked = syncro_staging_blocked_result();
+    $base = syncro_base_url();
+    $blocked['request'] = [
+        'method' => $method,
+        'path' => $base !== '' ? syncro_sanitized_request_path($base . ltrim($path, '/')) : ('/' . ltrim($path, '/')),
+    ];
+    return $blocked;
 }
 
 function syncro_api_request(string $method, string $path, array $query = [], ?array $payload = null): array
@@ -142,6 +195,10 @@ function syncro_api_request(string $method, string $path, array $query = [], ?ar
     $query = array_filter($query, static fn($v) => $v !== null && $v !== '');
     $query['api_key'] = (string)SYNCRO_API_KEY;
     $url .= (str_contains($url, '?') ? '&' : '?') . http_build_query($query);
+    $request = [
+        'method' => $method,
+        'path' => syncro_sanitized_request_path($url),
+    ];
 
     $ch = curl_init($url);
     $headers = ['Accept: application/json'];
@@ -167,12 +224,18 @@ function syncro_api_request(string $method, string $path, array $query = [], ?ar
     curl_close($ch);
 
     if ($body === false) {
-        return ['ok' => false, 'errors' => ['Syncro request failed: ' . ($curlError ?: 'unknown cURL error')]];
+        return [
+            'ok' => false,
+            'status' => $status,
+            'errors' => ['Syncro request failed: ' . ($curlError ?: 'unknown cURL error')],
+            'request' => $request,
+            'response_excerpt' => '',
+        ];
     }
 
     $decoded = json_decode($body, true);
     if ($status >= 200 && $status < 300) {
-        return ['ok' => true, 'status' => $status, 'data' => is_array($decoded) ? $decoded : ['raw' => $body]];
+        return ['ok' => true, 'status' => $status, 'data' => is_array($decoded) ? $decoded : ['raw' => $body], 'request' => $request];
     }
 
     $errors = [];
@@ -190,7 +253,15 @@ function syncro_api_request(string $method, string $path, array $query = [], ?ar
     if (!$errors) {
         $errors[] = 'Syncro API returned HTTP ' . $status . '.';
     }
-    return ['ok' => false, 'status' => $status, 'errors' => $errors, 'data' => $decoded, 'raw_body' => $body];
+    return [
+        'ok' => false,
+        'status' => $status,
+        'errors' => $errors,
+        'data' => $decoded,
+        'raw_body' => $body,
+        'request' => $request,
+        'response_excerpt' => syncro_redacted_response_excerpt($body),
+    ];
 }
 
 function syncro_client_columns_ready(): bool

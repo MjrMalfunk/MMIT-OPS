@@ -839,6 +839,53 @@ function syncro_production_move_find_ready_assets(int $customerId): array
     return ['ok' => true, 'assets' => $ready];
 }
 
+
+function syncro_production_move_execution_diagnostics(string $method, string $requestPath, array $response, array $payload): array
+{
+    $request = is_array($response['request'] ?? null) ? (array)$response['request'] : [];
+    $diagnostics = [
+        'request_method' => strtoupper((string)($request['method'] ?? $method)),
+        'request_path' => syncro_production_move_mask_secrets((string)($request['path'] ?? $requestPath)),
+        'http_status' => $response['status'] ?? null,
+        'response_excerpt' => syncro_production_move_response_excerpt($response),
+        'policy_assignment_payload' => $payload,
+    ];
+
+    return $diagnostics;
+}
+
+function syncro_production_move_response_excerpt(array $response): string
+{
+    if (isset($response['response_excerpt'])) {
+        return syncro_production_move_mask_secrets((string)$response['response_excerpt']);
+    }
+
+    if (isset($response['raw_body'])) {
+        $text = syncro_production_move_mask_secrets((string)$response['raw_body']);
+    } elseif (isset($response['data'])) {
+        $encoded = json_encode($response['data'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $text = syncro_production_move_mask_secrets(is_string($encoded) ? $encoded : '');
+    } else {
+        $text = implode(' ', array_map('strval', (array)($response['errors'] ?? $response['message'] ?? [])));
+        $text = syncro_production_move_mask_secrets($text);
+    }
+
+    $text = preg_replace('/\s+/u', ' ', $text) ?? $text;
+    $text = trim($text);
+    if ($text === '') {
+        return '';
+    }
+    if (mb_strlen($text, 'UTF-8') <= 500) {
+        return $text;
+    }
+    return mb_substr($text, 0, 500, 'UTF-8') . '…';
+}
+
+function syncro_production_move_policy_assignment_request_path(int $customerId): string
+{
+    return 'customers/' . $customerId . '/policy_assignments';
+}
+
 function syncro_production_move_policy_assignment_payload(int $assetId, int $targetFolderId): array
 {
     return [
@@ -975,7 +1022,9 @@ function syncro_production_move_asset(int $customerId, int $assetId, ?int $ready
         return ['ok' => true, 'dry_run' => true, 'message' => $message, 'validation' => $validation, 'payload' => $payload, 'asset' => $asset];
     }
 
-    $move = syncro_api_request('PATCH', 'customers/' . $customerId . '/policy_assignments', [], $payload);
+    $moveMethod = 'PATCH';
+    $movePath = syncro_production_move_policy_assignment_request_path($customerId);
+    $move = syncro_api_request($moveMethod, $movePath, [], $payload);
     if (empty($move['ok'])) {
         if (syncro_production_move_is_staging_blocked_response($move)) {
             $guarded = 'Staging execution blocked as expected. Would move ' . $assetName . ' to ' . $targetLabel . '.';
@@ -988,13 +1037,15 @@ function syncro_production_move_asset(int $customerId, int $assetId, ?int $ready
                 'message' => $guarded,
                 'validation' => $validation,
                 'payload' => $payload,
+                'move_diagnostics' => syncro_production_move_execution_diagnostics($moveMethod, $movePath, $move, $payload),
                 'move' => $move,
                 'warnings' => ['Staging/test guard blocked the Syncro write; no production move was made.'],
             ];
         }
+        $diagnostics = syncro_production_move_execution_diagnostics($moveMethod, $movePath, $move, $payload);
         $failure = 'Move failed for ' . $assetName . ': ' . syncro_production_move_response_errors($move, 'Syncro policy assignment move failed.');
         $write = syncro_production_move_write_result($assetId, $failure, false);
-        return ['ok' => false, 'dry_run' => false, 'message' => $failure, 'validation' => $validation, 'payload' => $payload, 'move' => $move, 'write' => $write, 'errors' => [$failure]];
+        return ['ok' => false, 'dry_run' => false, 'message' => $failure, 'validation' => $validation, 'payload' => $payload, 'move_diagnostics' => $diagnostics, 'move' => $move, 'write' => $write, 'errors' => [$failure]];
     }
 
     $success = 'Moved to target folder ' . $targetLabel . '.';
