@@ -314,6 +314,262 @@ function syncro_production_move_custom_field_option_definitions(): array
     return $definitions;
 }
 
+
+function syncro_production_move_mmit_field_names(): array
+{
+    return [
+        MMIT_SYNCRO_FIELD_ONBOARDING_STATUS,
+        MMIT_SYNCRO_FIELD_READY_TO_MOVE,
+        MMIT_SYNCRO_FIELD_PRODUCTION_TARGET,
+    ];
+}
+
+function syncro_production_move_metadata_scalar(array $row, array $keys): string
+{
+    foreach ($keys as $key) {
+        if (array_key_exists($key, $row) && !is_array($row[$key])) {
+            $value = syncro_production_move_normalize_text($row[$key]);
+            if ($value !== '') {
+                return $value;
+            }
+        }
+    }
+    return '';
+}
+
+function syncro_production_move_metadata_field_label(array $row): string
+{
+    return syncro_production_move_metadata_scalar($row, [
+        'display_name',
+        'displayName',
+        'label',
+        'title',
+        'name',
+        'field_name',
+        'fieldName',
+        'key',
+    ]);
+}
+
+function syncro_production_move_metadata_path(string $parent, mixed $key): string
+{
+    if (is_int($key)) {
+        return $parent . '[' . $key . ']';
+    }
+    $keyText = preg_replace('/[^A-Za-z0-9_]/', '_', (string)$key) ?? (string)$key;
+    return $parent . '.' . $keyText;
+}
+
+function syncro_production_move_metadata_path_matches(string $path, array $needles): bool
+{
+    $normalized = syncro_normalize_match_text($path);
+    foreach ($needles as $needle) {
+        if (str_contains($normalized, syncro_normalize_match_text($needle))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function syncro_production_move_metadata_option_rows(mixed $options): array
+{
+    $rows = [];
+    if (!is_array($options)) {
+        return $rows;
+    }
+
+    $add = static function (mixed $key, mixed $row, string $path) use (&$rows): void {
+        $optionId = syncro_production_move_option_id_from_row($key, $row);
+        $label = syncro_production_move_option_label_from_row($row);
+        if ($optionId !== '' || $label !== '') {
+            $rows[] = [
+                'id' => $optionId !== '' ? $optionId : null,
+                'label' => $label !== '' ? syncro_production_move_mask_secrets($label) : null,
+                'metadata_path' => $path,
+            ];
+        }
+    };
+
+    $walk = function (mixed $node, string $path) use (&$walk, &$add): void {
+        if (!is_array($node)) {
+            return;
+        }
+        $add('', $node, $path);
+        foreach ($node as $key => $row) {
+            $childPath = syncro_production_move_metadata_path($path, $key);
+            $add($key, $row, $childPath);
+            if (is_array($row)) {
+                foreach ($row as $nestedKey => $nestedValue) {
+                    if (is_array($nestedValue)) {
+                        $walk($nestedValue, syncro_production_move_metadata_path($childPath, $nestedKey));
+                    }
+                }
+            }
+        }
+    };
+
+    $walk($options, '$');
+
+    $deduped = [];
+    foreach ($rows as $row) {
+        $key = (string)($row['id'] ?? '') . '|' . syncro_normalize_match_text((string)($row['label'] ?? ''));
+        if ($key === '|') {
+            continue;
+        }
+        $deduped[$key] = $row;
+    }
+    return array_values($deduped);
+}
+
+function syncro_production_move_settings_metadata_diagnostic(array $settingsData, array $fieldNames = []): array
+{
+    $fieldNames = $fieldNames ?: syncro_production_move_mmit_field_names();
+    $targetKeys = [];
+    foreach ($fieldNames as $fieldName) {
+        $targetKeys[syncro_normalize_match_text($fieldName)] = $fieldName;
+    }
+
+    $customFieldPaths = [];
+    $assetCustomFieldPaths = [];
+    $fieldEntries = [];
+    $optionKeys = ['options', 'option_definition', 'option_definitions', 'optionDefinition', 'optionDefinitions', 'choices', 'answers', 'dropdown_options', 'dropdownOptions', 'field_options', 'fieldOptions', 'possible_values', 'possibleValues', 'values', 'selections'];
+    $typeKeys = ['type', 'field_type', 'fieldType', 'input_type', 'inputType', 'kind', 'field_kind', 'fieldKind'];
+
+    $walk = function (mixed $node, string $path) use (&$walk, &$customFieldPaths, &$assetCustomFieldPaths, &$fieldEntries, $targetKeys, $optionKeys, $typeKeys): void {
+        if (!is_array($node)) {
+            return;
+        }
+
+        if (syncro_production_move_metadata_path_matches($path, ['custom_field', 'custom fields', 'asset_type_field', 'asset type field'])) {
+            $customFieldPaths[$path] = true;
+        }
+        if (syncro_production_move_metadata_path_matches($path, ['asset_custom_field', 'asset custom field', 'asset_type_field', 'asset type field']) || (syncro_production_move_metadata_path_matches($path, ['asset']) && syncro_production_move_metadata_path_matches($path, ['custom_field', 'field']))) {
+            $assetCustomFieldPaths[$path] = true;
+        }
+
+        $candidateValues = [];
+        foreach (['name', 'field_name', 'fieldName', 'label', 'title', 'display_name', 'displayName', 'key'] as $key) {
+            if (array_key_exists($key, $node) && !is_array($node[$key])) {
+                $candidateValues[$key] = syncro_production_move_normalize_text($node[$key]);
+            }
+        }
+
+        $matchedCanonical = '';
+        foreach ($candidateValues as $candidateValue) {
+            $candidateKey = syncro_normalize_match_text($candidateValue);
+            if (isset($targetKeys[$candidateKey])) {
+                $matchedCanonical = $targetKeys[$candidateKey];
+                break;
+            }
+        }
+
+        if ($matchedCanonical !== '') {
+            $options = [];
+            $optionSources = [];
+            foreach ($optionKeys as $optionKey) {
+                if (isset($node[$optionKey]) && is_array($node[$optionKey])) {
+                    $optionPath = syncro_production_move_metadata_path($path, $optionKey);
+                    $optionSources[] = $optionPath;
+                    foreach (syncro_production_move_metadata_option_rows($node[$optionKey]) as $optionRow) {
+                        $optionRow['metadata_path'] = str_replace('$', $optionPath, (string)$optionRow['metadata_path']);
+                        $options[] = $optionRow;
+                    }
+                }
+            }
+
+            $optionMap = [];
+            foreach ($options as $option) {
+                $key = (string)($option['id'] ?? '') . '|' . syncro_normalize_match_text((string)($option['label'] ?? ''));
+                $optionMap[$key] = $option;
+            }
+
+            $fieldEntries[$matchedCanonical][] = [
+                'field_name' => isset($candidateValues['field_name']) || isset($candidateValues['fieldName']) || isset($candidateValues['name']) ? syncro_production_move_mask_secrets($candidateValues['field_name'] ?? $candidateValues['fieldName'] ?? $candidateValues['name']) : null,
+                'key' => isset($candidateValues['key']) ? syncro_production_move_mask_secrets($candidateValues['key']) : null,
+                'display_name' => syncro_production_move_metadata_field_label($node) !== '' ? syncro_production_move_mask_secrets(syncro_production_move_metadata_field_label($node)) : null,
+                'field_type' => syncro_production_move_metadata_scalar($node, $typeKeys) !== '' ? syncro_production_move_mask_secrets(syncro_production_move_metadata_scalar($node, $typeKeys)) : null,
+                'option_list_present' => $optionSources !== [],
+                'options' => array_values($optionMap),
+                'raw_metadata_path' => $path,
+                'option_metadata_paths' => $optionSources,
+                'source' => 'GET /settings',
+            ];
+        }
+
+        foreach ($node as $key => $child) {
+            $walk($child, syncro_production_move_metadata_path($path, $key));
+        }
+    };
+
+    $walk($settingsData, '$');
+
+    $definitionMap = syncro_production_move_collect_option_definitions($settingsData);
+    $fields = [];
+    foreach ($fieldNames as $fieldName) {
+        $fieldKey = syncro_normalize_match_text($fieldName);
+        $resolverOptions = [];
+        foreach (($definitionMap[$fieldKey] ?? []) as $id => $label) {
+            $resolverOptions[] = ['id' => (string)$id, 'label' => syncro_production_move_mask_secrets((string)$label)];
+        }
+        $fields[] = [
+            'target_field' => $fieldName,
+            'found_in_settings' => !empty($fieldEntries[$fieldName]),
+            'metadata_entries' => $fieldEntries[$fieldName] ?? [],
+            'resolver_option_definition_options' => $resolverOptions,
+            'resolver_has_option_ids' => $resolverOptions !== [],
+        ];
+    }
+
+    return [
+        'source' => 'GET /settings',
+        'contains_custom_field_definitions' => $customFieldPaths !== [] || $fieldEntries !== [],
+        'custom_field_definition_paths' => array_slice(array_keys($customFieldPaths), 0, 50),
+        'asset_custom_fields_present' => $assetCustomFieldPaths !== [],
+        'asset_custom_field_paths' => array_slice(array_keys($assetCustomFieldPaths), 0, 50),
+        'fields' => $fields,
+        'existing_repo_syncro_read_helpers' => [
+            [
+                'helper' => 'syncro_production_move_custom_field_option_definitions',
+                'endpoint' => 'GET /settings',
+                'may_expose_definitions_or_options' => true,
+                'note' => 'Current production mover metadata resolver; this diagnostic inspects the same response shape.',
+            ],
+            [
+                'helper' => 'syncro_production_move_fetch_asset',
+                'endpoint' => 'GET /customer_assets/{asset_id}',
+                'may_expose_definitions_or_options' => false,
+                'note' => 'Existing asset reader may expose assigned asset custom-field values/display values, not reusable dropdown option definitions.',
+            ],
+            [
+                'helper' => 'syncro_production_move_find_ready_assets',
+                'endpoint' => 'GET /customer_assets',
+                'may_expose_definitions_or_options' => false,
+                'note' => 'Existing asset list reader may expose assigned asset custom-field values/display values, not reusable dropdown option definitions.',
+            ],
+        ],
+    ];
+}
+
+function syncro_production_move_live_settings_metadata_diagnostic(): array
+{
+    $response = syncro_api_request('GET', 'settings');
+    if (empty($response['ok'])) {
+        return [
+            'ok' => false,
+            'source' => 'GET /settings',
+            'errors' => array_map('syncro_production_move_mask_secrets', (array)($response['errors'] ?? ['Unable to fetch Syncro settings.'])),
+            'status' => $response['status'] ?? null,
+            'contains_custom_field_definitions' => false,
+            'asset_custom_fields_present' => false,
+        ];
+    }
+
+    $diagnostic = syncro_production_move_settings_metadata_diagnostic((array)($response['data'] ?? []));
+    $diagnostic['ok'] = true;
+    $diagnostic['http_status'] = $response['status'] ?? null;
+    return $diagnostic;
+}
+
 function syncro_production_move_resolve_custom_field_value(string $fieldName, mixed $rawValue, ?array $optionDefinitions = null): array
 {
     $value = syncro_production_move_custom_field_value($rawValue);
