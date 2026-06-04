@@ -81,6 +81,84 @@ function syncro_production_move_response_errors(array $response, string $fallbac
     return syncro_production_move_mask_secrets($message);
 }
 
+
+function syncro_production_move_redacted_value(mixed $value): mixed
+{
+    if (is_string($value)) {
+        return syncro_production_move_mask_secrets($value);
+    }
+    if (!is_array($value)) {
+        return $value;
+    }
+
+    $redacted = [];
+    foreach ($value as $key => $item) {
+        $keyText = is_string($key) ? $key : (string)$key;
+        if (preg_match('/api[_-]?key|authorization|token|secret|password/i', $keyText)) {
+            $redacted[$key] = '[redacted]';
+            continue;
+        }
+        $redacted[$key] = syncro_production_move_redacted_value($item);
+    }
+    return $redacted;
+}
+
+function syncro_production_move_response_excerpt(array $response, int $limit = 700): string
+{
+    $parts = [];
+    foreach ((array)($response['errors'] ?? []) as $error) {
+        $text = trim((string)$error);
+        if ($text !== '') {
+            $parts[] = $text;
+        }
+    }
+    if (!empty($response['message'])) {
+        $parts[] = (string)$response['message'];
+    }
+    if (!empty($response['raw_body']) && is_string($response['raw_body'])) {
+        $parts[] = $response['raw_body'];
+    } elseif (array_key_exists('data', $response)) {
+        $json = json_encode(syncro_production_move_redacted_value($response['data']), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if (is_string($json) && $json !== 'null') {
+            $parts[] = $json;
+        }
+    }
+
+    $excerpt = syncro_production_move_mask_secrets(trim(implode(' ', array_filter($parts))));
+    if ($excerpt === '') {
+        $excerpt = 'No Syncro response body was returned.';
+    }
+    if (mb_strlen($excerpt, 'UTF-8') > $limit) {
+        $excerpt = mb_substr($excerpt, 0, $limit, 'UTF-8') . '…';
+    }
+    return $excerpt;
+}
+
+function syncro_production_move_api_path(string $path): string
+{
+    return '/api/v1/' . ltrim($path, '/');
+}
+
+function syncro_production_move_api_request(string $method, string $path, array $query = [], ?array $payload = null): array
+{
+    $handler = $GLOBALS['syncro_production_move_api_request_handler'] ?? null;
+    if (is_callable($handler)) {
+        return (array)$handler(strtoupper($method), ltrim($path, '/'), $query, $payload);
+    }
+    return syncro_api_request($method, $path, $query, $payload);
+}
+
+function syncro_production_move_request_diagnostic(string $method, string $path, ?array $payload, array $response): array
+{
+    return [
+        'method' => strtoupper($method),
+        'path' => syncro_production_move_api_path($path),
+        'http_status' => $response['status'] ?? null,
+        'response_excerpt' => syncro_production_move_response_excerpt($response),
+        'payload' => $payload === null ? null : syncro_production_move_redacted_value($payload),
+    ];
+}
+
 function syncro_production_move_now_utc(): string
 {
     return gmdate('Y-m-d\TH:i:s\Z');
@@ -304,7 +382,7 @@ function syncro_production_move_custom_field_option_definitions(): array
         return $definitions;
     }
 
-    $settings = syncro_api_request('GET', 'settings');
+    $settings = syncro_production_move_api_request('GET', 'settings');
     if (empty($settings['ok'])) {
         syncro_debug_log('production_mover_custom_field_metadata_unavailable', [
             'errors' => array_map('syncro_production_move_mask_secrets', (array)($settings['errors'] ?? [])),
@@ -563,7 +641,7 @@ function syncro_production_move_settings_metadata_diagnostic(array $settingsData
 
 function syncro_production_move_live_settings_metadata_diagnostic(): array
 {
-    $response = syncro_api_request('GET', 'settings');
+    $response = syncro_production_move_api_request('GET', 'settings');
     if (empty($response['ok'])) {
         return [
             'ok' => false,
@@ -804,7 +882,7 @@ function syncro_production_move_fetch_asset(int $customerId, int $assetId): arra
         return ['ok' => false, 'errors' => ['Customer ID and asset ID are required.']];
     }
 
-    $response = syncro_api_request('GET', 'customer_assets/' . $assetId, ['customer_id' => $customerId]);
+    $response = syncro_production_move_api_request('GET', 'customer_assets/' . $assetId, ['customer_id' => $customerId]);
     if (!empty($response['ok'])) {
         $asset = syncro_production_move_extract_asset($response);
         if ($asset) {
@@ -824,7 +902,7 @@ function syncro_production_move_find_ready_assets(int $customerId): array
     if ($customerId <= 0) {
         return ['ok' => false, 'errors' => ['Customer ID is required to find ready assets.'], 'assets' => []];
     }
-    $response = syncro_api_request('GET', 'customer_assets', ['customer_id' => $customerId]);
+    $response = syncro_production_move_api_request('GET', 'customer_assets', ['customer_id' => $customerId]);
     if (empty($response['ok'])) {
         return ['ok' => false, 'errors' => [syncro_production_move_response_errors($response, 'Unable to list Syncro assets.')], 'assets' => []];
     }
@@ -837,53 +915,6 @@ function syncro_production_move_find_ready_assets(int $customerId): array
         }
     }
     return ['ok' => true, 'assets' => $ready];
-}
-
-
-function syncro_production_move_execution_diagnostics(string $method, string $requestPath, array $response, array $payload): array
-{
-    $request = is_array($response['request'] ?? null) ? (array)$response['request'] : [];
-    $diagnostics = [
-        'request_method' => strtoupper((string)($request['method'] ?? $method)),
-        'request_path' => syncro_production_move_mask_secrets((string)($request['path'] ?? $requestPath)),
-        'http_status' => $response['status'] ?? null,
-        'response_excerpt' => syncro_production_move_response_excerpt($response),
-        'policy_assignment_payload' => $payload,
-    ];
-
-    return $diagnostics;
-}
-
-function syncro_production_move_response_excerpt(array $response): string
-{
-    if (isset($response['response_excerpt'])) {
-        return syncro_production_move_mask_secrets((string)$response['response_excerpt']);
-    }
-
-    if (isset($response['raw_body'])) {
-        $text = syncro_production_move_mask_secrets((string)$response['raw_body']);
-    } elseif (isset($response['data'])) {
-        $encoded = json_encode($response['data'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-        $text = syncro_production_move_mask_secrets(is_string($encoded) ? $encoded : '');
-    } else {
-        $text = implode(' ', array_map('strval', (array)($response['errors'] ?? $response['message'] ?? [])));
-        $text = syncro_production_move_mask_secrets($text);
-    }
-
-    $text = preg_replace('/\s+/u', ' ', $text) ?? $text;
-    $text = trim($text);
-    if ($text === '') {
-        return '';
-    }
-    if (mb_strlen($text, 'UTF-8') <= 500) {
-        return $text;
-    }
-    return mb_substr($text, 0, 500, 'UTF-8') . '…';
-}
-
-function syncro_production_move_policy_assignment_request_path(int $customerId): string
-{
-    return 'customers/' . $customerId . '/policy_assignments';
 }
 
 function syncro_production_move_policy_assignment_payload(int $assetId, int $targetFolderId): array
@@ -939,7 +970,7 @@ function syncro_production_move_update_asset_fields(int $assetId, array $fields)
     }
 
     $payload = ['properties' => $fields];
-    return syncro_api_request('PUT', 'customer_assets/' . $assetId, [], $payload);
+    return syncro_production_move_api_request('PUT', 'customer_assets/' . $assetId, [], $payload);
 }
 
 function syncro_production_move_write_result(int $assetId, string $message, bool $completed): array
@@ -957,7 +988,7 @@ function syncro_production_move_update_ticket(?int $ticketId, string $message, b
         return ['ok' => true, 'skipped' => true, 'message' => 'No ready ticket ID supplied.'];
     }
 
-    $comment = syncro_api_request('POST', 'tickets/' . $ticketId . '/comments', [], [
+    $comment = syncro_production_move_api_request('POST', 'tickets/' . $ticketId . '/comments', [], [
         'comment' => [
             'body' => syncro_production_move_mask_secrets($message),
             'hidden' => false,
@@ -965,13 +996,35 @@ function syncro_production_move_update_ticket(?int $ticketId, string $message, b
         ],
     ]);
     if ($closeTicket && !empty($comment['ok'])) {
-        $close = syncro_api_request('PUT', 'tickets/' . $ticketId, [], ['ticket' => ['status' => 'Resolved']]);
+        $close = syncro_production_move_api_request('PUT', 'tickets/' . $ticketId, [], ['ticket' => ['status' => 'Resolved']]);
         if (empty($close['ok'])) {
             return ['ok' => false, 'errors' => [syncro_production_move_response_errors($close, 'Move succeeded, but ticket close failed.')], 'comment' => $comment, 'close' => $close];
         }
         return ['ok' => true, 'comment' => $comment, 'close' => $close];
     }
     return !empty($comment['ok']) ? ['ok' => true, 'comment' => $comment] : ['ok' => false, 'errors' => [syncro_production_move_response_errors($comment, 'Move result ticket comment failed.')], 'comment' => $comment];
+}
+
+function syncro_production_move_asset_update_payload(int $targetFolderId): array
+{
+    return ['policy_folder_id' => $targetFolderId];
+}
+
+function syncro_production_move_update_asset_policy_folder(int $assetId, int $targetFolderId): array
+{
+    $path = 'customer_assets/' . $assetId;
+    $payload = syncro_production_move_asset_update_payload($targetFolderId);
+    $response = syncro_production_move_api_request('PUT', $path, [], $payload);
+    return [
+        'ok' => !empty($response['ok']) && (int)($response['status'] ?? 0) === 200,
+        'response' => $response,
+        'diagnostic' => syncro_production_move_request_diagnostic('PUT', $path, $payload, $response),
+    ];
+}
+
+function syncro_production_move_verified_folder_id(array $asset): ?int
+{
+    return syncro_production_move_asset_folder_id($asset);
 }
 
 function syncro_production_move_asset(int $customerId, int $assetId, ?int $readyTicketId = null, bool $dryRun = true, bool $closeTicket = false, ?array $assetOverride = null): array
@@ -1002,7 +1055,7 @@ function syncro_production_move_asset(int $customerId, int $assetId, ?int $ready
         $message = 'Already in target folder.';
         if (!$dryRun) {
             $write = syncro_production_move_write_result($assetId, $message, true);
-            $ticket = syncro_production_move_update_ticket($readyTicketId, $message, $closeTicket);
+            $ticket = syncro_production_move_update_ticket($readyTicketId, $message, false);
             $warnings = [];
             if (empty($write['ok'])) {
                 $warnings[] = syncro_production_move_response_errors($write, 'Already-in-target result write-back failed.');
@@ -1016,17 +1069,33 @@ function syncro_production_move_asset(int $customerId, int $assetId, ?int $ready
     }
 
     $payload = syncro_production_move_policy_assignment_payload($assetId, $targetFolderId);
+    $assetUpdatePayload = syncro_production_move_asset_update_payload($targetFolderId);
     $targetLabel = syncro_production_move_target_label((string)$validation['target'], $targetFolderId);
     $message = 'Ready to move ' . $assetName . ' to ' . $targetLabel . '.';
+    $browserPayloadReference = [
+        'label' => 'Browser/UI policy assignment payload reference only; not used for the production mover write path.',
+        'method' => 'PATCH',
+        'path' => syncro_production_move_api_path('customers/' . $customerId . '/policy_assignments'),
+        'payload' => $payload,
+    ];
     if ($dryRun) {
-        return ['ok' => true, 'dry_run' => true, 'message' => $message, 'validation' => $validation, 'payload' => $payload, 'asset' => $asset];
+        return [
+            'ok' => true,
+            'dry_run' => true,
+            'message' => $message,
+            'validation' => $validation,
+            'payload' => $payload,
+            'asset_update_payload' => $assetUpdatePayload,
+            'browser_payload_reference' => $browserPayloadReference,
+            'asset' => $asset,
+        ];
     }
 
-    $moveMethod = 'PATCH';
-    $movePath = syncro_production_move_policy_assignment_request_path($customerId);
-    $move = syncro_api_request($moveMethod, $movePath, [], $payload);
+    $move = syncro_production_move_update_asset_policy_folder($assetId, $targetFolderId);
+    $moveResponse = (array)($move['response'] ?? []);
+    $moveDiagnostic = (array)($move['diagnostic'] ?? []);
     if (empty($move['ok'])) {
-        if (syncro_production_move_is_staging_blocked_response($move)) {
+        if (syncro_production_move_is_staging_blocked_response($moveResponse)) {
             $guarded = 'Staging execution blocked as expected. Would move ' . $assetName . ' to ' . $targetLabel . '.';
             return [
                 'ok' => true,
@@ -1037,15 +1106,69 @@ function syncro_production_move_asset(int $customerId, int $assetId, ?int $ready
                 'message' => $guarded,
                 'validation' => $validation,
                 'payload' => $payload,
-                'move_diagnostics' => syncro_production_move_execution_diagnostics($moveMethod, $movePath, $move, $payload),
-                'move' => $move,
+                'asset_update_payload' => $assetUpdatePayload,
+                'browser_payload_reference' => $browserPayloadReference,
+                'move' => $moveResponse,
+                'move_diagnostic' => $moveDiagnostic,
                 'warnings' => ['Staging/test guard blocked the Syncro write; no production move was made.'],
             ];
         }
-        $diagnostics = syncro_production_move_execution_diagnostics($moveMethod, $movePath, $move, $payload);
-        $failure = 'Move failed for ' . $assetName . ': ' . syncro_production_move_response_errors($move, 'Syncro policy assignment move failed.');
-        $write = syncro_production_move_write_result($assetId, $failure, false);
-        return ['ok' => false, 'dry_run' => false, 'message' => $failure, 'validation' => $validation, 'payload' => $payload, 'move_diagnostics' => $diagnostics, 'move' => $move, 'write' => $write, 'errors' => [$failure]];
+
+        $status = (int)($moveResponse['status'] ?? 0);
+        $fallback = $status === 422
+            ? 'Syncro rejected the target policy_folder_id as invalid for this asset/customer.'
+            : ($status === 404 ? 'Syncro asset update route returned not found.' : 'Syncro asset policy_folder_id update failed.');
+        $failure = 'Move failed for ' . $assetName . ': ' . syncro_production_move_response_errors($moveResponse, $fallback)
+            . ' Response excerpt: ' . syncro_production_move_response_excerpt($moveResponse);
+        return [
+            'ok' => false,
+            'dry_run' => false,
+            'message' => $failure,
+            'validation' => $validation,
+            'payload' => $payload,
+            'asset_update_payload' => $assetUpdatePayload,
+            'browser_payload_reference' => $browserPayloadReference,
+            'move' => $moveResponse,
+            'move_diagnostic' => $moveDiagnostic,
+            'errors' => [$failure],
+        ];
+    }
+
+    $verify = syncro_production_move_fetch_asset($customerId, $assetId);
+    if (empty($verify['ok'])) {
+        $failure = 'Move verification failed for ' . $assetName . ': ' . implode(' ', (array)($verify['errors'] ?? ['Unable to re-fetch Syncro asset after move.']));
+        return [
+            'ok' => false,
+            'dry_run' => false,
+            'message' => $failure,
+            'validation' => $validation,
+            'payload' => $payload,
+            'asset_update_payload' => $assetUpdatePayload,
+            'browser_payload_reference' => $browserPayloadReference,
+            'move' => $moveResponse,
+            'move_diagnostic' => $moveDiagnostic,
+            'verify' => $verify,
+            'errors' => [$failure],
+        ];
+    }
+
+    $verifiedAsset = (array)($verify['asset'] ?? []);
+    $verifiedFolderId = syncro_production_move_verified_folder_id($verifiedAsset);
+    if ($verifiedFolderId === null || (int)$verifiedFolderId !== $targetFolderId) {
+        $failure = 'Move verification failed for ' . $assetName . ': expected policy_folder_id #' . $targetFolderId . ', found ' . ($verifiedFolderId === null ? 'none' : ('#' . $verifiedFolderId)) . '.';
+        return [
+            'ok' => false,
+            'dry_run' => false,
+            'message' => $failure,
+            'validation' => $validation,
+            'payload' => $payload,
+            'asset_update_payload' => $assetUpdatePayload,
+            'browser_payload_reference' => $browserPayloadReference,
+            'move' => $moveResponse,
+            'move_diagnostic' => $moveDiagnostic,
+            'verify' => $verify,
+            'errors' => [$failure],
+        ];
     }
 
     $success = 'Moved to target folder ' . $targetLabel . '.';
@@ -1053,10 +1176,25 @@ function syncro_production_move_asset(int $customerId, int $assetId, ?int $ready
     $ticket = syncro_production_move_update_ticket($readyTicketId, $success, $closeTicket);
     $warnings = [];
     if (empty($write['ok'])) {
-        $warnings[] = syncro_production_move_response_errors($write, 'Move succeeded, but result write-back failed.');
+        $warnings[] = syncro_production_move_response_errors($write, 'Move succeeded and verified, but result write-back failed.');
     }
     if (empty($ticket['ok'])) {
-        $warnings[] = implode(' ', (array)($ticket['errors'] ?? ['Move succeeded, but ticket update failed.']));
+        $warnings[] = implode(' ', (array)($ticket['errors'] ?? ['Move succeeded and verified, but ticket update failed.']));
     }
-    return ['ok' => true, 'dry_run' => false, 'message' => $success, 'validation' => $validation, 'payload' => $payload, 'move' => $move, 'write' => $write, 'ticket' => $ticket, 'warnings' => $warnings];
+    return [
+        'ok' => true,
+        'dry_run' => false,
+        'message' => $success,
+        'validation' => $validation,
+        'payload' => $payload,
+        'asset_update_payload' => $assetUpdatePayload,
+        'browser_payload_reference' => $browserPayloadReference,
+        'move' => $moveResponse,
+        'move_diagnostic' => $moveDiagnostic,
+        'verify' => $verify,
+        'verified_policy_folder_id' => $verifiedFolderId,
+        'write' => $write,
+        'ticket' => $ticket,
+        'warnings' => $warnings,
+    ];
 }

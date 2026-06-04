@@ -85,7 +85,7 @@ page_header('Syncro Production Mover', 'admin');
       <label style="display:grid;gap:6px;"><span style="font-size:13px;opacity:.78;">Ready ticket ID (optional)</span><input type="text" name="ticket_id" value="<?= htmlspecialchars($ticketIdRaw) ?>" placeholder="#4211" style="padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.18);color:#fff;"></label>
       <input type="hidden" name="dry_run" value="0">
       <label style="display:flex;gap:8px;align-items:center;"><input type="checkbox" name="dry_run" value="1" <?= $dryRun ? 'checked' : '' ?>> <span>Dry run / preview only</span></label>
-      <label style="display:flex;gap:8px;align-items:center;"><input type="checkbox" name="close_ticket" value="1" <?= $closeTicket ? 'checked' : '' ?>> <span>Close ready ticket after successful move/no-op</span></label>
+      <label style="display:flex;gap:8px;align-items:center;"><input type="checkbox" name="close_ticket" value="1" <?= $closeTicket ? 'checked' : '' ?>> <span>Close ready ticket after successful verified move</span></label>
       <label style="display:grid;gap:6px;"><span style="font-size:13px;opacity:.78;">Execute confirmation</span><input type="text" name="confirm_phrase" value="" placeholder="MOVE TO PRODUCTION" autocomplete="off" style="padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.18);color:#fff;"></label>
       <button type="submit" class="btn btn-primary" style="width:auto;padding:12px 16px;">Preview or move asset</button>
       <div style="font-size:12px;opacity:.68;line-height:1.55;">Requirements: MMIT Onboarding Status = READY, MMIT Ready To Move = Yes, and MMIT Production Folder Target = Production/Workstations or Production/Servers.</div>
@@ -145,14 +145,19 @@ page_header('Syncro Production Mover', 'admin');
       <div style="font-size:12px;opacity:.72;margin-bottom:8px;">Secret-masked Syncro custom field structure, resolved display values, and resolution source. Numeric MMIT select_box values may resolve through the controlled configured option map when Syncro metadata does not expose option lists.</div>
       <pre style="white-space:pre-wrap;overflow:auto;padding:12px;border-radius:12px;background:rgba(0,0,0,.22);border:1px solid rgba(255,255,255,.12);"><?= htmlspecialchars(json_encode($result['validation']['custom_field_debug'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) ?: '') ?></pre>
     <?php endif; ?>
-    <?php if (!empty($result['move_diagnostics'])): ?>
-      <h3 style="margin:16px 0 8px;font-size:15px;">Move execution diagnostics</h3>
-      <div style="font-size:12px;opacity:.72;margin-bottom:8px;">Safe, secret-masked Syncro write diagnostics. The request path reflects the OPS API integration route, not a browser session route.</div>
-      <pre style="white-space:pre-wrap;overflow:auto;padding:12px;border-radius:12px;background:rgba(0,0,0,.22);border:1px solid rgba(255,255,255,.12);"><?= htmlspecialchars(json_encode($result['move_diagnostics'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) ?: '') ?></pre>
+    <?php if (!empty($result['move_diagnostic'])): ?>
+      <h3 style="margin:16px 0 8px;font-size:15px;">Asset update move diagnostics</h3>
+      <div style="font-size:12px;opacity:.72;margin-bottom:8px;">Supported public API route used by the production mover: PUT /api/v1/customer_assets/{asset_id} with policy_folder_id.</div>
+      <pre style="white-space:pre-wrap;overflow:auto;padding:12px;border-radius:12px;background:rgba(0,0,0,.22);border:1px solid rgba(255,255,255,.12);"><?= htmlspecialchars(json_encode($result['move_diagnostic'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '') ?></pre>
     <?php endif; ?>
-    <?php if (!empty($result['payload'])): ?>
-      <h3 style="margin:16px 0 8px;font-size:15px;">Policy assignment payload</h3>
-      <pre style="white-space:pre-wrap;overflow:auto;padding:12px;border-radius:12px;background:rgba(0,0,0,.22);border:1px solid rgba(255,255,255,.12);"><?= htmlspecialchars(json_encode($result['payload'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) ?: '') ?></pre>
+    <?php if (!empty($result['browser_payload_reference'])): ?>
+      <h3 style="margin:16px 0 8px;font-size:15px;">Browser/UI payload reference only</h3>
+      <div style="font-size:12px;opacity:.72;margin-bottom:8px;"><?= htmlspecialchars((string)($result['browser_payload_reference']['label'] ?? 'Historical policy assignment payload reference only; not used for the production mover write path.')) ?></div>
+      <pre style="white-space:pre-wrap;overflow:auto;padding:12px;border-radius:12px;background:rgba(0,0,0,.22);border:1px solid rgba(255,255,255,.12);"><?= htmlspecialchars(json_encode($result['browser_payload_reference'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '') ?></pre>
+    <?php elseif (!empty($result['payload'])): ?>
+      <h3 style="margin:16px 0 8px;font-size:15px;">Browser/UI payload reference only</h3>
+      <div style="font-size:12px;opacity:.72;margin-bottom:8px;">Historical policy assignment payload reference only; not used for the production mover write path.</div>
+      <pre style="white-space:pre-wrap;overflow:auto;padding:12px;border-radius:12px;background:rgba(0,0,0,.22);border:1px solid rgba(255,255,255,.12);"><?= htmlspecialchars(json_encode($result['payload'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '') ?></pre>
     <?php endif; ?>
   </section>
 <?php endif; ?>
