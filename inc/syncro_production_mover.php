@@ -157,7 +157,7 @@ function syncro_production_move_option_label_from_row(mixed $row): string
     if (!is_array($row)) {
         return '';
     }
-    foreach (['label', 'name', 'display_value', 'displayValue', 'value_text', 'valueText', 'text', 'title', 'value'] as $key) {
+    foreach (['label', 'name', 'display_name', 'displayName', 'display_value', 'displayValue', 'value_text', 'valueText', 'text', 'title', 'value'] as $key) {
         if (array_key_exists($key, $row) && !is_array($row[$key])) {
             $label = syncro_production_move_normalize_text($row[$key]);
             if ($label !== '' && !syncro_production_move_is_numeric_option_value($label)) {
@@ -176,7 +176,7 @@ function syncro_production_move_option_id_from_row(mixed $key, mixed $row): stri
     if (!is_array($row)) {
         return '';
     }
-    foreach (['id', 'option_id', 'optionId', 'field_option_id', 'fieldOptionId', 'answer_id', 'answerId', 'value'] as $idKey) {
+    foreach (['id', 'key', 'option_id', 'optionId', 'field_option_id', 'fieldOptionId', 'answer_id', 'answerId', 'value'] as $idKey) {
         if (array_key_exists($idKey, $row) && syncro_production_move_is_numeric_option_value($row[$idKey])) {
             return syncro_production_move_normalize_text($row[$idKey]);
         }
@@ -213,11 +213,23 @@ function syncro_production_move_add_definition_options(array &$definitions, stri
     if ($fieldKey === '' || !is_array($options)) {
         return;
     }
+    $rootOptionId = syncro_production_move_option_id_from_row('', $options);
+    $rootLabel = syncro_production_move_option_label_from_row($options);
+    if ($rootOptionId !== '' && $rootLabel !== '' && syncro_normalize_match_text($rootLabel) !== $fieldKey) {
+        $definitions[$fieldKey][$rootOptionId] = $rootLabel;
+    }
     foreach ($options as $key => $row) {
         $optionId = syncro_production_move_option_id_from_row($key, $row);
         $label = syncro_production_move_option_label_from_row($row);
         if ($optionId !== '' && $label !== '') {
             $definitions[$fieldKey][$optionId] = $label;
+        }
+        if (is_array($row)) {
+            foreach ($row as $child) {
+                if (is_array($child)) {
+                    syncro_production_move_add_definition_options($definitions, $fieldName, $child);
+                }
+            }
         }
     }
 }
@@ -238,7 +250,7 @@ function syncro_production_move_collect_option_definitions(mixed $data): array
         }
 
         if ($fieldName !== '') {
-            foreach (['options', 'choices', 'answers', 'dropdown_options', 'dropdownOptions', 'field_options', 'fieldOptions', 'possible_values', 'possibleValues', 'values', 'selections'] as $optionsKey) {
+            foreach (['options', 'option_definition', 'option_definitions', 'optionDefinition', 'optionDefinitions', 'choices', 'answers', 'dropdown_options', 'dropdownOptions', 'field_options', 'fieldOptions', 'possible_values', 'possibleValues', 'values', 'selections'] as $optionsKey) {
                 if (isset($node[$optionsKey]) && is_array($node[$optionsKey])) {
                     syncro_production_move_add_definition_options($definitions, $fieldName, $node[$optionsKey]);
                 }
@@ -579,6 +591,29 @@ function syncro_production_move_policy_assignment_payload(int $assetId, int $tar
     ];
 }
 
+
+function syncro_production_move_is_staging_blocked_response(array $response): bool
+{
+    if (!empty($response['staging_blocked'])) {
+        return true;
+    }
+    if (strtoupper((string)($response['status'] ?? '')) === 'STAGING_BLOCKED') {
+        return true;
+    }
+    foreach (array_merge((array)($response['errors'] ?? []), [(string)($response['message'] ?? '')]) as $message) {
+        if (stripos((string)$message, 'Staging mode: Syncro write skipped') !== false) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function syncro_production_move_target_label(string $target, int $targetFolderId): string
+{
+    $target = syncro_production_move_normalize_text($target);
+    return ($target !== '' ? $target : 'target folder') . ' (#' . $targetFolderId . ')';
+}
+
 function syncro_production_move_update_asset_fields(int $assetId, array $fields): array
 {
     if ($assetId <= 0) {
@@ -667,19 +702,35 @@ function syncro_production_move_asset(int $customerId, int $assetId, ?int $ready
     }
 
     $payload = syncro_production_move_policy_assignment_payload($assetId, $targetFolderId);
-    $message = 'Ready to move ' . $assetName . ' to ' . $validation['target'] . ' (#' . $targetFolderId . ').';
+    $targetLabel = syncro_production_move_target_label((string)$validation['target'], $targetFolderId);
+    $message = 'Ready to move ' . $assetName . ' to ' . $targetLabel . '.';
     if ($dryRun) {
         return ['ok' => true, 'dry_run' => true, 'message' => $message, 'validation' => $validation, 'payload' => $payload, 'asset' => $asset];
     }
 
     $move = syncro_api_request('PATCH', 'customers/' . $customerId . '/policy_assignments', [], $payload);
     if (empty($move['ok'])) {
+        if (syncro_production_move_is_staging_blocked_response($move)) {
+            $guarded = 'Staging execution blocked as expected. Would move ' . $assetName . ' to ' . $targetLabel . '.';
+            return [
+                'ok' => true,
+                'dry_run' => false,
+                'staging_guarded' => true,
+                'staging_blocked' => true,
+                'production_move_succeeded' => false,
+                'message' => $guarded,
+                'validation' => $validation,
+                'payload' => $payload,
+                'move' => $move,
+                'warnings' => ['Staging/test guard blocked the Syncro write; no production move was made.'],
+            ];
+        }
         $failure = 'Move failed for ' . $assetName . ': ' . syncro_production_move_response_errors($move, 'Syncro policy assignment move failed.');
         $write = syncro_production_move_write_result($assetId, $failure, false);
         return ['ok' => false, 'dry_run' => false, 'message' => $failure, 'validation' => $validation, 'payload' => $payload, 'move' => $move, 'write' => $write, 'errors' => [$failure]];
     }
 
-    $success = 'Moved to target folder ' . $validation['target'] . ' (#' . $targetFolderId . ').';
+    $success = 'Moved to target folder ' . $targetLabel . '.';
     $write = syncro_production_move_write_result($assetId, $success, true);
     $ticket = syncro_production_move_update_ticket($readyTicketId, $success, $closeTicket);
     $warnings = [];
