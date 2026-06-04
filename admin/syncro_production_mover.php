@@ -142,7 +142,7 @@ page_header('Syncro Production Mover', 'admin');
     <?php endif; ?>
     <?php if (!empty($result['validation']['custom_field_debug'])): ?>
       <h3 style="margin:16px 0 8px;font-size:15px;">Custom field parse debug</h3>
-      <div style="font-size:12px;opacity:.72;margin-bottom:8px;">Secret-masked Syncro custom field structure, resolved display values, and resolution source.</div>
+      <div style="font-size:12px;opacity:.72;margin-bottom:8px;">Secret-masked Syncro custom field structure, resolved display values, and resolution source. Numeric MMIT select_box values may resolve through the controlled configured option map when Syncro metadata does not expose option lists.</div>
       <pre style="white-space:pre-wrap;overflow:auto;padding:12px;border-radius:12px;background:rgba(0,0,0,.22);border:1px solid rgba(255,255,255,.12);"><?= htmlspecialchars(json_encode($result['validation']['custom_field_debug'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) ?: '') ?></pre>
     <?php endif; ?>
     <?php if (!empty($result['payload'])): ?>

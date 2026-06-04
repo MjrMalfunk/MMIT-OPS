@@ -133,12 +133,14 @@ function syncro_production_move_is_numeric_option_value(mixed $value): bool
     return $text !== '' && preg_match('/^\d+$/', $text) === 1;
 }
 
-function syncro_production_move_temporary_option_fallback_map(): array
+function syncro_production_move_mmit_select_option_map(): array
 {
-    // Temporary safety net for the live MMIT dropdown option IDs observed before
-    // Syncro /settings metadata resolution was added. Metadata definitions are
-    // always preferred; these entries only run when a numeric option cannot be
-    // resolved from Syncro's custom-field definitions/options.
+    // Syncro returns numeric option IDs for some MMIT select_box asset custom
+    // fields on asset reads. GET /settings exposes the MMIT field definitions,
+    // but current Syncro responses do not include option lists for these known
+    // MMIT fields. OPS therefore maintains this controlled compatibility map
+    // for MMIT-owned Syncro select options. Syncro option definitions remain
+    // preferred above this map whenever future /settings responses expose them.
     return [
         syncro_normalize_match_text(MMIT_SYNCRO_FIELD_ONBOARDING_STATUS) => [
             '135355' => 'READY',
@@ -504,6 +506,7 @@ function syncro_production_move_settings_metadata_diagnostic(array $settingsData
     $walk($settingsData, '$');
 
     $definitionMap = syncro_production_move_collect_option_definitions($settingsData);
+    $configuredOptionMap = syncro_production_move_mmit_select_option_map();
     $fields = [];
     foreach ($fieldNames as $fieldName) {
         $fieldKey = syncro_normalize_match_text($fieldName);
@@ -511,12 +514,18 @@ function syncro_production_move_settings_metadata_diagnostic(array $settingsData
         foreach (($definitionMap[$fieldKey] ?? []) as $id => $label) {
             $resolverOptions[] = ['id' => (string)$id, 'label' => syncro_production_move_mask_secrets((string)$label)];
         }
+        $configuredOptions = [];
+        foreach (($configuredOptionMap[$fieldKey] ?? []) as $id => $label) {
+            $configuredOptions[] = ['id' => (string)$id, 'label' => syncro_production_move_mask_secrets((string)$label)];
+        }
         $fields[] = [
             'target_field' => $fieldName,
             'found_in_settings' => !empty($fieldEntries[$fieldName]),
             'metadata_entries' => $fieldEntries[$fieldName] ?? [],
             'resolver_option_definition_options' => $resolverOptions,
             'resolver_has_option_ids' => $resolverOptions !== [],
+            'configured_option_map_options' => $configuredOptions,
+            'configured_option_map_has_ids' => $configuredOptions !== [],
         ];
     }
 
@@ -527,12 +536,14 @@ function syncro_production_move_settings_metadata_diagnostic(array $settingsData
         'asset_custom_fields_present' => $assetCustomFieldPaths !== [],
         'asset_custom_field_paths' => array_slice(array_keys($assetCustomFieldPaths), 0, 50),
         'fields' => $fields,
+        'resolution_order' => ['direct_or_embedded_display', 'option_definition', 'configured_option_map', 'unresolved_numeric'],
+        'configured_option_map_note' => 'Controlled MMIT Syncro select-option compatibility map for known select_box fields whose asset values are numeric IDs while GET /settings omits option lists.',
         'existing_repo_syncro_read_helpers' => [
             [
                 'helper' => 'syncro_production_move_custom_field_option_definitions',
                 'endpoint' => 'GET /settings',
                 'may_expose_definitions_or_options' => true,
-                'note' => 'Current production mover metadata resolver; this diagnostic inspects the same response shape.',
+                'note' => 'Current production mover metadata resolver; this diagnostic inspects the same response shape before the controlled MMIT select-option compatibility map is used.',
             ],
             [
                 'helper' => 'syncro_production_move_fetch_asset',
@@ -591,9 +602,9 @@ function syncro_production_move_resolve_custom_field_value(string $fieldName, mi
         return ['value' => $definitions[$fieldKey][$optionId], 'source' => 'option_definition'];
     }
 
-    $fallbacks = syncro_production_move_temporary_option_fallback_map();
-    if (isset($fallbacks[$fieldKey][$optionId])) {
-        return ['value' => $fallbacks[$fieldKey][$optionId], 'source' => 'fallback'];
+    $configuredOptionMap = syncro_production_move_mmit_select_option_map();
+    if (isset($configuredOptionMap[$fieldKey][$optionId])) {
+        return ['value' => $configuredOptionMap[$fieldKey][$optionId], 'source' => 'configured_option_map'];
     }
 
     return ['value' => $optionId, 'source' => 'unresolved_numeric'];
