@@ -48,11 +48,15 @@ foreach (['POST', 'PUT', 'PATCH'] as $method) {
         $failed[] = $method . ' not allowed with override';
     }
 }
+$assetUpdate = syncro_update_customer_asset_policy_folder(12561086, 5029833);
+if (($assetUpdate['ok'] ?? null) !== true || ($assetUpdate['path'] ?? null) !== 'customer_assets/12561086' || (int)($assetUpdate['payload']['policy_folder_id'] ?? 0) !== 5029833) {
+    $failed[] = 'controlled asset folder update not allowed with override';
+}
 $delete = syncro_api_request('DELETE', 'customers/123/policy_folders/456');
 if (($delete['status'] ?? null) !== 'STAGING_BLOCKED' || empty($delete['staging_blocked'])) {
     $failed[] = 'DELETE not blocked with override';
 }
-if (($GLOBALS['syncro_api_request_mock_count'] ?? 0) !== 3) {
+if (($GLOBALS['syncro_api_request_mock_count'] ?? 0) !== 4) {
     $failed[] = 'unexpected mock call count ' . (string)($GLOBALS['syncro_api_request_mock_count'] ?? 0);
 }
 if ($failed) { fwrite(STDERR, implode(', ', $failed)); exit(1); }
