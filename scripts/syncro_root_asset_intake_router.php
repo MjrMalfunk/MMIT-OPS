@@ -11,8 +11,8 @@ if (PHP_SAPI !== 'cli') {
 
 function syncro_root_asset_router_usage(): string
 {
-    return "Usage: php scripts/syncro_root_asset_intake_router.php --client-id=123 [--customer-id=456] [--apply]\n"
-        . "       php scripts/syncro_root_asset_intake_router.php --customer-id=456 --root-folder-id=789 --deploy-workstations-folder-id=1 --deploy-servers-folder-id=2 --production-workstations-folder-id=3 --production-servers-folder-id=4 [--apply]\n\n"
+    return "Usage: php scripts/syncro_root_asset_intake_router.php --client-id=123 [--customer-id=456] [--host=ops.example.com] [--apply]\n"
+        . "       php scripts/syncro_root_asset_intake_router.php --customer-id=456 --root-folder-id=789 --deploy-workstations-folder-id=1 --deploy-servers-folder-id=2 --production-workstations-folder-id=3 --production-servers-folder-id=4 [--host=ops.example.com] [--apply]\n\n"
         . "Default mode is dry-run. Apply mode performs PUT /api/v1/customer_assets/{asset_id}; no DELETE calls are used.\n";
 }
 
@@ -24,6 +24,7 @@ $options = getopt('', [
     'deploy-servers-folder-id:',
     'production-workstations-folder-id:',
     'production-servers-folder-id:',
+    'host:',
     'apply',
     'help',
 ]);
@@ -54,6 +55,70 @@ function syncro_root_asset_router_option_int(array $options, string $name): int
     return $value === null ? 0 : (int)$value;
 }
 
+function syncro_root_asset_router_normalize_host(string $host): string
+{
+    $host = strtolower(trim($host));
+    $host = preg_replace('/^https?:\/\//', '', $host) ?? $host;
+    $host = preg_replace('#[\\\\/].*$#', '', $host) ?? $host;
+    $host = preg_replace('/:\d+$/', '', $host) ?? $host;
+    return trim($host, '.');
+}
+
+function syncro_root_asset_router_host_looks_valid(string $host): bool
+{
+    if ($host === '' || strlen($host) > 253 || !str_contains($host, '.')) {
+        return false;
+    }
+    return (bool)preg_match('/^(?=.{1,253}$)(?!-)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/', $host);
+}
+
+function syncro_root_asset_router_infer_host_from_app_root(): string
+{
+    $appRoot = basename(dirname(__DIR__));
+    $host = syncro_root_asset_router_normalize_host($appRoot);
+    return syncro_root_asset_router_host_looks_valid($host) ? $host : '';
+}
+
+function syncro_root_asset_router_resolve_cli_host(array $options): string
+{
+    $explicitHost = syncro_root_asset_router_option_value($options, 'host');
+    if ($explicitHost !== null) {
+        $host = syncro_root_asset_router_normalize_host($explicitHost);
+        return syncro_root_asset_router_host_looks_valid($host) ? $host : '';
+    }
+
+    $envHost = getenv('MMIT_CLI_HTTP_HOST');
+    if (is_string($envHost) && syncro_root_asset_router_host_looks_valid(syncro_root_asset_router_normalize_host($envHost))) {
+        return syncro_root_asset_router_normalize_host($envHost);
+    }
+
+    $inferredHost = syncro_root_asset_router_infer_host_from_app_root();
+    if ($inferredHost !== '') {
+        return $inferredHost;
+    }
+
+    $existingHost = syncro_root_asset_router_normalize_host((string)($_SERVER['HTTP_HOST'] ?? ''));
+    if (syncro_root_asset_router_host_looks_valid($existingHost)) {
+        return $existingHost;
+    }
+
+    return '';
+}
+
+function syncro_root_asset_router_bootstrap_cli_server(array $options): void
+{
+    $host = syncro_root_asset_router_resolve_cli_host($options);
+    if ($host === '') {
+        fwrite(STDERR, "Unable to resolve an HTTP host for CLI bootstrap. Provide --host=ops.example.com or set MMIT_CLI_HTTP_HOST; alternatively run from an app root directory named like a hostname.\n" . syncro_root_asset_router_usage());
+        exit(1);
+    }
+
+    $_SERVER['HTTP_HOST'] = $host;
+    $_SERVER['SERVER_NAME'] = $host;
+    $_SERVER['HTTPS'] = $_SERVER['HTTPS'] ?? 'on';
+    $_SERVER['REQUEST_URI'] = $_SERVER['REQUEST_URI'] ?? '/';
+}
+
 $requiredValueOptions = [
     'client-id',
     'customer-id',
@@ -62,6 +127,7 @@ $requiredValueOptions = [
     'deploy-servers-folder-id',
     'production-workstations-folder-id',
     'production-servers-folder-id',
+    'host',
 ];
 foreach ($requiredValueOptions as $requiredValueOption) {
     if (syncro_root_asset_router_option_value($options, $requiredValueOption) === '') {
@@ -95,6 +161,8 @@ if ($clientId <= 0) {
         exit(1);
     }
 }
+
+syncro_root_asset_router_bootstrap_cli_server($options);
 
 require_once __DIR__ . '/../inc/bootstrap.php';
 require_once __DIR__ . '/../inc/syncro.php';
@@ -151,15 +219,15 @@ if ($rootFolderId <= 0) {
     $rootFolderId = (int)($root['root']['id'] ?? 0);
 }
 
+printf("Syncro root asset intake router V1 starting for customer #%d root folder #%d in %s mode.\n", $syncroCustomerId, $rootFolderId, $dryRun ? 'dry-run' : 'apply');
+if (!$dryRun) {
+    echo syncro_staging_write_status_message() . PHP_EOL;
+}
+
 $listedAssets = syncro_list_customer_assets($syncroCustomerId);
 if (empty($listedAssets['ok'])) {
     fwrite(STDERR, "Unable to list Syncro customer assets: " . implode(' ', (array)($listedAssets['errors'] ?? [])) . "\n");
     exit(1);
-}
-
-printf("Syncro root asset intake router V1 starting for customer #%d root folder #%d in %s mode.\n", $syncroCustomerId, $rootFolderId, $dryRun ? 'dry-run' : 'apply');
-if (!$dryRun) {
-    echo syncro_staging_write_status_message() . PHP_EOL;
 }
 
 $results = [];
