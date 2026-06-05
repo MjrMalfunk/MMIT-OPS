@@ -43,5 +43,23 @@ return [
     'syncro' => [
         'api_key' => 'CHANGE_ME',
         'subdomain' => 'CHANGE_ME',
+        // Staging/testing only. Default false keeps POST/PUT/PATCH/DELETE blocked in OPS staging;
+        // when true, only POST/PUT/PATCH are allowed and DELETE remains blocked.
+        'allow_staging_writes' => false,
+        'policy_assignments' => [
+            // Configure real Syncro policy IDs only; null keeps assignment PENDING_MANUAL.
+            'manage.deploy.workstations' => null,
+            'manage.deploy.servers' => null,
+            'manage.production.workstations' => null,
+            'manage.production.servers' => null,
+            'protect.deploy.workstations' => null,
+            'protect.deploy.servers' => null,
+            'protect.production.workstations' => null,
+            'protect.production.servers' => null,
+            'govern.deploy.workstations' => null,
+            'govern.deploy.servers' => null,
+            'govern.production.workstations' => null,
+            'govern.production.servers' => null,
+        ],
     ],
 ];
