@@ -1595,7 +1595,7 @@ function syncro_sync_client(int $clientId): array
     $client = client_get_by_id($clientId);
     if (!$client) return ['ok' => false, 'errors' => ['Client record not found.']];
 
-    if (syncro_is_staging_mode()) {
+    if (syncro_is_staging_mode() && !syncro_staging_writes_allowed()) {
         $result = syncro_staging_blocked_result();
         $syncroId = !empty($client['syncro_customer_id']) ? (int)$client['syncro_customer_id'] : null;
         syncro_debug_log('staging_client_sync_blocked', ['client_id' => $clientId, 'syncro_customer_id' => $syncroId, 'status' => 'STAGING_BLOCKED']);
