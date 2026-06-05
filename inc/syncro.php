@@ -336,11 +336,23 @@ function syncro_policy_assignment_map(): array
     return $defaults;
 }
 
-function syncro_policy_assignment_missing_ids(): array
+function syncro_policy_id_configured(mixed $policyId): bool
+{
+    $value = trim((string)$policyId);
+    if ($value === '') {
+        return false;
+    }
+    if (is_numeric($value) && (int)$value <= 0) {
+        return false;
+    }
+    return true;
+}
+
+function syncro_policy_assignment_missing_ids(?array $policyMap = null): array
 {
     $missing = [];
-    foreach (syncro_policy_assignment_map() as $key => $policyId) {
-        if ($policyId === null || trim((string)$policyId) === '') {
+    foreach (($policyMap ?? syncro_policy_assignment_map()) as $key => $policyId) {
+        if (!syncro_policy_id_configured($policyId)) {
             $missing[] = $key;
         }
     }
@@ -363,6 +375,188 @@ function syncro_policy_assignment_status_message(): string
         return 'All Syncro policy assignment IDs are configured. Policy assignment writes remain idempotent and only target OPS-managed folders.';
     }
     return 'PENDING_MANUAL: Missing Syncro policy IDs for ' . implode(', ', $missing) . '. No policy assignment writes will be attempted until every required policy ID is configured.';
+}
+
+function syncro_normalize_policy_tier(string $value): ?string
+{
+    $value = strtolower(trim($value));
+    if ($value === '') {
+        return null;
+    }
+    $normalized = preg_replace('/[^a-z0-9]+/', ' ', $value) ?? $value;
+    $normalized = trim($normalized);
+    $compact = str_replace(' ', '', $normalized);
+
+    $map = [
+        'manage' => ['manage', 'manageit', 'essential', 'essentialit', 'mspessential', 'mspess'],
+        'protect' => ['protect', 'protectit', 'secure', 'secureit', 'mspsecure', 'mspsec'],
+        'govern' => ['govern', 'governit', 'complete', 'completeit', 'mspcomplete', 'mspcomp'],
+    ];
+    foreach ($map as $tier => $aliases) {
+        if (in_array($compact, $aliases, true)) {
+            return $tier;
+        }
+    }
+
+    if (preg_match('/\b(manage|essential)\b/', $normalized)) {
+        return 'manage';
+    }
+    if (preg_match('/\b(protect|secure)\b/', $normalized)) {
+        return 'protect';
+    }
+    if (preg_match('/\b(govern|complete)\b/', $normalized)) {
+        return 'govern';
+    }
+
+    return null;
+}
+
+function syncro_resolve_tier_from_contract_row(array $contract): ?string
+{
+    foreach (['bundle_code', 'service_code', 'sla_level', 'contract_name', 'notes'] as $field) {
+        $tier = syncro_normalize_policy_tier((string)($contract[$field] ?? ''));
+        if ($tier !== null) {
+            return $tier;
+        }
+    }
+    return null;
+}
+
+function syncro_resolve_client_policy_tier(array $client): array
+{
+    $clientId = (int)($client['client_id'] ?? 0);
+    if ($clientId > 0 && db_table_exists('contract')) {
+        $contractRows = [];
+        $hasContractDates = db_column_exists('contract', 'start_date') && db_column_exists('contract', 'end_date');
+        $order = $hasContractDates
+            ? "ORDER BY CASE WHEN ctr.status = 'ACTIVE' THEN 0 ELSE 1 END, ctr.start_date DESC, ctr.contract_id DESC"
+            : "ORDER BY CASE WHEN ctr.status = 'ACTIVE' THEN 0 ELSE 1 END, ctr.contract_id DESC";
+        $dateSql = $hasContractDates
+            ? " AND (ctr.start_date IS NULL OR ctr.start_date <= CURDATE()) AND (ctr.end_date IS NULL OR ctr.end_date >= CURDATE())"
+            : '';
+        $stmt = db()->prepare("SELECT ctr.* FROM contract ctr WHERE ctr.client_id = ? AND ctr.status = 'ACTIVE'{$dateSql} {$order} LIMIT 5");
+        $stmt->execute([$clientId]);
+        $contractRows = $stmt->fetchAll();
+
+        foreach ($contractRows as $contract) {
+            $contractId = (int)($contract['contract_id'] ?? 0);
+            $tier = syncro_resolve_tier_from_contract_row($contract);
+            if ($tier !== null) {
+                return ['ok' => true, 'tier' => $tier, 'source' => 'active_contract', 'contract_id' => $contractId];
+            }
+            if ($contractId > 0 && db_table_exists('contract_service')) {
+                $select = 'SELECT cs.service_code, cs.service_name';
+                $join = '';
+                if (db_table_exists('service_bundle') && db_column_exists('contract_service', 'bundle_id')) {
+                    $select .= ', sb.bundle_code';
+                    $join = ' LEFT JOIN service_bundle sb ON sb.bundle_id = cs.bundle_id';
+                }
+                $svcStmt = db()->prepare($select . ' FROM contract_service cs' . $join . ' WHERE cs.contract_id = ? ORDER BY COALESCE(cs.sort_order, 9999), cs.contract_service_id');
+                $svcStmt->execute([$contractId]);
+                foreach ($svcStmt->fetchAll() as $svc) {
+                    foreach (['bundle_code', 'service_code', 'service_name'] as $field) {
+                        $tier = syncro_normalize_policy_tier((string)($svc[$field] ?? ''));
+                        if ($tier !== null) {
+                            return ['ok' => true, 'tier' => $tier, 'source' => 'active_contract_service', 'contract_id' => $contractId];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if ($clientId > 0 && db_table_exists('client_service')) {
+        $select = 'SELECT cs.description';
+        $join = '';
+        if (db_table_exists('service_item') && db_column_exists('client_service', 'item_id')) {
+            $select .= ', si.item_code, si.item_name';
+            $join = ' LEFT JOIN service_item si ON si.item_id = cs.item_id';
+        }
+        $clientServiceOrder = db_column_exists('client_service', 'start_date')
+            ? ' ORDER BY cs.start_date DESC, cs.client_service_id DESC'
+            : ' ORDER BY cs.client_service_id DESC';
+        $stmt = db()->prepare($select . " FROM client_service cs" . $join . " WHERE cs.client_id = ? AND cs.status = 'ACTIVE'" . $clientServiceOrder . " LIMIT 20");
+        $stmt->execute([$clientId]);
+        foreach ($stmt->fetchAll() as $svc) {
+            foreach (['item_code', 'item_name', 'description'] as $field) {
+                $tier = syncro_normalize_policy_tier((string)($svc[$field] ?? ''));
+                if ($tier !== null) {
+                    return ['ok' => true, 'tier' => $tier, 'source' => 'active_client_service'];
+                }
+            }
+        }
+    }
+
+    foreach (['syncro_policy_tier', 'policy_tier', 'service_tier', 'package_tier', 'service_package', 'package_code', 'package', 'msp_package', 'ops_package', 'sla_level'] as $field) {
+        if (array_key_exists($field, $client)) {
+            $tier = syncro_normalize_policy_tier((string)$client[$field]);
+            if ($tier !== null) {
+                return ['ok' => true, 'tier' => $tier, 'source' => 'client.' . $field];
+            }
+        }
+    }
+
+    return [
+        'ok' => false,
+        'status' => 'PENDING_MANUAL',
+        'message' => 'PENDING_MANUAL: Unable to resolve the client Syncro policy tier from active OPS contract/package data. No Syncro policy assignment write was attempted.',
+    ];
+}
+
+function syncro_selected_tier_policy_keys(string $tier): array
+{
+    return [
+        $tier . '.deploy.workstations',
+        $tier . '.deploy.servers',
+        $tier . '.production.workstations',
+        $tier . '.production.servers',
+    ];
+}
+
+function syncro_build_selected_tier_policy_assignment_payload(string $tier, array $folderMap, ?array $policyMap = null): array
+{
+    $tier = syncro_normalize_policy_tier($tier) ?? '';
+    if ($tier === '') {
+        return ['ok' => false, 'status' => 'PENDING_MANUAL', 'message' => 'PENDING_MANUAL: Unknown Syncro policy tier; policy assignment was not attempted.'];
+    }
+
+    $policies = $policyMap ?? syncro_policy_assignment_map();
+    $required = syncro_selected_tier_policy_keys($tier);
+    $missingPolicies = [];
+    foreach ($required as $key) {
+        if (!array_key_exists($key, $policies) || !syncro_policy_id_configured($policies[$key])) {
+            $missingPolicies[] = $key;
+        }
+    }
+    if ($missingPolicies) {
+        return ['ok' => false, 'status' => 'PENDING_MANUAL', 'message' => 'PENDING_MANUAL: Missing Syncro policy IDs for selected ' . $tier . ' tier: ' . implode(', ', $missingPolicies) . '. No policy assignment write was attempted.', 'missing' => $missingPolicies, 'tier' => $tier];
+    }
+
+    $segments = [
+        'deploy.workstations' => 'deploy_workstations_folder_id',
+        'deploy.servers' => 'deploy_servers_folder_id',
+        'production.workstations' => 'production_workstations_folder_id',
+        'production.servers' => 'production_servers_folder_id',
+    ];
+    $assignments = [];
+    $pairs = [];
+    foreach ($segments as $segment => $column) {
+        $folderId = (int)($folderMap[$column] ?? 0);
+        if ($folderId <= 0) {
+            return ['ok' => false, 'status' => 'PENDING_MANUAL', 'message' => 'PENDING_MANUAL: Folder ID missing for ' . $segment . '; policy assignment was not attempted.', 'missing' => [$column], 'tier' => $tier];
+        }
+        $policyKey = $tier . '.' . $segment;
+        $policyId = $policies[$policyKey];
+        $assignments[] = ['policy_folder_id' => $folderId, 'policy_id' => $policyId];
+        $pairs[] = ['segment' => $segment, 'policy_folder_id' => $folderId, 'policy_id' => $policyId];
+    }
+
+    $folderIds = array_map(static fn(array $assignment): int => (int)$assignment['policy_folder_id'], $assignments);
+    if (count($assignments) !== 4 || count(array_unique($folderIds)) !== 4) {
+        return ['ok' => false, 'status' => 'PENDING_MANUAL', 'message' => 'PENDING_MANUAL: Syncro policy assignment payload validation failed; expected exactly four assignments for four unique OPS-managed folders. No policy assignment write was attempted.', 'tier' => $tier, 'assignment_pairs' => $pairs];
+    }
+
+    return ['ok' => true, 'tier' => $tier, 'assignments' => $assignments, 'assignment_pairs' => $pairs];
 }
 
 function syncro_folder_map_table_ready(): bool
@@ -756,47 +950,58 @@ function syncro_ensure_customer_policy_folder_tree(int $syncroCustomerId, array 
     ];
 }
 
-function syncro_assign_policies_to_folder_tree(int $syncroCustomerId, array $folderMap): array
+function syncro_assign_policies_to_folder_tree(int $syncroCustomerId, array $folderMap, $clientContext = null): array
 {
-    $missing = syncro_policy_assignment_missing_ids();
-    if ($missing) {
-        $message = syncro_policy_assignment_status_message();
-        return ['ok' => true, 'skipped' => true, 'status' => 'PENDING_MANUAL', 'message' => $message, 'missing' => $missing];
+    $client = [];
+    if (is_array($clientContext)) {
+        $client = $clientContext;
+    } elseif (is_int($clientContext) && $clientContext > 0) {
+        $client = client_get_by_id($clientContext) ?: [];
     }
 
-    $policies = syncro_policy_assignment_map();
-    $folderBySegment = [
-        'deploy.workstations' => (int)($folderMap['deploy_workstations_folder_id'] ?? 0),
-        'deploy.servers' => (int)($folderMap['deploy_servers_folder_id'] ?? 0),
-        'production.workstations' => (int)($folderMap['production_workstations_folder_id'] ?? 0),
-        'production.servers' => (int)($folderMap['production_servers_folder_id'] ?? 0),
+    $tierResult = $client ? syncro_resolve_client_policy_tier($client) : [
+        'ok' => false,
+        'status' => 'PENDING_MANUAL',
+        'message' => 'PENDING_MANUAL: Client context is required to resolve the Syncro policy tier. No Syncro policy assignment write was attempted.',
     ];
-    foreach ($folderBySegment as $segment => $folderId) {
-        if ($folderId <= 0) {
-            return ['ok' => true, 'skipped' => true, 'status' => 'PENDING_MANUAL', 'message' => 'PENDING_MANUAL: Folder ID missing for ' . $segment . '; policy assignment was not attempted.'];
-        }
+    if (empty($tierResult['ok'])) {
+        return ['ok' => true, 'skipped' => true, 'status' => 'PENDING_MANUAL', 'message' => (string)($tierResult['message'] ?? 'PENDING_MANUAL: Unable to resolve Syncro policy tier.')];
     }
 
-    $assignments = [];
-    foreach ($policies as $key => $policyId) {
-        $parts = explode('.', $key, 2);
-        $segment = $parts[1] ?? '';
-        $assignments[] = ['policy_folder_id' => $folderBySegment[$segment] ?? 0, 'policy_id' => $policyId];
+    $tier = (string)$tierResult['tier'];
+    $payload = syncro_build_selected_tier_policy_assignment_payload($tier, $folderMap);
+    if (empty($payload['ok'])) {
+        return [
+            'ok' => true,
+            'skipped' => true,
+            'status' => 'PENDING_MANUAL',
+            'message' => (string)($payload['message'] ?? 'PENDING_MANUAL: Syncro policy assignment payload could not be built.'),
+            'missing' => $payload['missing'] ?? [],
+            'tier' => $tier,
+        ];
     }
 
+    $assignments = (array)$payload['assignments'];
+    $assignmentPairs = (array)$payload['assignment_pairs'];
     $resp = syncro_api_request('PATCH', 'customers/' . $syncroCustomerId . '/policy_assignments', [], ['assignments' => $assignments]);
     if (empty($resp['ok'])) {
-        $message = 'PENDING_MANUAL: Syncro policy assignment write was not accepted by PATCH /customers/{customer_id}/policy_assignments. Existing unrelated assignments were not removed or overwritten.';
+        $message = 'PENDING_MANUAL: Syncro policy assignment write was not accepted by PATCH /customers/{customer_id}/policy_assignments for the selected ' . $tier . ' tier. Existing unrelated assignments were not removed or overwritten.';
+        $request = is_array($resp['request'] ?? null) ? (array)$resp['request'] : [];
         syncro_debug_log('policy_assignment_pending_manual', [
             'customer_id' => $syncroCustomerId,
-            'assignment_count' => count($assignments),
+            'method' => strtoupper((string)($request['method'] ?? 'PATCH')),
+            'path' => syncro_mask_secrets((string)($request['path'] ?? ('/api/v1/customers/' . $syncroCustomerId . '/policy_assignments'))),
             'status' => $resp['status'] ?? null,
-            'message' => syncro_mask_secrets(implode(' ', array_map('strval', (array)($resp['errors'] ?? [])))),
+            'errors' => array_map(static fn($error): string => syncro_mask_secrets((string)$error), (array)($resp['errors'] ?? [])),
+            'response_excerpt' => syncro_mask_secrets((string)($resp['response_excerpt'] ?? '')),
+            'selected_tier' => $tier,
+            'assignment_count' => count($assignments),
+            'assignment_pairs' => $assignmentPairs,
         ]);
-        return ['ok' => true, 'skipped' => true, 'status' => 'PENDING_MANUAL', 'message' => $message, 'errors' => $resp['errors'] ?? []];
+        return ['ok' => true, 'skipped' => true, 'status' => 'PENDING_MANUAL', 'message' => $message, 'errors' => $resp['errors'] ?? [], 'tier' => $tier];
     }
 
-    return ['ok' => true, 'status' => 'READY', 'message' => 'Syncro policies assigned to OPS-managed folder tree.'];
+    return ['ok' => true, 'status' => 'READY', 'message' => 'Syncro ' . $tier . ' policies assigned to the four OPS-managed folder tree folders.', 'tier' => $tier];
 }
 
 function syncro_provision_client_folder_map(int $clientId, ?int $syncroCustomerId = null, bool $refresh = false): array
@@ -826,7 +1031,7 @@ function syncro_provision_client_folder_map(int $clientId, ?int $syncroCustomerI
 
     $existing = syncro_get_client_folder_map($clientId) ?: [];
     if (!$refresh && syncro_folder_map_complete($existing)) {
-        $policy = syncro_assign_policies_to_folder_tree((int)$syncroCustomerId, $existing);
+        $policy = syncro_assign_policies_to_folder_tree((int)$syncroCustomerId, $existing, $client);
         $policyStatus = (string)($policy['status'] ?? syncro_policy_assignment_status());
         $policyMessage = (string)($policy['message'] ?? syncro_policy_assignment_status_message());
         $message = 'Existing Syncro folder IDs retained; no folder changes were made.';
@@ -843,7 +1048,7 @@ function syncro_provision_client_folder_map(int $clientId, ?int $syncroCustomerI
 
     $ids = array_merge(array_intersect_key($existing, syncro_folder_map_columns()), (array)($tree['ids'] ?? []));
     $provisionalMap = array_merge($existing, $ids);
-    $policy = syncro_assign_policies_to_folder_tree((int)$syncroCustomerId, $provisionalMap);
+    $policy = syncro_assign_policies_to_folder_tree((int)$syncroCustomerId, $provisionalMap, $client);
     $policyStatus = (string)($policy['status'] ?? syncro_policy_assignment_status());
     $policyMessage = (string)($policy['message'] ?? syncro_policy_assignment_status_message());
     $message = (string)($tree['message'] ?? 'Syncro policy folder tree verified/created idempotently.');
