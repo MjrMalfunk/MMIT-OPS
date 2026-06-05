@@ -26,6 +26,29 @@ $folderMap = [
 ];
 $rootFolderId = 4955419;
 
+function smoke_router_cli(array $args): array
+{
+    $command = array_merge([PHP_BINARY, __DIR__ . '/syncro_root_asset_intake_router.php'], $args);
+    $descriptorSpec = [
+        0 => ['pipe', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w'],
+    ];
+    $process = proc_open($command, $descriptorSpec, $pipes);
+    if (!is_resource($process)) {
+        return ['exit_code' => 1, 'stdout' => '', 'stderr' => 'Unable to start router CLI process.'];
+    }
+
+    fclose($pipes[0]);
+    $stdout = stream_get_contents($pipes[1]);
+    fclose($pipes[1]);
+    $stderr = stream_get_contents($pipes[2]);
+    fclose($pipes[2]);
+    $exitCode = proc_close($process);
+
+    return ['exit_code' => $exitCode, 'stdout' => $stdout, 'stderr' => $stderr];
+}
+
 function smoke_check(bool $condition, string $message, array &$failed): void
 {
     if (!$condition) {
@@ -37,6 +60,17 @@ function smoke_asset(int $id, string $name, string $os, int $folderId): array
 {
     return ['id' => $id, 'name' => $name, 'os' => $os, 'policy_folder_id' => $folderId];
 }
+
+$helpCli = smoke_router_cli(['--help']);
+smoke_check(($helpCli['exit_code'] ?? null) === 0, 'Router --help should exit 0', $failed);
+smoke_check(str_contains((string)($helpCli['stdout'] ?? ''), 'Usage: php scripts/syncro_root_asset_intake_router.php'), 'Router --help should print usage to STDOUT', $failed);
+smoke_check((string)($helpCli['stderr'] ?? '') === '', 'Router --help should not print STDERR output', $failed);
+
+$missingArgsCli = smoke_router_cli([]);
+smoke_check(($missingArgsCli['exit_code'] ?? null) === 1, 'Router with missing required arguments should exit 1', $failed);
+smoke_check(str_contains((string)($missingArgsCli['stderr'] ?? ''), 'Either --client-id or --customer-id is required.'), 'Router with missing required arguments should print a clear STDERR error', $failed);
+smoke_check(str_contains((string)($missingArgsCli['stderr'] ?? ''), 'Usage: php scripts/syncro_root_asset_intake_router.php'), 'Router with missing required arguments should print usage to STDERR', $failed);
+smoke_check((string)($missingArgsCli['stdout'] ?? '') === '', 'Router with missing required arguments should not print STDOUT output', $failed);
 
 $windows11 = syncro_route_root_asset_intake(smoke_asset(101, 'WIN11-ROOT', 'Microsoft Windows 11 Pro', $rootFolderId), $folderMap, $rootFolderId, true);
 smoke_check(($windows11['status'] ?? null) === 'DRY_RUN_READY', 'Windows 11 root asset should be dry-run ready', $failed);
