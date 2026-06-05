@@ -559,6 +559,86 @@ function syncro_policy_folder_parent_id(array $folder): ?int
     return null;
 }
 
+
+function syncro_policy_folder_normalized_name(string $name): string
+{
+    $name = mb_strtolower(trim($name), 'UTF-8');
+    $name = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $name) ?? $name;
+    return trim(preg_replace('/\s+/u', ' ', $name) ?? $name);
+}
+
+function syncro_client_policy_root_name_candidates(array $client = []): array
+{
+    $candidates = [];
+    foreach (['legal_name', 'dba_name', 'business_name', 'customer_name', 'name'] as $key) {
+        if (isset($client[$key]) && trim((string)$client[$key]) !== '') {
+            $candidates[] = trim((string)$client[$key]);
+        }
+    }
+    return array_values(array_unique($candidates));
+}
+
+function syncro_resolve_customer_root_policy_folder(array $folders, array $client = []): array
+{
+    $roots = [];
+    foreach ($folders as $folder) {
+        if (!is_array($folder)) {
+            continue;
+        }
+        $id = (int)($folder['id'] ?? 0);
+        $name = syncro_policy_folder_name($folder);
+        if ($id <= 0 || $name === '' || syncro_policy_folder_parent_id($folder) !== null) {
+            continue;
+        }
+        $roots[] = ['id' => $id, 'name' => $name, 'folder' => $folder];
+    }
+
+    if (!$roots) {
+        return [
+            'ok' => false,
+            'status' => 'POLICY_FOLDER_PROVISION_PENDING_MANUAL',
+            'message' => 'POLICY_FOLDER_PROVISION_PENDING_MANUAL: OPS could list Syncro policy folders, but no customer root folder with parent_id null was returned. No folders were created or changed.',
+            'roots' => [],
+        ];
+    }
+
+    $candidates = syncro_client_policy_root_name_candidates($client);
+    if ($candidates) {
+        $candidateNames = array_map('syncro_policy_folder_normalized_name', $candidates);
+        $matches = [];
+        foreach ($roots as $root) {
+            if (in_array(syncro_policy_folder_normalized_name((string)$root['name']), $candidateNames, true)) {
+                $matches[] = $root;
+            }
+        }
+        if (count($matches) === 1) {
+            return ['ok' => true, 'root' => $matches[0], 'match' => 'client_name'];
+        }
+        if (count($matches) > 1) {
+            $names = array_map(static fn(array $root): string => '#' . $root['id'] . ' "' . $root['name'] . '"', $matches);
+            return [
+                'ok' => false,
+                'status' => 'POLICY_FOLDER_PROVISION_PENDING_MANUAL',
+                'message' => 'POLICY_FOLDER_PROVISION_PENDING_MANUAL: Multiple Syncro customer root policy folders matched the OPS client/customer name (' . implode(', ', $names) . '). No folders were created or changed.',
+                'roots' => $roots,
+            ];
+        }
+    }
+
+    if (count($roots) === 1) {
+        return ['ok' => true, 'root' => $roots[0], 'match' => 'single_root'];
+    }
+
+    $names = array_map(static fn(array $root): string => '#' . $root['id'] . ' "' . $root['name'] . '"', $roots);
+    $candidateText = $candidates ? (' Candidate OPS names: ' . implode(', ', $candidates) . '.') : ' No OPS client/customer name candidates were available.';
+    return [
+        'ok' => false,
+        'status' => 'POLICY_FOLDER_PROVISION_PENDING_MANUAL',
+        'message' => 'POLICY_FOLDER_PROVISION_PENDING_MANUAL: Multiple Syncro customer root policy folders with parent_id null were returned and none could be resolved unambiguously (' . implode(', ', $names) . ').' . $candidateText . ' No folders were created or changed.',
+        'roots' => $roots,
+    ];
+}
+
 function syncro_list_customer_policy_folders(int $syncroCustomerId): array
 {
     $resp = syncro_api_request('GET', 'policy_folders', ['customer_id' => $syncroCustomerId]);
@@ -592,7 +672,7 @@ function syncro_create_policy_folder(int $syncroCustomerId, string $name, ?int $
     return $id > 0 ? ['ok' => true, 'id' => $id, 'folder' => $folder] : ['ok' => false, 'errors' => ['Syncro created a policy folder but did not return its ID.'], 'response' => $resp];
 }
 
-function syncro_ensure_customer_policy_folder_tree(int $syncroCustomerId, array $existingMap = [], bool $refresh = false): array
+function syncro_ensure_customer_policy_folder_tree(int $syncroCustomerId, array $existingMap = [], bool $refresh = false, array $client = []): array
 {
     if (!$refresh && syncro_folder_map_complete($existingMap)) {
         return ['ok' => true, 'ids' => [], 'message' => 'Existing Syncro folder IDs retained; no folder changes were made.'];
@@ -605,7 +685,20 @@ function syncro_ensure_customer_policy_folder_tree(int $syncroCustomerId, array 
     }
 
     $folders = (array)($listed['folders'] ?? []);
-    $byRootName = [];
+    $rootResolution = syncro_resolve_customer_root_policy_folder($folders, $client);
+    if (empty($rootResolution['ok'])) {
+        $message = (string)($rootResolution['message'] ?? 'POLICY_FOLDER_PROVISION_PENDING_MANUAL: OPS could not resolve the Syncro customer root policy folder. No folders were created or changed.');
+        return ['ok' => false, 'manual_required' => true, 'message' => $message, 'errors' => [$message], 'root_resolution' => $rootResolution];
+    }
+
+    $root = (array)($rootResolution['root'] ?? []);
+    $rootId = (int)($root['id'] ?? 0);
+    $rootName = (string)($root['name'] ?? '');
+    if ($rootId <= 0 || $rootName === '') {
+        $message = 'POLICY_FOLDER_PROVISION_PENDING_MANUAL: OPS resolved an invalid Syncro customer root policy folder. No folders were created or changed.';
+        return ['ok' => false, 'manual_required' => true, 'message' => $message, 'errors' => [$message], 'root_resolution' => $rootResolution];
+    }
+
     $byParentAndName = [];
     foreach ($folders as $folder) {
         if (!is_array($folder)) {
@@ -613,28 +706,25 @@ function syncro_ensure_customer_policy_folder_tree(int $syncroCustomerId, array 
         }
         $id = (int)($folder['id'] ?? 0);
         $name = syncro_policy_folder_name($folder);
-        if ($id <= 0 || $name === '') {
+        $parentId = syncro_policy_folder_parent_id($folder);
+        if ($id <= 0 || $name === '' || $parentId === null) {
             continue;
         }
-        $parentId = syncro_policy_folder_parent_id($folder);
-        if ($parentId === null) {
-            $byRootName[strtolower($name)] = $id;
-        } else {
-            $byParentAndName[$parentId . ':' . strtolower($name)] = $id;
-        }
+        $byParentAndName[$parentId . ':' . syncro_policy_folder_normalized_name($name)] = $id;
     }
 
     $parentIds = [];
     foreach (array_keys(syncro_policy_folder_standard_tree()) as $parentName) {
-        $key = strtolower($parentName);
-        $parentIds[$parentName] = $byRootName[$key] ?? null;
+        $parentKey = $rootId . ':' . syncro_policy_folder_normalized_name($parentName);
+        $parentIds[$parentName] = $byParentAndName[$parentKey] ?? null;
         if (!$parentIds[$parentName]) {
-            $created = syncro_create_policy_folder($syncroCustomerId, $parentName);
+            $created = syncro_create_policy_folder($syncroCustomerId, $parentName, $rootId);
             if (empty($created['ok'])) {
-                $message = 'POLICY_FOLDER_PROVISION_PENDING_MANUAL: OPS could list folders but could not create missing parent folder "' . $parentName . '" via POST /policy_folders. No deletes, renames, or asset moves were attempted.';
-                return ['ok' => false, 'manual_required' => true, 'message' => $message, 'errors' => $created['errors'] ?? [$message]];
+                $message = 'POLICY_FOLDER_PROVISION_PENDING_MANUAL: OPS resolved Syncro customer root #' . $rootId . ' "' . $rootName . '" but could not create missing folder "' . $parentName . '" under that root via POST /policy_folders. No deletes, renames, or asset moves were attempted.';
+                return ['ok' => false, 'manual_required' => true, 'message' => $message, 'errors' => $created['errors'] ?? [$message], 'root' => $root];
             }
             $parentIds[$parentName] = (int)$created['id'];
+            $byParentAndName[$parentKey] = (int)$created['id'];
         }
     }
 
@@ -645,19 +735,25 @@ function syncro_ensure_customer_policy_folder_tree(int $syncroCustomerId, array 
             continue;
         }
         $parentId = (int)($parentIds[$meta['parent']] ?? 0);
-        $childKey = $parentId . ':' . strtolower((string)$meta['child']);
+        $childKey = $parentId . ':' . syncro_policy_folder_normalized_name((string)$meta['child']);
         $ids[$column] = $byParentAndName[$childKey] ?? null;
         if (!$ids[$column]) {
             $created = syncro_create_policy_folder($syncroCustomerId, (string)$meta['child'], $parentId);
             if (empty($created['ok'])) {
-                $message = 'POLICY_FOLDER_PROVISION_PENDING_MANUAL: OPS could not create missing child folder "' . $meta['path'] . '" via POST /policy_folders. No deletes, renames, or asset moves were attempted.';
-                return ['ok' => false, 'manual_required' => true, 'message' => $message, 'errors' => $created['errors'] ?? [$message]];
+                $message = 'POLICY_FOLDER_PROVISION_PENDING_MANUAL: OPS resolved Syncro customer root #' . $rootId . ' "' . $rootName . '" but could not create missing child folder "' . $meta['path'] . '" via POST /policy_folders. No deletes, renames, or asset moves were attempted.';
+                return ['ok' => false, 'manual_required' => true, 'message' => $message, 'errors' => $created['errors'] ?? [$message], 'root' => $root];
             }
             $ids[$column] = (int)$created['id'];
+            $byParentAndName[$childKey] = (int)$created['id'];
         }
     }
 
-    return ['ok' => true, 'ids' => $ids, 'message' => 'Syncro policy folder tree verified/created idempotently. No deletes, renames, or asset moves were attempted.'];
+    return [
+        'ok' => true,
+        'ids' => $ids,
+        'root' => $root,
+        'message' => 'Syncro policy folder tree verified/created under customer root #' . $rootId . ' "' . $rootName . '" idempotently. No deletes, renames, or asset moves were attempted.',
+    ];
 }
 
 function syncro_assign_policies_to_folder_tree(int $syncroCustomerId, array $folderMap): array
@@ -738,7 +834,7 @@ function syncro_provision_client_folder_map(int $clientId, ?int $syncroCustomerI
         return ['ok' => true, 'status' => 'READY', 'message' => $message . ' Policy assignment: ' . $policyMessage, 'folder_map' => $map, 'policy_assignment_status' => $policyStatus, 'policy_assignment_message' => $policyMessage];
     }
 
-    $tree = syncro_ensure_customer_policy_folder_tree((int)$syncroCustomerId, $existing, $refresh);
+    $tree = syncro_ensure_customer_policy_folder_tree((int)$syncroCustomerId, $existing, $refresh, $client);
     if (empty($tree['ok'])) {
         $message = (string)($tree['message'] ?? 'POLICY_FOLDER_PROVISION_PENDING_MANUAL: Syncro policy folder endpoint support is incomplete.');
         $map = syncro_upsert_client_folder_map_status($clientId, (int)$syncroCustomerId, 'POLICY_FOLDER_PROVISION_PENDING_MANUAL', $message, implode(' ', array_map('strval', (array)($tree['errors'] ?? []))));
