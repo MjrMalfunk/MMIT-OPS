@@ -138,18 +138,21 @@ define('SYNCRO_API_KEY', 'smoke-test-key-not-secret');
 define('SYNCRO_BASE_URL', 'https://127.0.0.1/never-called/');
 define('SYNCRO_ALLOW_STAGING_WRITES', true);
 define('SYNCRO_POLICY_ASSIGNMENTS', [
-    'manage.deploy.workstations' => 1101,
-    'manage.deploy.servers' => 1102,
-    'manage.production.workstations' => 1103,
-    'manage.production.servers' => 1104,
-    'protect.deploy.workstations' => 2101,
-    'protect.deploy.servers' => 2102,
-    'protect.production.workstations' => 2103,
-    'protect.production.servers' => 2104,
-    'govern.deploy.workstations' => 3101,
-    'govern.deploy.servers' => 3102,
-    'govern.production.workstations' => 3103,
-    'govern.production.servers' => 3104,
+    'manage.standard.root' => 'MMIT-Test-1100',
+    'manage.deploy.workstations' => 'MMIT-Test-1101',
+    'manage.deploy.servers' => 'MMIT-Test-1102',
+    'manage.production.workstations' => 'MMIT-Test-1103',
+    'manage.production.servers' => 'MMIT-Test-1104',
+    'protect.standard.root' => 'MMIT-Test-2100',
+    'protect.deploy.workstations' => 'MMIT-Test-2101',
+    'protect.deploy.servers' => 'MMIT-Test-2102',
+    'protect.production.workstations' => 'MMIT-Test-2103',
+    'protect.production.servers' => 'MMIT-Test-2104',
+    'govern.standard.root' => 'MMIT-Test-3100',
+    'govern.deploy.workstations' => 'MMIT-Test-3101',
+    'govern.deploy.servers' => 'MMIT-Test-3102',
+    'govern.production.workstations' => 'MMIT-Test-3103',
+    'govern.production.servers' => 'MMIT-Test-3104',
 ]);
 $GLOBALS['smoke_client'] = ['client_id' => 77, 'legal_name' => 'Smoke Co LLC', 'dba_name' => '', 'email' => 'ops@example.test', 'phone' => '555-0100', 'syncro_customer_id' => null, 'syncro_policy_tier' => 'manage'];
 $GLOBALS['smoke_contacts'] = [['first_name' => 'Ops', 'last_name' => 'Smoke', 'email' => 'ops@example.test', 'phone' => '555-0100']];
@@ -167,10 +170,10 @@ $folders = [
     ['id' => 9001, 'name' => 'Smoke Co LLC', 'parent_id' => null],
     ['id' => 5001, 'name' => 'Deploy', 'parent_id' => 9001],
     ['id' => 5002, 'name' => 'Production', 'parent_id' => 9001],
-    ['id' => 5029833, 'name' => 'Workstations', 'parent_id' => 5001, 'partial_policy_id' => 1101],
-    ['id' => 5029834, 'name' => 'Servers', 'parent_id' => 5001, 'partial_policy_id' => 1102],
-    ['id' => 5029835, 'name' => 'Workstations', 'parent_id' => 5002, 'partial_policy_id' => 1103],
-    ['id' => 5029836, 'name' => 'Servers', 'parent_id' => 5002, 'partial_policy_id' => 1104],
+    ['id' => 5029833, 'name' => 'Workstations', 'parent_id' => 5001, 'partial_policy_id' => 'MMIT-Test-1101'],
+    ['id' => 5029834, 'name' => 'Servers', 'parent_id' => 5001, 'partial_policy_id' => 'MMIT-Test-1102'],
+    ['id' => 5029835, 'name' => 'Workstations', 'parent_id' => 5002, 'partial_policy_id' => 'MMIT-Test-1103'],
+    ['id' => 5029836, 'name' => 'Servers', 'parent_id' => 5002, 'partial_policy_id' => 'MMIT-Test-1104'],
 ];
 $GLOBALS['smoke_api_calls'] = [];
 $GLOBALS['syncro_api_request_mock'] = static function (string $method, string $path, array $query, ?array $payload) use ($folders): array {
@@ -183,6 +186,15 @@ $GLOBALS['syncro_api_request_mock'] = static function (string $method, string $p
     }
     if ($method === 'GET' && $path === 'policy_folders') {
         return ['ok' => true, 'status' => 200, 'data' => ['policy_folders' => $folders], 'request' => ['method' => 'GET', 'path' => '/api/v1/policy_folders']];
+    }
+    if ($method === 'PUT' && $path === 'policy_folders/9001') {
+        return ['ok' => true, 'status' => 200, 'data' => ['policy_folder' => [
+            'id' => 9001,
+            'name' => (string)($payload['name'] ?? ''),
+            'customer_id' => (int)($payload['customer_id'] ?? 0),
+            'parent_id' => null,
+            'partial_policy_id' => (string)($payload['partial_policy_id'] ?? ''),
+        ]], 'request' => ['method' => 'PUT', 'path' => '/api/v1/policy_folders/9001']];
     }
     return ['ok' => false, 'status' => 599, 'errors' => ['Unexpected ' . $method . ' ' . $path]];
 };
