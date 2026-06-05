@@ -269,6 +269,197 @@ function syncro_client_columns_ready(): bool
     return db_column_exists('clients', 'syncro_customer_id') && db_column_exists('clients', 'syncro_sync_status');
 }
 
+
+function syncro_policy_folder_standard_tree(): array
+{
+    return [
+        'Deploy' => ['Workstations', 'Servers'],
+        'Production' => ['Workstations', 'Servers'],
+    ];
+}
+
+function syncro_policy_assignment_map(): array
+{
+    return [
+        'manage.deploy.workstations' => null,
+        'manage.deploy.servers' => null,
+        'manage.production.workstations' => null,
+        'manage.production.servers' => null,
+        'protect.deploy.workstations' => null,
+        'protect.deploy.servers' => null,
+        'protect.production.workstations' => null,
+        'protect.production.servers' => null,
+        'govern.deploy.workstations' => null,
+        'govern.deploy.servers' => null,
+        'govern.production.workstations' => null,
+        'govern.production.servers' => null,
+    ];
+}
+
+function syncro_policy_assignment_status(): string
+{
+    foreach (syncro_policy_assignment_map() as $policyId) {
+        if ($policyId !== null && trim((string)$policyId) !== '') {
+            return 'PARTIAL_CONFIGURED';
+        }
+    }
+    return 'PENDING_MANUAL';
+}
+
+function syncro_folder_map_table_ready(): bool
+{
+    if (!db_table_exists('client_syncro_folder_map')) {
+        db()->exec("CREATE TABLE IF NOT EXISTS client_syncro_folder_map (
+            client_id BIGINT(20) UNSIGNED NOT NULL,
+            syncro_customer_id BIGINT(20) UNSIGNED NULL DEFAULT NULL,
+            deploy_workstations_folder_id BIGINT(20) UNSIGNED NULL DEFAULT NULL,
+            deploy_servers_folder_id BIGINT(20) UNSIGNED NULL DEFAULT NULL,
+            production_workstations_folder_id BIGINT(20) UNSIGNED NULL DEFAULT NULL,
+            production_servers_folder_id BIGINT(20) UNSIGNED NULL DEFAULT NULL,
+            provision_status VARCHAR(64) NOT NULL DEFAULT 'PENDING',
+            provision_message TEXT NULL,
+            last_error TEXT NULL,
+            provisioned_at DATETIME NULL DEFAULT NULL,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (client_id),
+            KEY idx_client_syncro_folder_map_customer (syncro_customer_id),
+            KEY idx_client_syncro_folder_map_status (provision_status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+    }
+
+    $columns = [
+        'syncro_customer_id' => 'BIGINT(20) UNSIGNED NULL DEFAULT NULL',
+        'deploy_workstations_folder_id' => 'BIGINT(20) UNSIGNED NULL DEFAULT NULL',
+        'deploy_servers_folder_id' => 'BIGINT(20) UNSIGNED NULL DEFAULT NULL',
+        'production_workstations_folder_id' => 'BIGINT(20) UNSIGNED NULL DEFAULT NULL',
+        'production_servers_folder_id' => 'BIGINT(20) UNSIGNED NULL DEFAULT NULL',
+        'provision_status' => "VARCHAR(64) NOT NULL DEFAULT 'PENDING'",
+        'provision_message' => 'TEXT NULL',
+        'last_error' => 'TEXT NULL',
+        'provisioned_at' => 'DATETIME NULL DEFAULT NULL',
+        'updated_at' => 'DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP',
+    ];
+    foreach ($columns as $column => $definition) {
+        if (!db_column_exists('client_syncro_folder_map', $column)) {
+            db()->exec('ALTER TABLE client_syncro_folder_map ADD COLUMN ' . $column . ' ' . $definition);
+        }
+    }
+    return true;
+}
+
+function syncro_get_client_folder_map(int $clientId): ?array
+{
+    if ($clientId <= 0 || !syncro_folder_map_table_ready()) {
+        return null;
+    }
+    $stmt = db()->prepare('SELECT * FROM client_syncro_folder_map WHERE client_id = ? LIMIT 1');
+    $stmt->execute([$clientId]);
+    $row = $stmt->fetch();
+    return is_array($row) ? $row : null;
+}
+
+function syncro_folder_map_complete(array $map): bool
+{
+    foreach (['deploy_workstations_folder_id', 'deploy_servers_folder_id', 'production_workstations_folder_id', 'production_servers_folder_id'] as $column) {
+        if ((int)($map[$column] ?? 0) <= 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function syncro_upsert_client_folder_map_status(int $clientId, ?int $syncroCustomerId, string $status, string $message = '', string $lastError = '', bool $provisioned = false): array
+{
+    syncro_folder_map_table_ready();
+    $existing = syncro_get_client_folder_map($clientId) ?: [];
+    $status = strtoupper(trim($status)) ?: 'PENDING';
+    $message = syncro_mask_secrets($message);
+    $lastError = syncro_mask_secrets($lastError);
+
+    $sql = 'INSERT INTO client_syncro_folder_map (
+            client_id, syncro_customer_id, deploy_workstations_folder_id, deploy_servers_folder_id,
+            production_workstations_folder_id, production_servers_folder_id, provision_status,
+            provision_message, last_error, provisioned_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ' . ($provisioned ? 'NOW()' : 'NULL') . ', NOW())
+        ON DUPLICATE KEY UPDATE
+            syncro_customer_id = VALUES(syncro_customer_id),
+            deploy_workstations_folder_id = COALESCE(client_syncro_folder_map.deploy_workstations_folder_id, VALUES(deploy_workstations_folder_id)),
+            deploy_servers_folder_id = COALESCE(client_syncro_folder_map.deploy_servers_folder_id, VALUES(deploy_servers_folder_id)),
+            production_workstations_folder_id = COALESCE(client_syncro_folder_map.production_workstations_folder_id, VALUES(production_workstations_folder_id)),
+            production_servers_folder_id = COALESCE(client_syncro_folder_map.production_servers_folder_id, VALUES(production_servers_folder_id)),
+            provision_status = VALUES(provision_status),
+            provision_message = VALUES(provision_message),
+            last_error = VALUES(last_error),
+            provisioned_at = CASE WHEN VALUES(provisioned_at) IS NULL THEN client_syncro_folder_map.provisioned_at ELSE VALUES(provisioned_at) END,
+            updated_at = NOW()';
+
+    db()->prepare($sql)->execute([
+        $clientId,
+        $syncroCustomerId,
+        !empty($existing['deploy_workstations_folder_id']) ? (int)$existing['deploy_workstations_folder_id'] : null,
+        !empty($existing['deploy_servers_folder_id']) ? (int)$existing['deploy_servers_folder_id'] : null,
+        !empty($existing['production_workstations_folder_id']) ? (int)$existing['production_workstations_folder_id'] : null,
+        !empty($existing['production_servers_folder_id']) ? (int)$existing['production_servers_folder_id'] : null,
+        $status,
+        $message !== '' ? $message : null,
+        $lastError !== '' ? $lastError : null,
+    ]);
+
+    return syncro_get_client_folder_map($clientId) ?: [];
+}
+
+function syncro_provision_client_folder_map(int $clientId, ?int $syncroCustomerId = null, bool $refresh = false): array
+{
+    if ($clientId <= 0) {
+        return ['ok' => false, 'status' => 'ERROR', 'message' => 'Invalid client for Syncro folder provisioning.', 'errors' => ['Invalid client for Syncro folder provisioning.']];
+    }
+
+    $client = client_get_by_id($clientId);
+    if (!$client) {
+        return ['ok' => false, 'status' => 'ERROR', 'message' => 'Client record not found for Syncro folder provisioning.', 'errors' => ['Client record not found for Syncro folder provisioning.']];
+    }
+    if (($syncroCustomerId ?? 0) <= 0 && !empty($client['syncro_customer_id'])) {
+        $syncroCustomerId = (int)$client['syncro_customer_id'];
+    }
+    if (($syncroCustomerId ?? 0) <= 0) {
+        $message = 'Syncro folder provisioning is pending until the client has a Syncro customer ID.';
+        $map = syncro_upsert_client_folder_map_status($clientId, null, 'PENDING', $message);
+        return ['ok' => true, 'skipped' => true, 'status' => 'PENDING', 'message' => $message, 'folder_map' => $map];
+    }
+
+    if (syncro_is_staging_mode()) {
+        $message = 'Staging mode: Syncro folder provisioning write calls are blocked.';
+        $map = syncro_upsert_client_folder_map_status($clientId, (int)$syncroCustomerId, 'STAGING_BLOCKED', $message);
+        return ['ok' => true, 'skipped' => true, 'staging_blocked' => true, 'status' => 'STAGING_BLOCKED', 'message' => $message, 'folder_map' => $map];
+    }
+
+    $existing = syncro_get_client_folder_map($clientId) ?: [];
+    if (!$refresh && syncro_folder_map_complete($existing)) {
+        $message = 'Existing Syncro folder IDs retained; no folder changes were made.';
+        $map = syncro_upsert_client_folder_map_status($clientId, (int)$syncroCustomerId, 'READY', $message, '', true);
+        return ['ok' => true, 'status' => 'READY', 'message' => $message, 'folder_map' => $map, 'policy_assignment_status' => syncro_policy_assignment_status()];
+    }
+
+    $message = 'POLICY_FOLDER_PROVISION_PENDING_MANUAL: Syncro policy folder list/create endpoints are not configured in OPS, so no folders were created or changed. Manually create/verify Deploy and Production workstation/server folders in this customer and record their customer-specific IDs.';
+    $map = syncro_upsert_client_folder_map_status($clientId, (int)$syncroCustomerId, 'POLICY_FOLDER_PROVISION_PENDING_MANUAL', $message);
+    return ['ok' => true, 'skipped' => true, 'manual_required' => true, 'status' => 'POLICY_FOLDER_PROVISION_PENDING_MANUAL', 'message' => $message, 'folder_map' => $map, 'policy_assignment_status' => syncro_policy_assignment_status()];
+}
+
+function syncro_attach_folder_provisioning_result(array $result, int $clientId, ?int $syncroCustomerId): array
+{
+    $provision = syncro_provision_client_folder_map($clientId, $syncroCustomerId);
+    $result['folder_provisioning'] = $provision;
+    $result['folder_provision_status'] = (string)($provision['status'] ?? 'PENDING');
+    $result['folder_provision_message'] = (string)($provision['message'] ?? '');
+    if (!isset($result['message']) || trim((string)$result['message']) === '') {
+        $result['message'] = syncro_action_success_message((string)($result['action'] ?? ''));
+    }
+    if ($result['folder_provision_message'] !== '') {
+        $result['message'] .= ' Folder provisioning: ' . $result['folder_provision_message'];
+    }
+    return $result;
+}
+
 function syncro_normalize_subdomain(string $value): string
 {
     $value = trim($value);
@@ -560,7 +751,7 @@ function syncro_attempt_existing_customer_link(int $clientId, array $payload): a
     $matchedBy = implode(', ', (array)($search['match']['signals'] ?? []));
     $message = 'Linked to existing Syncro customer' . ($matchedBy !== '' ? ' by ' . $matchedBy : '') . ' and updated successfully.';
     syncro_mark_client($clientId, $syncroId, 'SYNCED', $message);
-    return ['ok' => true, 'syncro_customer_id' => $syncroId, 'action' => 'relinked', 'status' => 'SYNCED', 'message' => $message];
+    return syncro_attach_folder_provisioning_result(['ok' => true, 'syncro_customer_id' => $syncroId, 'action' => 'relinked', 'status' => 'SYNCED', 'message' => $message], $clientId, $syncroId);
 }
 
 function syncro_action_success_message(?string $action): string
@@ -642,6 +833,9 @@ function syncro_sync_client(int $clientId): array
         $syncroId = !empty($client['syncro_customer_id']) ? (int)$client['syncro_customer_id'] : null;
         syncro_debug_log('staging_client_sync_blocked', ['client_id' => $clientId, 'syncro_customer_id' => $syncroId, 'status' => 'STAGING_BLOCKED']);
         syncro_mark_client($clientId, $syncroId, 'STAGING_BLOCKED', (string)$result['message']);
+        if ($syncroId !== null && $syncroId > 0) {
+            $result = syncro_attach_folder_provisioning_result($result, $clientId, $syncroId);
+        }
         return $result;
     }
 
@@ -661,7 +855,7 @@ function syncro_sync_client(int $clientId): array
         $resp = syncro_api_request('PUT', 'customers/' . $syncroId, [], $payload);
         if (!empty($resp['ok'])) {
             syncro_mark_client($clientId, $syncroId, 'SYNCED', 'Updated in Syncro.');
-            return ['ok' => true, 'syncro_customer_id' => $syncroId, 'action' => 'updated', 'status' => 'SYNCED'];
+            return syncro_attach_folder_provisioning_result(['ok' => true, 'syncro_customer_id' => $syncroId, 'action' => 'updated', 'status' => 'SYNCED'], $clientId, $syncroId);
         }
 
         $msg = implode(' ', (array)($resp['errors'] ?? []));
@@ -722,7 +916,7 @@ function syncro_sync_client(int $clientId): array
     }
 
     syncro_mark_client($clientId, $syncroId, 'SYNCED', 'Created in Syncro.');
-    return ['ok' => true, 'syncro_customer_id' => $syncroId, 'action' => 'created', 'status' => 'SYNCED'];
+    return syncro_attach_folder_provisioning_result(['ok' => true, 'syncro_customer_id' => $syncroId, 'action' => 'created', 'status' => 'SYNCED'], $clientId, $syncroId);
 }
 
 function syncro_contract_activation_sync(int $contractId): array
