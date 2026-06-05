@@ -16,24 +16,6 @@ function syncro_root_asset_router_usage(): string
         . "Default mode is dry-run. Apply mode performs PUT /api/v1/customer_assets/{asset_id}; no DELETE calls are used.\n";
 }
 
-$options = getopt('', [
-    'client-id:',
-    'customer-id:',
-    'root-folder-id:',
-    'deploy-workstations-folder-id:',
-    'deploy-servers-folder-id:',
-    'production-workstations-folder-id:',
-    'production-servers-folder-id:',
-    'host:',
-    'apply',
-    'help',
-]);
-
-if (isset($options['help'])) {
-    echo syncro_root_asset_router_usage();
-    exit(0);
-}
-
 function syncro_root_asset_router_option_value(array $options, string $name): ?string
 {
     if (!array_key_exists($name, $options)) {
@@ -119,133 +101,162 @@ function syncro_root_asset_router_bootstrap_cli_server(array $options): void
     $_SERVER['REQUEST_URI'] = $_SERVER['REQUEST_URI'] ?? '/';
 }
 
-$requiredValueOptions = [
-    'client-id',
-    'customer-id',
-    'root-folder-id',
-    'deploy-workstations-folder-id',
-    'deploy-servers-folder-id',
-    'production-workstations-folder-id',
-    'production-servers-folder-id',
-    'host',
-];
-foreach ($requiredValueOptions as $requiredValueOption) {
-    if (syncro_root_asset_router_option_value($options, $requiredValueOption) === '') {
-        fwrite(STDERR, "Option --{$requiredValueOption} requires a value.\n" . syncro_root_asset_router_usage());
-        exit(1);
+
+function syncro_root_asset_router_main(array $argv = []): int
+{
+    $options = getopt('', [
+        'client-id:',
+        'customer-id:',
+        'root-folder-id:',
+        'deploy-workstations-folder-id:',
+        'deploy-servers-folder-id:',
+        'production-workstations-folder-id:',
+        'production-servers-folder-id:',
+        'host:',
+        'apply',
+        'help',
+    ]);
+    if (!is_array($options)) {
+        $options = [];
     }
-}
 
-$clientId = syncro_root_asset_router_option_int($options, 'client-id');
-$syncroCustomerId = syncro_root_asset_router_option_int($options, 'customer-id');
+    if (isset($options['help'])) {
+        echo syncro_root_asset_router_usage();
+        return 0;
+    }
 
-if ($clientId <= 0 && $syncroCustomerId <= 0) {
-    fwrite(STDERR, "Either --client-id or --customer-id is required.\n" . syncro_root_asset_router_usage());
-    exit(1);
-}
-
-if ($clientId <= 0) {
-    $missingFolderOptions = [];
-    foreach ([
+    $requiredValueOptions = [
+        'client-id',
+        'customer-id',
+        'root-folder-id',
         'deploy-workstations-folder-id',
         'deploy-servers-folder-id',
         'production-workstations-folder-id',
         'production-servers-folder-id',
-    ] as $folderOption) {
-        if (syncro_root_asset_router_option_int($options, $folderOption) <= 0) {
-            $missingFolderOptions[] = '--' . $folderOption;
+        'host',
+    ];
+    foreach ($requiredValueOptions as $requiredValueOption) {
+        if (syncro_root_asset_router_option_value($options, $requiredValueOption) === '') {
+            fwrite(STDERR, "Option --{$requiredValueOption} requires a value.\n" . syncro_root_asset_router_usage());
+            return 1;
         }
     }
-    if ($missingFolderOptions) {
-        fwrite(STDERR, "Missing required folder option(s): " . implode(', ', $missingFolderOptions) . ".\n" . syncro_root_asset_router_usage());
-        exit(1);
+
+    $clientId = syncro_root_asset_router_option_int($options, 'client-id');
+    $syncroCustomerId = syncro_root_asset_router_option_int($options, 'customer-id');
+
+    if ($clientId <= 0 && $syncroCustomerId <= 0) {
+        fwrite(STDERR, "Either --client-id or --customer-id is required.\n" . syncro_root_asset_router_usage());
+        return 1;
     }
-}
 
-syncro_root_asset_router_bootstrap_cli_server($options);
-
-require_once __DIR__ . '/../inc/bootstrap.php';
-require_once __DIR__ . '/../inc/syncro.php';
-
-$dryRun = !isset($options['apply']);
-$client = [];
-$folderMap = [];
-
-if ($clientId > 0) {
-    $client = client_get_by_id($clientId) ?: [];
-    if (!$client) {
-        fwrite(STDERR, "Client #{$clientId} was not found.\n");
-        exit(1);
+    if ($clientId <= 0) {
+        $missingFolderOptions = [];
+        foreach ([
+            'deploy-workstations-folder-id',
+            'deploy-servers-folder-id',
+            'production-workstations-folder-id',
+            'production-servers-folder-id',
+        ] as $folderOption) {
+            if (syncro_root_asset_router_option_int($options, $folderOption) <= 0) {
+                $missingFolderOptions[] = '--' . $folderOption;
+            }
+        }
+        if ($missingFolderOptions) {
+            fwrite(STDERR, "Missing required folder option(s): " . implode(', ', $missingFolderOptions) . ".\n" . syncro_root_asset_router_usage());
+            return 1;
+        }
     }
-    if ($syncroCustomerId <= 0 && (int)($client['syncro_customer_id'] ?? 0) > 0) {
-        $syncroCustomerId = (int)$client['syncro_customer_id'];
+
+    syncro_root_asset_router_bootstrap_cli_server($options);
+
+    require_once __DIR__ . '/../inc/bootstrap.php';
+    require_once __DIR__ . '/../inc/syncro.php';
+
+    $dryRun = !isset($options['apply']);
+    $client = [];
+    $folderMap = [];
+
+    if ($clientId > 0) {
+        $client = client_get_by_id($clientId) ?: [];
+        if (!$client) {
+            fwrite(STDERR, "Client #{$clientId} was not found.\n");
+            return 1;
+        }
+        if ($syncroCustomerId <= 0 && (int)($client['syncro_customer_id'] ?? 0) > 0) {
+            $syncroCustomerId = (int)$client['syncro_customer_id'];
+        }
+        $folderMap = syncro_get_client_folder_map($clientId) ?: [];
     }
-    $folderMap = syncro_get_client_folder_map($clientId) ?: [];
-}
 
-foreach ([
-    'deploy-workstations-folder-id' => 'deploy_workstations_folder_id',
-    'deploy-servers-folder-id' => 'deploy_servers_folder_id',
-    'production-workstations-folder-id' => 'production_workstations_folder_id',
-    'production-servers-folder-id' => 'production_servers_folder_id',
-] as $option => $key) {
-    $folderOptionValue = syncro_root_asset_router_option_int($options, $option);
-    if ($folderOptionValue > 0) {
-        $folderMap[$key] = $folderOptionValue;
+    foreach ([
+        'deploy-workstations-folder-id' => 'deploy_workstations_folder_id',
+        'deploy-servers-folder-id' => 'deploy_servers_folder_id',
+        'production-workstations-folder-id' => 'production_workstations_folder_id',
+        'production-servers-folder-id' => 'production_servers_folder_id',
+    ] as $option => $key) {
+        $folderOptionValue = syncro_root_asset_router_option_int($options, $option);
+        if ($folderOptionValue > 0) {
+            $folderMap[$key] = $folderOptionValue;
+        }
     }
-}
 
-if ($syncroCustomerId <= 0) {
-    fwrite(STDERR, "A Syncro customer ID is required.\n" . syncro_root_asset_router_usage());
-    exit(1);
-}
-if (!syncro_folder_map_complete($folderMap)) {
-    fwrite(STDERR, "Complete Deploy/Production folder IDs are required before asset routing. No asset moves attempted.\n" . syncro_root_asset_router_usage());
-    exit(1);
-}
-
-$rootFolderId = syncro_root_asset_router_option_int($options, 'root-folder-id');
-if ($rootFolderId <= 0) {
-    $listedFolders = syncro_list_customer_policy_folders($syncroCustomerId);
-    if (empty($listedFolders['ok'])) {
-        fwrite(STDERR, "Unable to list Syncro policy folders to resolve customer root: " . implode(' ', (array)($listedFolders['errors'] ?? [])) . "\n");
-        exit(1);
+    if ($syncroCustomerId <= 0) {
+        fwrite(STDERR, "A Syncro customer ID is required.\n" . syncro_root_asset_router_usage());
+        return 1;
     }
-    $root = syncro_resolve_customer_root_policy_folder((array)($listedFolders['folders'] ?? []), $client);
-    if (empty($root['ok'])) {
-        fwrite(STDERR, (string)($root['message'] ?? 'Unable to resolve customer root policy folder.') . "\n");
-        exit(1);
+    if (!syncro_folder_map_complete($folderMap)) {
+        fwrite(STDERR, "Complete Deploy/Production folder IDs are required before asset routing. No asset moves attempted.\n" . syncro_root_asset_router_usage());
+        return 1;
     }
-    $rootFolderId = (int)($root['root']['id'] ?? 0);
-}
 
-printf("Syncro root asset intake router V1 starting for customer #%d root folder #%d in %s mode.\n", $syncroCustomerId, $rootFolderId, $dryRun ? 'dry-run' : 'apply');
-if (!$dryRun) {
-    echo syncro_staging_write_status_message() . PHP_EOL;
-}
-
-$listedAssets = syncro_list_customer_assets($syncroCustomerId);
-if (empty($listedAssets['ok'])) {
-    fwrite(STDERR, "Unable to list Syncro customer assets: " . implode(' ', (array)($listedAssets['errors'] ?? [])) . "\n");
-    exit(1);
-}
-
-$results = [];
-foreach ((array)($listedAssets['assets'] ?? []) as $asset) {
-    if (!is_array($asset)) {
-        continue;
+    $rootFolderId = syncro_root_asset_router_option_int($options, 'root-folder-id');
+    if ($rootFolderId <= 0) {
+        $listedFolders = syncro_list_customer_policy_folders($syncroCustomerId);
+        if (empty($listedFolders['ok'])) {
+            fwrite(STDERR, "Unable to list Syncro policy folders to resolve customer root: " . implode(' ', (array)($listedFolders['errors'] ?? [])) . "\n");
+            return 1;
+        }
+        $root = syncro_resolve_customer_root_policy_folder((array)($listedFolders['folders'] ?? []), $client);
+        if (empty($root['ok'])) {
+            fwrite(STDERR, (string)($root['message'] ?? 'Unable to resolve customer root policy folder.') . "\n");
+            return 1;
+        }
+        $rootFolderId = (int)($root['root']['id'] ?? 0);
     }
-    $result = syncro_route_root_asset_intake($asset, $folderMap, $rootFolderId, $dryRun);
-    $results[] = $result;
-    printf(
-        "[%s] #%d %s: %s\n",
-        (string)($result['status'] ?? 'UNKNOWN'),
-        (int)($result['asset_id'] ?? 0),
-        (string)($result['asset_name'] ?? 'unknown asset'),
-        (string)($result['message'] ?? '')
-    );
+
+    printf("Syncro root asset intake router V1 starting for customer #%d root folder #%d in %s mode.\n", $syncroCustomerId, $rootFolderId, $dryRun ? 'dry-run' : 'apply');
+    if (!$dryRun) {
+        echo syncro_staging_write_status_message() . PHP_EOL;
+    }
+
+    $listedAssets = syncro_list_customer_assets($syncroCustomerId);
+    if (empty($listedAssets['ok'])) {
+        fwrite(STDERR, "Unable to list Syncro customer assets: " . implode(' ', (array)($listedAssets['errors'] ?? [])) . "\n");
+        return 1;
+    }
+
+    $results = [];
+    foreach ((array)($listedAssets['assets'] ?? []) as $asset) {
+        if (!is_array($asset)) {
+            continue;
+        }
+        $result = syncro_route_root_asset_intake($asset, $folderMap, $rootFolderId, $dryRun);
+        $results[] = $result;
+        printf(
+            "[%s] #%d %s: %s\n",
+            (string)($result['status'] ?? 'UNKNOWN'),
+            (int)($result['asset_id'] ?? 0),
+            (string)($result['asset_name'] ?? 'unknown asset'),
+            (string)($result['message'] ?? '')
+        );
+    }
+
+    $failed = array_values(array_filter($results, static fn(array $result): bool => empty($result['ok']) && empty($result['staging_blocked'])));
+    printf("Syncro root asset intake router V1 complete: %d assets evaluated, %d failed.\n", count($results), count($failed));
+    return $failed ? 1 : 0;
 }
 
-$failed = array_values(array_filter($results, static fn(array $result): bool => empty($result['ok']) && empty($result['staging_blocked'])));
-printf("Syncro root asset intake router V1 complete: %d assets evaluated, %d failed.\n", count($results), count($failed));
-exit($failed ? 1 : 0);
+if (realpath((string)($_SERVER['SCRIPT_FILENAME'] ?? '')) === __FILE__) {
+    exit(syncro_root_asset_router_main($argv ?? []));
+}
