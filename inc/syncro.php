@@ -141,6 +141,21 @@ function syncro_is_write_method(string $method): bool
     return in_array(strtoupper(trim($method)), ['POST', 'PUT', 'PATCH', 'DELETE'], true);
 }
 
+function syncro_staging_writes_allowed(): bool
+{
+    return defined('SYNCRO_ALLOW_STAGING_WRITES') && (bool)SYNCRO_ALLOW_STAGING_WRITES;
+}
+
+function syncro_staging_write_status_message(): string
+{
+    if (!syncro_is_staging_mode()) {
+        return 'Syncro staging write guard is not active outside staging/test.';
+    }
+    return syncro_staging_writes_allowed()
+        ? 'WARNING: OPS staging Syncro POST/PUT/PATCH writes are enabled for controlled manual testing; DELETE remains blocked.'
+        : 'OPS staging Syncro writes are blocked by default.';
+}
+
 function syncro_staging_blocked_result(): array
 {
     $message = 'Staging mode: Syncro write skipped.';
@@ -161,9 +176,23 @@ function syncro_block_staging_write_if_needed(string $method, string $path): ?ar
         return null;
     }
 
+    if ($method !== 'DELETE' && syncro_staging_writes_allowed()) {
+        static $warned = false;
+        if (!$warned) {
+            syncro_debug_log('staging_writes_allowed_warning', [
+                'status' => 'STAGING_WRITES_ALLOWED',
+                'methods_allowed' => ['POST', 'PUT', 'PATCH'],
+                'delete_blocked' => true,
+            ]);
+            $warned = true;
+        }
+        return null;
+    }
+
     // OPS LIVE (ops.midwestmanagedit.com) may push customers/assets to Syncro.
-    // OPS TEST/staging (ops-test.midwestmanagedit.com) must never write to Syncro;
-    // block external writes here so UI, cron, and onboarding paths are all protected.
+    // OPS TEST/staging (ops-test.midwestmanagedit.com) blocks writes by default.
+    // A local SYNCRO_ALLOW_STAGING_WRITES=true override permits POST/PUT/PATCH only;
+    // DELETE remains blocked here so UI, cron, and onboarding paths are protected.
     syncro_debug_log('staging_write_blocked', [
         'method' => $method,
         'path' => ltrim($path, '/'),
@@ -185,6 +214,10 @@ function syncro_api_request(string $method, string $path, array $query = [], ?ar
     $stagingBlock = syncro_block_staging_write_if_needed($method, $path);
     if ($stagingBlock !== null) {
         return $stagingBlock;
+    }
+
+    if (!empty($GLOBALS['syncro_api_request_mock']) && is_callable($GLOBALS['syncro_api_request_mock'])) {
+        return (array)call_user_func($GLOBALS['syncro_api_request_mock'], $method, $path, $query, $payload);
     }
 
     if (!syncro_is_configured()) {
@@ -280,7 +313,7 @@ function syncro_policy_folder_standard_tree(): array
 
 function syncro_policy_assignment_map(): array
 {
-    return [
+    $defaults = [
         'manage.deploy.workstations' => null,
         'manage.deploy.servers' => null,
         'manage.production.workstations' => null,
@@ -294,16 +327,42 @@ function syncro_policy_assignment_map(): array
         'govern.production.workstations' => null,
         'govern.production.servers' => null,
     ];
+    $configured = defined('SYNCRO_POLICY_ASSIGNMENTS') && is_array(SYNCRO_POLICY_ASSIGNMENTS) ? SYNCRO_POLICY_ASSIGNMENTS : [];
+    foreach ($defaults as $key => $_) {
+        if (array_key_exists($key, $configured) && trim((string)$configured[$key]) !== '') {
+            $defaults[$key] = (int)$configured[$key] > 0 ? (int)$configured[$key] : trim((string)$configured[$key]);
+        }
+    }
+    return $defaults;
+}
+
+function syncro_policy_assignment_missing_ids(): array
+{
+    $missing = [];
+    foreach (syncro_policy_assignment_map() as $key => $policyId) {
+        if ($policyId === null || trim((string)$policyId) === '') {
+            $missing[] = $key;
+        }
+    }
+    return $missing;
 }
 
 function syncro_policy_assignment_status(): string
 {
-    foreach (syncro_policy_assignment_map() as $policyId) {
-        if ($policyId !== null && trim((string)$policyId) !== '') {
-            return 'PARTIAL_CONFIGURED';
-        }
+    $missing = syncro_policy_assignment_missing_ids();
+    if (!$missing) {
+        return 'CONFIGURED';
     }
-    return 'PENDING_MANUAL';
+    return count($missing) === count(syncro_policy_assignment_map()) ? 'PENDING_MANUAL' : 'PARTIAL_CONFIGURED';
+}
+
+function syncro_policy_assignment_status_message(): string
+{
+    $missing = syncro_policy_assignment_missing_ids();
+    if (!$missing) {
+        return 'All Syncro policy assignment IDs are configured. Policy assignment writes remain idempotent and only target OPS-managed folders.';
+    }
+    return 'PENDING_MANUAL: Missing Syncro policy IDs for ' . implode(', ', $missing) . '. No policy assignment writes will be attempted until every required policy ID is configured.';
 }
 
 function syncro_folder_map_table_ready(): bool
@@ -319,6 +378,9 @@ function syncro_folder_map_table_ready(): bool
             provision_status VARCHAR(64) NOT NULL DEFAULT 'PENDING',
             provision_message TEXT NULL,
             last_error TEXT NULL,
+            policy_assignment_status VARCHAR(64) NOT NULL DEFAULT 'PENDING_MANUAL',
+            policy_assignment_message TEXT NULL,
+            policy_assigned_at DATETIME NULL DEFAULT NULL,
             provisioned_at DATETIME NULL DEFAULT NULL,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             PRIMARY KEY (client_id),
@@ -336,6 +398,9 @@ function syncro_folder_map_table_ready(): bool
         'provision_status' => "VARCHAR(64) NOT NULL DEFAULT 'PENDING'",
         'provision_message' => 'TEXT NULL',
         'last_error' => 'TEXT NULL',
+        'policy_assignment_status' => "VARCHAR(64) NOT NULL DEFAULT 'PENDING_MANUAL'",
+        'policy_assignment_message' => 'TEXT NULL',
+        'policy_assigned_at' => 'DATETIME NULL DEFAULT NULL',
         'provisioned_at' => 'DATETIME NULL DEFAULT NULL',
         'updated_at' => 'DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP',
     ];
@@ -408,6 +473,236 @@ function syncro_upsert_client_folder_map_status(int $clientId, ?int $syncroCusto
     return syncro_get_client_folder_map($clientId) ?: [];
 }
 
+
+function syncro_folder_map_columns(): array
+{
+    return [
+        'deploy_workstations_folder_id' => ['parent' => 'Deploy', 'child' => 'Workstations', 'path' => 'Deploy/Workstations'],
+        'deploy_servers_folder_id' => ['parent' => 'Deploy', 'child' => 'Servers', 'path' => 'Deploy/Servers'],
+        'production_workstations_folder_id' => ['parent' => 'Production', 'child' => 'Workstations', 'path' => 'Production/Workstations'],
+        'production_servers_folder_id' => ['parent' => 'Production', 'child' => 'Servers', 'path' => 'Production/Servers'],
+    ];
+}
+
+function syncro_update_client_folder_map_ids(int $clientId, int $syncroCustomerId, array $ids, string $status, string $message, string $lastError = '', bool $provisioned = false, string $policyStatus = 'PENDING_MANUAL', string $policyMessage = ''): array
+{
+    syncro_folder_map_table_ready();
+    $sql = 'INSERT INTO client_syncro_folder_map (
+            client_id, syncro_customer_id, deploy_workstations_folder_id, deploy_servers_folder_id,
+            production_workstations_folder_id, production_servers_folder_id, provision_status,
+            provision_message, last_error, policy_assignment_status, policy_assignment_message,
+            policy_assigned_at, provisioned_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ' . ($provisioned ? 'NOW()' : 'NULL') . ', NOW())
+        ON DUPLICATE KEY UPDATE
+            syncro_customer_id = VALUES(syncro_customer_id),
+            deploy_workstations_folder_id = COALESCE(VALUES(deploy_workstations_folder_id), client_syncro_folder_map.deploy_workstations_folder_id),
+            deploy_servers_folder_id = COALESCE(VALUES(deploy_servers_folder_id), client_syncro_folder_map.deploy_servers_folder_id),
+            production_workstations_folder_id = COALESCE(VALUES(production_workstations_folder_id), client_syncro_folder_map.production_workstations_folder_id),
+            production_servers_folder_id = COALESCE(VALUES(production_servers_folder_id), client_syncro_folder_map.production_servers_folder_id),
+            provision_status = VALUES(provision_status),
+            provision_message = VALUES(provision_message),
+            last_error = VALUES(last_error),
+            policy_assignment_status = VALUES(policy_assignment_status),
+            policy_assignment_message = VALUES(policy_assignment_message),
+            provisioned_at = CASE WHEN VALUES(provisioned_at) IS NULL THEN client_syncro_folder_map.provisioned_at ELSE VALUES(provisioned_at) END,
+            updated_at = NOW()';
+    db()->prepare($sql)->execute([
+        $clientId,
+        $syncroCustomerId,
+        !empty($ids['deploy_workstations_folder_id']) ? (int)$ids['deploy_workstations_folder_id'] : null,
+        !empty($ids['deploy_servers_folder_id']) ? (int)$ids['deploy_servers_folder_id'] : null,
+        !empty($ids['production_workstations_folder_id']) ? (int)$ids['production_workstations_folder_id'] : null,
+        !empty($ids['production_servers_folder_id']) ? (int)$ids['production_servers_folder_id'] : null,
+        strtoupper(trim($status)) ?: 'PENDING',
+        syncro_mask_secrets($message) ?: null,
+        syncro_mask_secrets($lastError) ?: null,
+        strtoupper(trim($policyStatus)) ?: 'PENDING_MANUAL',
+        syncro_mask_secrets($policyMessage) ?: null,
+    ]);
+    return syncro_get_client_folder_map($clientId) ?: [];
+}
+
+function syncro_extract_policy_folders(mixed $data): array
+{
+    if (!is_array($data)) {
+        return [];
+    }
+    foreach (['policy_folders', 'policyFolders', 'folders', 'data'] as $key) {
+        if (isset($data[$key]) && is_array($data[$key])) {
+            $data = $data[$key];
+            break;
+        }
+    }
+    if (isset($data['id'])) {
+        return [$data];
+    }
+    return array_values(array_filter($data, static fn($item): bool => is_array($item) && isset($item['id'])));
+}
+
+function syncro_policy_folder_name(array $folder): string
+{
+    foreach (['name', 'title', 'folder_name', 'policy_folder_name'] as $key) {
+        if (isset($folder[$key]) && trim((string)$folder[$key]) !== '') {
+            return trim((string)$folder[$key]);
+        }
+    }
+    return '';
+}
+
+function syncro_policy_folder_parent_id(array $folder): ?int
+{
+    foreach (['parent_id', 'parent_policy_folder_id', 'parent_folder_id'] as $key) {
+        if (isset($folder[$key]) && (int)$folder[$key] > 0) {
+            return (int)$folder[$key];
+        }
+    }
+    return null;
+}
+
+function syncro_list_customer_policy_folders(int $syncroCustomerId): array
+{
+    $resp = syncro_api_request('GET', 'policy_folders', ['customer_id' => $syncroCustomerId]);
+    if (empty($resp['ok'])) {
+        return ['ok' => false, 'errors' => $resp['errors'] ?? ['Unable to list Syncro policy folders.'], 'response' => $resp];
+    }
+    return ['ok' => true, 'folders' => syncro_extract_policy_folders($resp['data'] ?? [])];
+}
+
+function syncro_create_policy_folder(int $syncroCustomerId, string $name, ?int $parentId = null): array
+{
+    $payload = ['name' => $name, 'customer_id' => $syncroCustomerId];
+    if ($parentId !== null && $parentId > 0) {
+        $payload['parent_id'] = $parentId;
+    }
+    $resp = syncro_api_request('POST', 'policy_folders', [], $payload);
+    if (empty($resp['ok'])) {
+        $message = implode(' ', array_map('strval', (array)($resp['errors'] ?? ['Unable to create Syncro policy folder.'])));
+        syncro_debug_log('policy_folder_create_failed', [
+            'customer_id' => $syncroCustomerId,
+            'folder_name' => $name,
+            'has_parent' => $parentId !== null,
+            'status' => $resp['status'] ?? null,
+            'message' => syncro_mask_secrets($message),
+        ]);
+        return ['ok' => false, 'errors' => $resp['errors'] ?? ['Unable to create Syncro policy folder.'], 'response' => $resp];
+    }
+    $folders = syncro_extract_policy_folders($resp['data'] ?? []);
+    $folder = $folders[0] ?? ($resp['data']['policy_folder'] ?? $resp['data'] ?? []);
+    $id = is_array($folder) ? (int)($folder['id'] ?? 0) : 0;
+    return $id > 0 ? ['ok' => true, 'id' => $id, 'folder' => $folder] : ['ok' => false, 'errors' => ['Syncro created a policy folder but did not return its ID.'], 'response' => $resp];
+}
+
+function syncro_ensure_customer_policy_folder_tree(int $syncroCustomerId, array $existingMap = [], bool $refresh = false): array
+{
+    if (!$refresh && syncro_folder_map_complete($existingMap)) {
+        return ['ok' => true, 'ids' => [], 'message' => 'Existing Syncro folder IDs retained; no folder changes were made.'];
+    }
+
+    $listed = syncro_list_customer_policy_folders($syncroCustomerId);
+    if (empty($listed['ok'])) {
+        $message = 'POLICY_FOLDER_PROVISION_PENDING_MANUAL: OPS could not list Syncro policy folders through GET /policy_folders?customer_id=. No folders were created or changed.';
+        return ['ok' => false, 'manual_required' => true, 'message' => $message, 'errors' => $listed['errors'] ?? [$message]];
+    }
+
+    $folders = (array)($listed['folders'] ?? []);
+    $byRootName = [];
+    $byParentAndName = [];
+    foreach ($folders as $folder) {
+        if (!is_array($folder)) {
+            continue;
+        }
+        $id = (int)($folder['id'] ?? 0);
+        $name = syncro_policy_folder_name($folder);
+        if ($id <= 0 || $name === '') {
+            continue;
+        }
+        $parentId = syncro_policy_folder_parent_id($folder);
+        if ($parentId === null) {
+            $byRootName[strtolower($name)] = $id;
+        } else {
+            $byParentAndName[$parentId . ':' . strtolower($name)] = $id;
+        }
+    }
+
+    $parentIds = [];
+    foreach (array_keys(syncro_policy_folder_standard_tree()) as $parentName) {
+        $key = strtolower($parentName);
+        $parentIds[$parentName] = $byRootName[$key] ?? null;
+        if (!$parentIds[$parentName]) {
+            $created = syncro_create_policy_folder($syncroCustomerId, $parentName);
+            if (empty($created['ok'])) {
+                $message = 'POLICY_FOLDER_PROVISION_PENDING_MANUAL: OPS could list folders but could not create missing parent folder "' . $parentName . '" via POST /policy_folders. No deletes, renames, or asset moves were attempted.';
+                return ['ok' => false, 'manual_required' => true, 'message' => $message, 'errors' => $created['errors'] ?? [$message]];
+            }
+            $parentIds[$parentName] = (int)$created['id'];
+        }
+    }
+
+    $ids = [];
+    foreach (syncro_folder_map_columns() as $column => $meta) {
+        if (!$refresh && !empty($existingMap[$column])) {
+            $ids[$column] = (int)$existingMap[$column];
+            continue;
+        }
+        $parentId = (int)($parentIds[$meta['parent']] ?? 0);
+        $childKey = $parentId . ':' . strtolower((string)$meta['child']);
+        $ids[$column] = $byParentAndName[$childKey] ?? null;
+        if (!$ids[$column]) {
+            $created = syncro_create_policy_folder($syncroCustomerId, (string)$meta['child'], $parentId);
+            if (empty($created['ok'])) {
+                $message = 'POLICY_FOLDER_PROVISION_PENDING_MANUAL: OPS could not create missing child folder "' . $meta['path'] . '" via POST /policy_folders. No deletes, renames, or asset moves were attempted.';
+                return ['ok' => false, 'manual_required' => true, 'message' => $message, 'errors' => $created['errors'] ?? [$message]];
+            }
+            $ids[$column] = (int)$created['id'];
+        }
+    }
+
+    return ['ok' => true, 'ids' => $ids, 'message' => 'Syncro policy folder tree verified/created idempotently. No deletes, renames, or asset moves were attempted.'];
+}
+
+function syncro_assign_policies_to_folder_tree(int $syncroCustomerId, array $folderMap): array
+{
+    $missing = syncro_policy_assignment_missing_ids();
+    if ($missing) {
+        $message = syncro_policy_assignment_status_message();
+        return ['ok' => true, 'skipped' => true, 'status' => 'PENDING_MANUAL', 'message' => $message, 'missing' => $missing];
+    }
+
+    $policies = syncro_policy_assignment_map();
+    $folderBySegment = [
+        'deploy.workstations' => (int)($folderMap['deploy_workstations_folder_id'] ?? 0),
+        'deploy.servers' => (int)($folderMap['deploy_servers_folder_id'] ?? 0),
+        'production.workstations' => (int)($folderMap['production_workstations_folder_id'] ?? 0),
+        'production.servers' => (int)($folderMap['production_servers_folder_id'] ?? 0),
+    ];
+    foreach ($folderBySegment as $segment => $folderId) {
+        if ($folderId <= 0) {
+            return ['ok' => true, 'skipped' => true, 'status' => 'PENDING_MANUAL', 'message' => 'PENDING_MANUAL: Folder ID missing for ' . $segment . '; policy assignment was not attempted.'];
+        }
+    }
+
+    $assignments = [];
+    foreach ($policies as $key => $policyId) {
+        $parts = explode('.', $key, 2);
+        $segment = $parts[1] ?? '';
+        $assignments[] = ['policy_folder_id' => $folderBySegment[$segment] ?? 0, 'policy_id' => $policyId];
+    }
+
+    $resp = syncro_api_request('PATCH', 'customers/' . $syncroCustomerId . '/policy_assignments', [], ['assignments' => $assignments]);
+    if (empty($resp['ok'])) {
+        $message = 'PENDING_MANUAL: Syncro policy assignment write was not accepted by PATCH /customers/{customer_id}/policy_assignments. Existing unrelated assignments were not removed or overwritten.';
+        syncro_debug_log('policy_assignment_pending_manual', [
+            'customer_id' => $syncroCustomerId,
+            'assignment_count' => count($assignments),
+            'status' => $resp['status'] ?? null,
+            'message' => syncro_mask_secrets(implode(' ', array_map('strval', (array)($resp['errors'] ?? [])))),
+        ]);
+        return ['ok' => true, 'skipped' => true, 'status' => 'PENDING_MANUAL', 'message' => $message, 'errors' => $resp['errors'] ?? []];
+    }
+
+    return ['ok' => true, 'status' => 'READY', 'message' => 'Syncro policies assigned to OPS-managed folder tree.'];
+}
+
 function syncro_provision_client_folder_map(int $clientId, ?int $syncroCustomerId = null, bool $refresh = false): array
 {
     if ($clientId <= 0) {
@@ -427,22 +722,38 @@ function syncro_provision_client_folder_map(int $clientId, ?int $syncroCustomerI
         return ['ok' => true, 'skipped' => true, 'status' => 'PENDING', 'message' => $message, 'folder_map' => $map];
     }
 
-    if (syncro_is_staging_mode()) {
-        $message = 'Staging mode: Syncro folder provisioning write calls are blocked.';
+    if (syncro_is_staging_mode() && !syncro_staging_writes_allowed()) {
+        $message = 'Staging mode: Syncro folder provisioning write calls are blocked. Set local SYNCRO_ALLOW_STAGING_WRITES=true only for controlled OPS staging tests; DELETE remains blocked.';
         $map = syncro_upsert_client_folder_map_status($clientId, (int)$syncroCustomerId, 'STAGING_BLOCKED', $message);
         return ['ok' => true, 'skipped' => true, 'staging_blocked' => true, 'status' => 'STAGING_BLOCKED', 'message' => $message, 'folder_map' => $map];
     }
 
     $existing = syncro_get_client_folder_map($clientId) ?: [];
     if (!$refresh && syncro_folder_map_complete($existing)) {
+        $policy = syncro_assign_policies_to_folder_tree((int)$syncroCustomerId, $existing);
+        $policyStatus = (string)($policy['status'] ?? syncro_policy_assignment_status());
+        $policyMessage = (string)($policy['message'] ?? syncro_policy_assignment_status_message());
         $message = 'Existing Syncro folder IDs retained; no folder changes were made.';
-        $map = syncro_upsert_client_folder_map_status($clientId, (int)$syncroCustomerId, 'READY', $message, '', true);
-        return ['ok' => true, 'status' => 'READY', 'message' => $message, 'folder_map' => $map, 'policy_assignment_status' => syncro_policy_assignment_status()];
+        $map = syncro_update_client_folder_map_ids($clientId, (int)$syncroCustomerId, [], 'READY', $message, '', true, $policyStatus, $policyMessage);
+        return ['ok' => true, 'status' => 'READY', 'message' => $message . ' Policy assignment: ' . $policyMessage, 'folder_map' => $map, 'policy_assignment_status' => $policyStatus, 'policy_assignment_message' => $policyMessage];
     }
 
-    $message = 'POLICY_FOLDER_PROVISION_PENDING_MANUAL: Syncro policy folder list/create endpoints are not configured in OPS, so no folders were created or changed. Manually create/verify Deploy and Production workstation/server folders in this customer and record their customer-specific IDs.';
-    $map = syncro_upsert_client_folder_map_status($clientId, (int)$syncroCustomerId, 'POLICY_FOLDER_PROVISION_PENDING_MANUAL', $message);
-    return ['ok' => true, 'skipped' => true, 'manual_required' => true, 'status' => 'POLICY_FOLDER_PROVISION_PENDING_MANUAL', 'message' => $message, 'folder_map' => $map, 'policy_assignment_status' => syncro_policy_assignment_status()];
+    $tree = syncro_ensure_customer_policy_folder_tree((int)$syncroCustomerId, $existing, $refresh);
+    if (empty($tree['ok'])) {
+        $message = (string)($tree['message'] ?? 'POLICY_FOLDER_PROVISION_PENDING_MANUAL: Syncro policy folder endpoint support is incomplete.');
+        $map = syncro_upsert_client_folder_map_status($clientId, (int)$syncroCustomerId, 'POLICY_FOLDER_PROVISION_PENDING_MANUAL', $message, implode(' ', array_map('strval', (array)($tree['errors'] ?? []))));
+        return ['ok' => true, 'skipped' => true, 'manual_required' => true, 'status' => 'POLICY_FOLDER_PROVISION_PENDING_MANUAL', 'message' => $message, 'errors' => $tree['errors'] ?? [], 'folder_map' => $map, 'policy_assignment_status' => syncro_policy_assignment_status(), 'policy_assignment_message' => syncro_policy_assignment_status_message()];
+    }
+
+    $ids = array_merge(array_intersect_key($existing, syncro_folder_map_columns()), (array)($tree['ids'] ?? []));
+    $provisionalMap = array_merge($existing, $ids);
+    $policy = syncro_assign_policies_to_folder_tree((int)$syncroCustomerId, $provisionalMap);
+    $policyStatus = (string)($policy['status'] ?? syncro_policy_assignment_status());
+    $policyMessage = (string)($policy['message'] ?? syncro_policy_assignment_status_message());
+    $message = (string)($tree['message'] ?? 'Syncro policy folder tree verified/created idempotently.');
+    $map = syncro_update_client_folder_map_ids($clientId, (int)$syncroCustomerId, $ids, 'READY', $message, '', true, $policyStatus, $policyMessage);
+
+    return ['ok' => true, 'status' => 'READY', 'message' => $message . ' Policy assignment: ' . $policyMessage, 'folder_map' => $map, 'policy_assignment_status' => $policyStatus, 'policy_assignment_message' => $policyMessage];
 }
 
 function syncro_attach_folder_provisioning_result(array $result, int $clientId, ?int $syncroCustomerId): array

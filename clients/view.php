@@ -56,7 +56,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     exit;
 }
 $syncroFolderMap = syncro_get_client_folder_map($clientId);
-$syncroPolicyAssignmentStatus = syncro_policy_assignment_status();
+$syncroPolicyAssignmentStatus = !empty($syncroFolderMap['policy_assignment_status']) ? (string)$syncroFolderMap['policy_assignment_status'] : syncro_policy_assignment_status();
+$syncroPolicyAssignmentMessage = !empty($syncroFolderMap['policy_assignment_message']) ? (string)$syncroFolderMap['policy_assignment_message'] : syncro_policy_assignment_status_message();
+$syncroStagingWritesEnabled = syncro_is_staging_mode() && syncro_staging_writes_allowed();
+$syncroStagingWriteMessage = syncro_staging_write_status_message();
 page_header((string)$client['legal_name'], 'clients');
 ?>
 <?php if ($flashMsg !== ''): ?><div class="flash-success"><?= htmlspecialchars($flashMsg) ?></div><?php endif; ?>
@@ -76,7 +79,11 @@ page_header((string)$client['legal_name'], 'clients');
   <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
     <div>
       <h2 style="margin:0;font-size:20px;">Syncro folder map provisioning</h2>
-      <div style="opacity:.74;line-height:1.45;">Customer-specific policy folder IDs are stored per client. OPS will not overwrite existing folder IDs or change Syncro folders unless provisioning support is explicitly added.</div>
+      <div style="opacity:.74;line-height:1.45;">Customer-specific policy folder IDs are stored per client. OPS preserves existing IDs, creates only missing supported folders, and never deletes, renames, or moves assets.</div>
+      <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <span style="display:inline-flex;padding:5px 9px;border-radius:999px;font-size:12px;font-weight:800;background:<?= $syncroStagingWritesEnabled ? 'rgba(245,158,11,.18)' : 'rgba(15,23,42,.06)' ?>;color:<?= $syncroStagingWritesEnabled ? '#92400e' : '#334155' ?>;border:1px solid <?= $syncroStagingWritesEnabled ? 'rgba(245,158,11,.35)' : 'rgba(15,23,42,.12)' ?>;">Staging writes <?= $syncroStagingWritesEnabled ? 'ENABLED' : 'blocked' ?></span>
+        <span style="font-size:12px;opacity:.78;"><?= htmlspecialchars($syncroStagingWriteMessage) ?></span>
+      </div>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;">
       <form method="post" style="margin:0;">
@@ -106,6 +113,7 @@ page_header((string)$client['legal_name'], 'clients');
     <div style="margin-top:12px;line-height:1.5;">
       <?php if (!empty($syncroFolderMap['provision_message'])): ?><div><strong>Last message:</strong> <?= htmlspecialchars((string)$syncroFolderMap['provision_message']) ?></div><?php endif; ?>
       <?php if (!empty($syncroFolderMap['last_error'])): ?><div style="color:#b91c1c;"><strong>Last error:</strong> <?= htmlspecialchars((string)$syncroFolderMap['last_error']) ?></div><?php endif; ?>
+      <?php if ($syncroPolicyAssignmentMessage !== ''): ?><div><strong>Policy assignment message:</strong> <?= htmlspecialchars($syncroPolicyAssignmentMessage) ?></div><?php endif; ?>
     </div>
   <?php endif; ?>
   <div style="margin-top:12px;font-size:12px;opacity:.72;line-height:1.45;">Manual verification reference: TEST-Cravin Vapes observed Deploy/Workstations as 5029166 and Production/Workstations as 5029170; the workstation finalizer moved MANAGE-WS-01 and MANAGE-WS-02 when those IDs were configured.</div>
