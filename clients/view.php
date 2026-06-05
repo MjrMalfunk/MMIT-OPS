@@ -6,6 +6,9 @@ require_once __DIR__ . '/../inc/layout.php';
 require_once __DIR__ . '/../inc/accounting.php';
 require_once __DIR__ . '/../inc/syncro.php';
 require_login();
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    csrf_check();
+}
 $clientId = (int)($_GET['client_id'] ?? 0);
 $client = $clientId > 0 ? client_get_by_id($clientId) : null;
 if (!$client) {
@@ -30,6 +33,30 @@ if (!empty($_SESSION['flash_error'])) {
     $flashError = (string)$_SESSION['flash_error'];
     unset($_SESSION['flash_error']);
 }
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $action = (string)($_POST['action'] ?? '');
+    if ($action === 'retry_syncro') {
+        $result = syncro_sync_client($clientId);
+        if (!empty($result['ok'])) {
+            $_SESSION['flash_msg'] = (string)($result['message'] ?? syncro_action_success_message((string)($result['action'] ?? '')));
+        } else {
+            $_SESSION['flash_error'] = implode(' ', array_map('strval', (array)($result['errors'] ?? ['Unable to retry Syncro sync.'])));
+        }
+    } elseif ($action === 'retry_syncro_folder_provisioning') {
+        $result = syncro_provision_client_folder_map($clientId, !empty($client['syncro_customer_id']) ? (int)$client['syncro_customer_id'] : null, true);
+        if (!empty($result['ok'])) {
+            $_SESSION['flash_msg'] = (string)($result['message'] ?? 'Syncro folder provisioning checked.');
+        } else {
+            $_SESSION['flash_error'] = implode(' ', array_map('strval', (array)($result['errors'] ?? ['Unable to retry Syncro folder provisioning.'])));
+        }
+    } else {
+        $_SESSION['flash_error'] = 'Unknown client action.';
+    }
+    header('Location: ' . BASE_URL . '/clients/view.php?client_id=' . $clientId . '#syncro-folder-map', true, 303);
+    exit;
+}
+$syncroFolderMap = syncro_get_client_folder_map($clientId);
+$syncroPolicyAssignmentStatus = syncro_policy_assignment_status();
 page_header((string)$client['legal_name'], 'clients');
 ?>
 <?php if ($flashMsg !== ''): ?><div class="flash-success"><?= htmlspecialchars($flashMsg) ?></div><?php endif; ?>
@@ -44,6 +71,45 @@ page_header((string)$client['legal_name'], 'clients');
 <?php if (!empty($client['notes'])): ?><p><strong>Notes:</strong><br><?= nl2br(htmlspecialchars((string)$client['notes'])) ?></p><?php endif; ?>
 <p><strong>Syncro Status:</strong> <?= syncro_status_badge_html((string)($client['syncro_sync_status'] ?? 'PENDING'), !empty($client['syncro_customer_id']) ? (int)$client['syncro_customer_id'] : null) ?><?php if (!empty($client['syncro_last_error'])): ?><br><small style="color:#b91c1c;">Last error: <?= htmlspecialchars((string)$client['syncro_last_error']) ?></small><?php endif; ?></p>
 <p><strong>Syncro Readiness:</strong> <?= empty($syncroReadiness['missing']) ? 'Ready' : 'Missing ' . htmlspecialchars(implode(', ', array_values($syncroReadiness['missing']))) ?></p>
+
+<div id="syncro-folder-map" class="card" style="padding:16px;margin:18px 0;border:1px solid rgba(15,23,42,.12);">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+    <div>
+      <h2 style="margin:0;font-size:20px;">Syncro folder map provisioning</h2>
+      <div style="opacity:.74;line-height:1.45;">Customer-specific policy folder IDs are stored per client. OPS will not overwrite existing folder IDs or change Syncro folders unless provisioning support is explicitly added.</div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <form method="post" style="margin:0;">
+        <?= csrf_field() ?>
+        <input type="hidden" name="action" value="retry_syncro_folder_provisioning">
+        <button class="btn btn-secondary" style="width:auto;padding:9px 12px;" type="submit">Retry folder provisioning</button>
+      </form>
+      <form method="post" style="margin:0;">
+        <?= csrf_field() ?>
+        <input type="hidden" name="action" value="retry_syncro">
+        <button class="btn btn-primary" style="width:auto;padding:9px 12px;" type="submit">Retry Syncro sync</button>
+      </form>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;">
+    <div><strong>Syncro customer ID</strong><br><?= !empty($syncroFolderMap['syncro_customer_id']) ? (int)$syncroFolderMap['syncro_customer_id'] : (!empty($client['syncro_customer_id']) ? (int)$client['syncro_customer_id'] : '—') ?></div>
+    <div><strong>Deploy/Workstations</strong><br><?= !empty($syncroFolderMap['deploy_workstations_folder_id']) ? (int)$syncroFolderMap['deploy_workstations_folder_id'] : '—' ?></div>
+    <div><strong>Deploy/Servers</strong><br><?= !empty($syncroFolderMap['deploy_servers_folder_id']) ? (int)$syncroFolderMap['deploy_servers_folder_id'] : '—' ?></div>
+    <div><strong>Production/Workstations</strong><br><?= !empty($syncroFolderMap['production_workstations_folder_id']) ? (int)$syncroFolderMap['production_workstations_folder_id'] : '—' ?></div>
+    <div><strong>Production/Servers</strong><br><?= !empty($syncroFolderMap['production_servers_folder_id']) ? (int)$syncroFolderMap['production_servers_folder_id'] : '—' ?></div>
+    <div><strong>Provision status</strong><br><?= htmlspecialchars((string)($syncroFolderMap['provision_status'] ?? 'PENDING')) ?></div>
+    <div><strong>Policy assignment</strong><br><?= htmlspecialchars($syncroPolicyAssignmentStatus) ?></div>
+    <div><strong>Provisioned at</strong><br><?= htmlspecialchars((string)($syncroFolderMap['provisioned_at'] ?? '—')) ?></div>
+    <div><strong>Updated at</strong><br><?= htmlspecialchars((string)($syncroFolderMap['updated_at'] ?? '—')) ?></div>
+  </div>
+  <?php if (!empty($syncroFolderMap['provision_message']) || !empty($syncroFolderMap['last_error'])): ?>
+    <div style="margin-top:12px;line-height:1.5;">
+      <?php if (!empty($syncroFolderMap['provision_message'])): ?><div><strong>Last message:</strong> <?= htmlspecialchars((string)$syncroFolderMap['provision_message']) ?></div><?php endif; ?>
+      <?php if (!empty($syncroFolderMap['last_error'])): ?><div style="color:#b91c1c;"><strong>Last error:</strong> <?= htmlspecialchars((string)$syncroFolderMap['last_error']) ?></div><?php endif; ?>
+    </div>
+  <?php endif; ?>
+  <div style="margin-top:12px;font-size:12px;opacity:.72;line-height:1.45;">Manual verification reference: TEST-Cravin Vapes observed Deploy/Workstations as 5029166 and Production/Workstations as 5029170; the workstation finalizer moved MANAGE-WS-01 and MANAGE-WS-02 when those IDs were configured.</div>
+</div>
 <hr>
 <div style="display:flex;gap:20px;flex-wrap:wrap;">
   <div style="flex:1;min-width:280px;">
