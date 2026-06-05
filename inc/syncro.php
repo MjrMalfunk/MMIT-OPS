@@ -372,9 +372,9 @@ function syncro_policy_assignment_status_message(): string
 {
     $missing = syncro_policy_assignment_missing_ids();
     if (!$missing) {
-        return 'All Syncro policy assignment IDs are configured. Policy assignment writes remain idempotent and only target OPS-managed folders.';
+        return 'All Syncro policy assignment IDs are configured. Policy folder PUTs remain idempotent and only target OPS-managed folders.';
     }
-    return 'PENDING_MANUAL: Missing Syncro policy IDs for ' . implode(', ', $missing) . '. No policy assignment writes will be attempted until every required policy ID is configured.';
+    return 'PENDING_MANUAL: Missing Syncro policy IDs for ' . implode(', ', $missing) . '. No Syncro policy folder PUTs will be attempted until every required policy ID is configured.';
 }
 
 function syncro_normalize_policy_tier(string $value): ?string
@@ -517,7 +517,7 @@ function syncro_build_selected_tier_policy_assignment_payload(string $tier, arra
 {
     $tier = syncro_normalize_policy_tier($tier) ?? '';
     if ($tier === '') {
-        return ['ok' => false, 'status' => 'PENDING_MANUAL', 'message' => 'PENDING_MANUAL: Unknown Syncro policy tier; policy assignment was not attempted.'];
+        return ['ok' => false, 'status' => 'PENDING_MANUAL', 'message' => 'PENDING_MANUAL: Unknown Syncro policy tier; policy folder update was not attempted.'];
     }
 
     $policies = $policyMap ?? syncro_policy_assignment_map();
@@ -529,7 +529,7 @@ function syncro_build_selected_tier_policy_assignment_payload(string $tier, arra
         }
     }
     if ($missingPolicies) {
-        return ['ok' => false, 'status' => 'PENDING_MANUAL', 'message' => 'PENDING_MANUAL: Missing Syncro policy IDs for selected ' . $tier . ' tier: ' . implode(', ', $missingPolicies) . '. No policy assignment write was attempted.', 'missing' => $missingPolicies, 'tier' => $tier];
+        return ['ok' => false, 'status' => 'PENDING_MANUAL', 'message' => 'PENDING_MANUAL: Missing Syncro policy IDs for selected ' . $tier . ' tier: ' . implode(', ', $missingPolicies) . '. No Syncro policy folder PUT was attempted.', 'missing' => $missingPolicies, 'tier' => $tier];
     }
 
     $segments = [
@@ -543,17 +543,17 @@ function syncro_build_selected_tier_policy_assignment_payload(string $tier, arra
     foreach ($segments as $segment => $column) {
         $folderId = (int)($folderMap[$column] ?? 0);
         if ($folderId <= 0) {
-            return ['ok' => false, 'status' => 'PENDING_MANUAL', 'message' => 'PENDING_MANUAL: Folder ID missing for ' . $segment . '; policy assignment was not attempted.', 'missing' => [$column], 'tier' => $tier];
+            return ['ok' => false, 'status' => 'PENDING_MANUAL', 'message' => 'PENDING_MANUAL: Folder ID missing for ' . $segment . '; policy folder update was not attempted.', 'missing' => [$column], 'tier' => $tier];
         }
         $policyKey = $tier . '.' . $segment;
         $policyId = $policies[$policyKey];
-        $assignments[] = ['policy_folder_id' => $folderId, 'policy_id' => $policyId];
-        $pairs[] = ['segment' => $segment, 'policy_folder_id' => $folderId, 'policy_id' => $policyId];
+        $assignments[] = ['policy_folder_id' => $folderId, 'partial_policy_id' => (int)$policyId];
+        $pairs[] = ['segment' => $segment, 'policy_folder_id' => $folderId, 'partial_policy_id' => (int)$policyId];
     }
 
     $folderIds = array_map(static fn(array $assignment): int => (int)$assignment['policy_folder_id'], $assignments);
     if (count($assignments) !== 4 || count(array_unique($folderIds)) !== 4) {
-        return ['ok' => false, 'status' => 'PENDING_MANUAL', 'message' => 'PENDING_MANUAL: Syncro policy assignment payload validation failed; expected exactly four assignments for four unique OPS-managed folders. No policy assignment write was attempted.', 'tier' => $tier, 'assignment_pairs' => $pairs];
+        return ['ok' => false, 'status' => 'PENDING_MANUAL', 'message' => 'PENDING_MANUAL: Syncro policy assignment payload validation failed; expected exactly four assignments for four unique OPS-managed folders. No Syncro policy folder PUT was attempted.', 'tier' => $tier, 'assignment_pairs' => $pairs];
     }
 
     return ['ok' => true, 'tier' => $tier, 'assignments' => $assignments, 'assignment_pairs' => $pairs];
@@ -950,6 +950,53 @@ function syncro_ensure_customer_policy_folder_tree(int $syncroCustomerId, array 
     ];
 }
 
+function syncro_policy_folder_partial_policy_id(array $folder): ?int
+{
+    if (array_key_exists('partial_policy_id', $folder) && trim((string)$folder['partial_policy_id']) !== '') {
+        return (int)$folder['partial_policy_id'];
+    }
+    return null;
+}
+
+function syncro_policy_folder_from_response(mixed $data): array
+{
+    if (!is_array($data)) {
+        return [];
+    }
+    foreach (['policy_folder', 'policyFolder', 'folder', 'data'] as $key) {
+        if (isset($data[$key]) && is_array($data[$key])) {
+            $data = $data[$key];
+            break;
+        }
+    }
+    return isset($data['id']) ? $data : [];
+}
+
+function syncro_policy_assignment_pending_manual_result(string $message, int $syncroCustomerId, string $tier, array $assignmentPairs, array $resp = [], array $extra = []): array
+{
+    $request = is_array($resp['request'] ?? null) ? (array)$resp['request'] : [];
+    syncro_debug_log('policy_assignment_pending_manual', array_merge([
+        'customer_id' => $syncroCustomerId,
+        'method' => strtoupper((string)($request['method'] ?? ($extra['method'] ?? 'PUT'))),
+        'path' => syncro_mask_secrets((string)($request['path'] ?? ($extra['path'] ?? 'policy_folders/{folder_id}'))),
+        'status' => $resp['status'] ?? ($extra['status'] ?? 'PENDING_MANUAL'),
+        'errors' => array_map(static fn($error): string => syncro_mask_secrets((string)$error), (array)($resp['errors'] ?? ($extra['errors'] ?? []))),
+        'response_excerpt' => syncro_mask_secrets((string)($resp['response_excerpt'] ?? ($extra['response_excerpt'] ?? ''))),
+        'selected_tier' => $tier,
+        'assignment_count' => count($assignmentPairs),
+        'folder_policy_pairs' => $assignmentPairs,
+    ], $extra));
+
+    return [
+        'ok' => true,
+        'skipped' => true,
+        'status' => 'PENDING_MANUAL',
+        'message' => syncro_mask_secrets($message),
+        'errors' => $resp['errors'] ?? ($extra['errors'] ?? []),
+        'tier' => $tier,
+    ];
+}
+
 function syncro_assign_policies_to_folder_tree(int $syncroCustomerId, array $folderMap, $clientContext = null): array
 {
     $client = [];
@@ -962,7 +1009,7 @@ function syncro_assign_policies_to_folder_tree(int $syncroCustomerId, array $fol
     $tierResult = $client ? syncro_resolve_client_policy_tier($client) : [
         'ok' => false,
         'status' => 'PENDING_MANUAL',
-        'message' => 'PENDING_MANUAL: Client context is required to resolve the Syncro policy tier. No Syncro policy assignment write was attempted.',
+        'message' => 'PENDING_MANUAL: Client context is required to resolve the Syncro policy tier. No Syncro policy folder update was attempted.',
     ];
     if (empty($tierResult['ok'])) {
         return ['ok' => true, 'skipped' => true, 'status' => 'PENDING_MANUAL', 'message' => (string)($tierResult['message'] ?? 'PENDING_MANUAL: Unable to resolve Syncro policy tier.')];
@@ -983,25 +1030,133 @@ function syncro_assign_policies_to_folder_tree(int $syncroCustomerId, array $fol
 
     $assignments = (array)$payload['assignments'];
     $assignmentPairs = (array)$payload['assignment_pairs'];
-    $resp = syncro_api_request('PATCH', 'customers/' . $syncroCustomerId . '/policy_assignments', [], ['assignments' => $assignments]);
-    if (empty($resp['ok'])) {
-        $message = 'PENDING_MANUAL: Syncro policy assignment write was not accepted by PATCH /customers/{customer_id}/policy_assignments for the selected ' . $tier . ' tier. Existing unrelated assignments were not removed or overwritten.';
-        $request = is_array($resp['request'] ?? null) ? (array)$resp['request'] : [];
-        syncro_debug_log('policy_assignment_pending_manual', [
-            'customer_id' => $syncroCustomerId,
-            'method' => strtoupper((string)($request['method'] ?? 'PATCH')),
-            'path' => syncro_mask_secrets((string)($request['path'] ?? ('/api/v1/customers/' . $syncroCustomerId . '/policy_assignments'))),
-            'status' => $resp['status'] ?? null,
-            'errors' => array_map(static fn($error): string => syncro_mask_secrets((string)$error), (array)($resp['errors'] ?? [])),
-            'response_excerpt' => syncro_mask_secrets((string)($resp['response_excerpt'] ?? '')),
-            'selected_tier' => $tier,
-            'assignment_count' => count($assignments),
-            'assignment_pairs' => $assignmentPairs,
+    $folderIds = array_map(static fn(array $assignment): int => (int)($assignment['policy_folder_id'] ?? 0), $assignments);
+    if (count($assignments) !== 4 || count(array_unique($folderIds)) !== 4) {
+        $message = 'PENDING_MANUAL: Syncro policy folder update validation failed; expected exactly four assignments for four unique OPS-managed folders. No Syncro API write was attempted.';
+        return syncro_policy_assignment_pending_manual_result($message, $syncroCustomerId, $tier, $assignmentPairs, [], [
+            'method' => 'VALIDATE',
+            'path' => 'policy_folders/{folder_id}',
+            'errors' => [$message],
         ]);
-        return ['ok' => true, 'skipped' => true, 'status' => 'PENDING_MANUAL', 'message' => $message, 'errors' => $resp['errors'] ?? [], 'tier' => $tier];
     }
 
-    return ['ok' => true, 'status' => 'READY', 'message' => 'Syncro ' . $tier . ' policies assigned to the four OPS-managed folder tree folders.', 'tier' => $tier];
+    $listed = syncro_list_customer_policy_folders($syncroCustomerId);
+    if (empty($listed['ok'])) {
+        $message = 'PENDING_MANUAL: OPS could not list Syncro policy folders before policy assignment updates. No Syncro policy folder PUT was attempted.';
+        return syncro_policy_assignment_pending_manual_result($message, $syncroCustomerId, $tier, $assignmentPairs, $listed, [
+            'method' => 'GET',
+            'path' => 'policy_folders?customer_id=' . $syncroCustomerId,
+        ]);
+    }
+
+    $foldersById = [];
+    foreach ((array)($listed['folders'] ?? []) as $folder) {
+        if (is_array($folder) && (int)($folder['id'] ?? 0) > 0) {
+            $foldersById[(int)$folder['id']] = $folder;
+        }
+    }
+
+    $preparedAssignments = [];
+    foreach ($assignments as $assignment) {
+        $folderId = (int)($assignment['policy_folder_id'] ?? 0);
+        $policyId = (int)($assignment['partial_policy_id'] ?? 0);
+        $folder = $foldersById[$folderId] ?? [];
+        $name = syncro_policy_folder_name($folder);
+        $parentId = syncro_policy_folder_parent_id($folder);
+        if (!$folder || $name === '' || $parentId === null || $policyId <= 0) {
+            $message = 'PENDING_MANUAL: OPS could not verify Syncro policy folder #' . $folderId . ' name, parent_id, and selected partial_policy_id before updating. No Syncro policy folder PUT was attempted, and no folders were deleted, renamed, or moved.';
+            return syncro_policy_assignment_pending_manual_result($message, $syncroCustomerId, $tier, $assignmentPairs, [], [
+                'method' => 'VALIDATE',
+                'path' => 'policy_folders/' . $folderId,
+                'errors' => [$message],
+                'folder_id' => $folderId,
+                'intended_partial_policy_id' => $policyId,
+            ]);
+        }
+        $preparedAssignments[] = [
+            'folder_id' => $folderId,
+            'partial_policy_id' => $policyId,
+            'folder' => $folder,
+            'name' => $name,
+            'parent_id' => $parentId,
+        ];
+    }
+
+    $updates = 0;
+    $alreadyCorrect = 0;
+    foreach ($preparedAssignments as $prepared) {
+        $folderId = (int)$prepared['folder_id'];
+        $policyId = (int)$prepared['partial_policy_id'];
+        $folder = (array)$prepared['folder'];
+        $name = (string)$prepared['name'];
+        $parentId = (int)$prepared['parent_id'];
+        $currentPolicyId = syncro_policy_folder_partial_policy_id($folder);
+        if ($currentPolicyId === $policyId) {
+            $alreadyCorrect++;
+            syncro_debug_log('policy_folder_assignment_idempotent_success', [
+                'customer_id' => $syncroCustomerId,
+                'method' => 'PUT_SKIPPED_ALREADY_CORRECT',
+                'path' => 'policy_folders/' . $folderId,
+                'status' => 'READY',
+                'selected_tier' => $tier,
+                'folder_id' => $folderId,
+                'partial_policy_id' => $policyId,
+                'folder_policy_pairs' => $assignmentPairs,
+            ]);
+            continue;
+        }
+
+        $putPayload = [
+            'name' => $name,
+            'customer_id' => $syncroCustomerId,
+            'parent_id' => $parentId,
+            'partial_policy_id' => $policyId,
+        ];
+        $resp = syncro_api_request('PUT', 'policy_folders/' . $folderId, [], $putPayload);
+        if (empty($resp['ok'])) {
+            $message = 'PENDING_MANUAL: Syncro policy folder #' . $folderId . ' was not accepted by PUT /policy_folders/{folder_id} for the selected ' . $tier . ' tier. No folders were deleted, renamed, or moved.';
+            return syncro_policy_assignment_pending_manual_result($message, $syncroCustomerId, $tier, $assignmentPairs, $resp, [
+                'folder_id' => $folderId,
+                'intended_partial_policy_id' => $policyId,
+            ]);
+        }
+
+        $returnedFolder = syncro_policy_folder_from_response($resp['data'] ?? []);
+        $returnedPolicyId = syncro_policy_folder_partial_policy_id($returnedFolder);
+        $request = is_array($resp['request'] ?? null) ? (array)$resp['request'] : [];
+        if ($returnedPolicyId !== $policyId) {
+            $message = 'PENDING_MANUAL: Syncro policy folder #' . $folderId . ' returned partial_policy_id ' . (string)($returnedPolicyId ?? 'null') . ' after PUT, expected ' . $policyId . '. OPS failed closed and did not continue policy updates.';
+            return syncro_policy_assignment_pending_manual_result($message, $syncroCustomerId, $tier, $assignmentPairs, $resp, [
+                'folder_id' => $folderId,
+                'intended_partial_policy_id' => $policyId,
+                'returned_partial_policy_id' => $returnedPolicyId,
+                'response_excerpt' => syncro_redacted_response_excerpt($resp['data'] ?? []),
+            ]);
+        }
+
+        $updates++;
+        syncro_debug_log('policy_folder_assignment_update_success', [
+            'customer_id' => $syncroCustomerId,
+            'method' => strtoupper((string)($request['method'] ?? 'PUT')),
+            'path' => syncro_mask_secrets((string)($request['path'] ?? ('/api/v1/policy_folders/' . $folderId))),
+            'status' => $resp['status'] ?? null,
+            'errors' => [],
+            'response_excerpt' => syncro_redacted_response_excerpt($resp['data'] ?? []),
+            'selected_tier' => $tier,
+            'folder_id' => $folderId,
+            'partial_policy_id' => $policyId,
+            'folder_policy_pairs' => $assignmentPairs,
+        ]);
+    }
+
+    return [
+        'ok' => true,
+        'status' => 'READY',
+        'message' => 'Syncro ' . $tier . ' policies assigned to the four OPS-managed policy folders via PUT /policy_folders/{folder_id}.',
+        'tier' => $tier,
+        'updated_count' => $updates,
+        'already_correct_count' => $alreadyCorrect,
+    ];
 }
 
 function syncro_provision_client_folder_map(int $clientId, ?int $syncroCustomerId = null, bool $refresh = false): array
