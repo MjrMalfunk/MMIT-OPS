@@ -42,6 +42,12 @@ foreach ([
 if (syncro_policy_assignment_status() !== 'PENDING_MANUAL') {
     $failed[] = 'Policy assignment defaults pending manual';
 }
+if (count(syncro_policy_assignment_missing_ids()) !== count($policies)) {
+    $failed[] = 'Policy assignment missing-ID helper reports all placeholders';
+}
+if (!str_contains(syncro_policy_assignment_status_message(), 'PENDING_MANUAL')) {
+    $failed[] = 'Policy assignment missing-ID message is admin-visible';
+}
 
 $blocked = syncro_api_request('DELETE', 'customers/123/policy_folders/456');
 if (($blocked['status'] ?? null) !== 'STAGING_BLOCKED' || empty($blocked['staging_blocked'])) {

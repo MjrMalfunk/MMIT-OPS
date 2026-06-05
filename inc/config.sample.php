@@ -82,11 +82,29 @@ define('ESIGNATURES_WEBHOOK_URL', '');
 
 // Syncro integration
 // OPS LIVE (APP_ENV=production / ops.midwestmanagedit.com) may push customer records to Syncro.
-// OPS TEST/staging (APP_ENV=staging or ops-test.midwestmanagedit.com) must not push to Syncro;
-// inc/syncro.php blocks POST, PUT, PATCH, and DELETE centrally before any external API call.
+// OPS TEST/staging (APP_ENV=staging or ops-test.midwestmanagedit.com) blocks Syncro writes by default.
+// Controlled staging/testing override only: set true in a private local inc/config.php to allow
+// Syncro POST/PUT/PATCH calls from OPS staging. DELETE remains blocked even when true.
+// Never enable in committed config or without an active manual test window.
+define('SYNCRO_ALLOW_STAGING_WRITES', false);
 define('SYNCRO_SUBDOMAIN', 'midwestmanagedit');
 define('SYNCRO_API_KEY', '');
 define('SYNCRO_BASE_URL', ''); // Optional override. Leave blank to use https://<subdomain>.syncromsp.com/api/v1/
+define('SYNCRO_POLICY_ASSIGNMENTS', [
+    // Configure real Syncro policy IDs only; leave null to fail closed with PENDING_MANUAL.
+    'manage.deploy.workstations' => null,
+    'manage.deploy.servers' => null,
+    'manage.production.workstations' => null,
+    'manage.production.servers' => null,
+    'protect.deploy.workstations' => null,
+    'protect.deploy.servers' => null,
+    'protect.production.workstations' => null,
+    'protect.production.servers' => null,
+    'govern.deploy.workstations' => null,
+    'govern.deploy.servers' => null,
+    'govern.production.workstations' => null,
+    'govern.production.servers' => null,
+]);
 
 // Email delivery (Microsoft 365 / Exchange Online)
 define('MAIL_TRANSPORT_PRIMARY', 'smtp');
