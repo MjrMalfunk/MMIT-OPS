@@ -297,6 +297,275 @@ function syncro_api_request(string $method, string $path, array $query = [], ?ar
     ];
 }
 
+
+function syncro_asset_list_from_response(mixed $data): array
+{
+    if (!is_array($data)) {
+        return [];
+    }
+    foreach (['assets', 'customer_assets', 'records', 'items', 'results', 'data'] as $key) {
+        if (isset($data[$key]) && is_array($data[$key])) {
+            if (array_is_list($data[$key])) {
+                return array_values(array_filter($data[$key], static fn($item): bool => is_array($item)));
+            }
+            return syncro_asset_list_from_response($data[$key]);
+        }
+    }
+    if (array_is_list($data)) {
+        return array_values(array_filter($data, static fn($item): bool => is_array($item)));
+    }
+    return [];
+}
+
+function syncro_extract_asset_from_response(mixed $data): array
+{
+    if (!is_array($data)) {
+        return [];
+    }
+    foreach (['asset', 'customer_asset', 'record', 'item', 'data'] as $key) {
+        if (isset($data[$key]) && is_array($data[$key])) {
+            if (isset($data[$key]['id'])) {
+                return $data[$key];
+            }
+            $nested = syncro_extract_asset_from_response($data[$key]);
+            if ($nested) {
+                return $nested;
+            }
+        }
+    }
+    return isset($data['id']) ? $data : [];
+}
+
+function syncro_list_customer_assets(int $syncroCustomerId, array $query = []): array
+{
+    $query = array_merge(['customer_id' => $syncroCustomerId], $query);
+    $resp = syncro_api_request('GET', 'customer_assets', $query);
+    if (empty($resp['ok'])) {
+        return ['ok' => false, 'errors' => $resp['errors'] ?? ['Unable to list Syncro customer assets.'], 'response' => $resp];
+    }
+    return ['ok' => true, 'assets' => syncro_asset_list_from_response($resp['data'] ?? [])];
+}
+
+function syncro_asset_id(array $asset): int
+{
+    foreach (['id', 'asset_id', 'customer_asset_id'] as $key) {
+        if (isset($asset[$key]) && (int)$asset[$key] > 0) {
+            return (int)$asset[$key];
+        }
+    }
+    return 0;
+}
+
+function syncro_asset_name(array $asset): string
+{
+    foreach (['name', 'asset_name', 'hostname', 'host_name', 'computer_name', 'serial_number'] as $key) {
+        if (isset($asset[$key]) && trim((string)$asset[$key]) !== '') {
+            return trim((string)$asset[$key]);
+        }
+    }
+    $id = syncro_asset_id($asset);
+    return $id > 0 ? ('asset #' . $id) : 'unknown asset';
+}
+
+function syncro_asset_policy_folder_id(array $asset): ?int
+{
+    foreach (['policy_folder_id', 'folder_id', 'policyFolderId', 'policy_folderID'] as $key) {
+        if (array_key_exists($key, $asset) && trim((string)$asset[$key]) !== '' && (int)$asset[$key] > 0) {
+            return (int)$asset[$key];
+        }
+    }
+    foreach (['policy_folder', 'folder'] as $key) {
+        if (isset($asset[$key]) && is_array($asset[$key]) && (int)($asset[$key]['id'] ?? 0) > 0) {
+            return (int)$asset[$key]['id'];
+        }
+    }
+    return null;
+}
+
+function syncro_asset_os_text(array $asset): string
+{
+    $values = [];
+    foreach (['os', 'operating_system', 'operatingSystem', 'os_name', 'os_version', 'platform'] as $key) {
+        if (isset($asset[$key]) && !is_array($asset[$key]) && trim((string)$asset[$key]) !== '') {
+            $values[] = trim((string)$asset[$key]);
+        }
+    }
+    foreach (['properties', 'custom_fields'] as $containerKey) {
+        if (empty($asset[$containerKey]) || !is_array($asset[$containerKey])) {
+            continue;
+        }
+        foreach ($asset[$containerKey] as $key => $value) {
+            $label = is_string($key) ? $key : (is_array($value) ? (string)($value['name'] ?? $value['label'] ?? '') : '');
+            if ($label === '' || stripos($label, 'operating') === false && !preg_match('/\bos\b/i', $label)) {
+                continue;
+            }
+            if (is_array($value)) {
+                foreach (['display_value', 'value_text', 'text', 'value'] as $valueKey) {
+                    if (isset($value[$valueKey]) && !is_array($value[$valueKey]) && trim((string)$value[$valueKey]) !== '') {
+                        $values[] = trim((string)$value[$valueKey]);
+                        break;
+                    }
+                }
+            } elseif (trim((string)$value) !== '') {
+                $values[] = trim((string)$value);
+            }
+        }
+    }
+    return trim(implode(' ', array_unique($values)));
+}
+
+function syncro_classify_asset_os(string $os): array
+{
+    $raw = trim($os);
+    $normalized = mb_strtolower($raw, 'UTF-8');
+    $normalized = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $normalized) ?? $normalized;
+    $normalized = trim(preg_replace('/\s+/u', ' ', $normalized) ?? $normalized);
+    $result = [
+        'platform' => 'unknown',
+        'role' => 'unknown',
+        'actionable' => false,
+        'supported_v1' => false,
+        'os' => $raw,
+        'reason' => $raw === '' ? 'blank_os' : 'unsupported_or_unknown_os',
+    ];
+
+    if ($normalized === '') {
+        return $result;
+    }
+
+    if (preg_match('/\bwindows\b|\bwin(dows)?\s*(10|11)\b/i', $raw)) {
+        $result['platform'] = 'windows';
+        if (str_contains($normalized, 'server')) {
+            $result['role'] = 'server';
+            $result['actionable'] = true;
+            $result['supported_v1'] = true;
+            $result['reason'] = 'windows_server_supported';
+            return $result;
+        }
+        if (preg_match('/\bwindows\s*(10|11)\b|\bwin(dows)?\s*(10|11)\b/i', $raw)) {
+            $result['role'] = 'workstation';
+            $result['actionable'] = true;
+            $result['supported_v1'] = true;
+            $result['reason'] = 'windows_workstation_supported';
+            return $result;
+        }
+        $result['reason'] = 'windows_version_not_supported_v1';
+        return $result;
+    }
+
+    if (preg_match('/\b(mac ?os|macintosh|darwin|os x)\b/i', $raw)) {
+        $result['platform'] = 'macos';
+        $result['role'] = 'workstation';
+        $result['reason'] = 'manual_review_unsupported_macos_v1';
+        return $result;
+    }
+
+    if (preg_match('/\b(linux|ubuntu|debian|fedora|centos|red hat|rhel|rocky|alma|suse)\b/i', $raw)) {
+        $result['platform'] = 'linux';
+        if (str_contains($normalized, 'server')) {
+            $result['role'] = 'server';
+        } elseif (preg_match('/\b(desktop|workstation)\b/i', $raw)) {
+            $result['role'] = 'workstation';
+        }
+        $result['reason'] = 'manual_review_unsupported_linux_v1';
+        return $result;
+    }
+
+    return $result;
+}
+
+function syncro_root_asset_intake_known_folder_ids(array $folderMap): array
+{
+    $ids = [];
+    foreach (['deploy_workstations_folder_id', 'deploy_servers_folder_id', 'production_workstations_folder_id', 'production_servers_folder_id'] as $key) {
+        if ((int)($folderMap[$key] ?? 0) > 0) {
+            $ids[$key] = (int)$folderMap[$key];
+        }
+    }
+    return $ids;
+}
+
+function syncro_update_customer_asset_policy_folder(int $assetId, int $targetFolderId): array
+{
+    return syncro_api_request('PUT', 'customer_assets/' . $assetId, [], ['policy_folder_id' => $targetFolderId]);
+}
+
+function syncro_route_root_asset_intake(array $asset, array $folderMap, int $rootFolderId, bool $dryRun = true): array
+{
+    $assetId = syncro_asset_id($asset);
+    $assetName = syncro_asset_name($asset);
+    $currentFolderId = syncro_asset_policy_folder_id($asset);
+    $osText = syncro_asset_os_text($asset);
+    $classification = syncro_classify_asset_os($osText);
+    $knownFolderIds = syncro_root_asset_intake_known_folder_ids($folderMap);
+    $base = [
+        'ok' => true,
+        'dry_run' => $dryRun,
+        'asset_id' => $assetId,
+        'asset_name' => $assetName,
+        'current_policy_folder_id' => $currentFolderId,
+        'root_policy_folder_id' => $rootFolderId,
+        'classification' => $classification,
+    ];
+
+    $finish = static function (array $result): array {
+        syncro_debug_log('root_asset_intake_decision', $result);
+        return $result;
+    };
+
+    if ($assetId <= 0) {
+        return $finish(array_merge($base, ['ok' => false, 'status' => 'INVALID_ASSET', 'action' => 'manual_review', 'message' => 'Manual review: Syncro asset is missing an asset ID; no move attempted.']));
+    }
+    if ($rootFolderId <= 0) {
+        return $finish(array_merge($base, ['ok' => false, 'status' => 'INVALID_ROOT', 'action' => 'manual_review', 'message' => 'Manual review: customer root policy folder ID is unavailable; no move attempted.']));
+    }
+    foreach (['production_workstations_folder_id', 'production_servers_folder_id'] as $key) {
+        if ($currentFolderId !== null && $currentFolderId === ($knownFolderIds[$key] ?? 0)) {
+            return $finish(array_merge($base, ['status' => 'UNCHANGED_PRODUCTION', 'action' => 'none', 'message' => 'Asset is already in Production; production assets are never moved backward.']));
+        }
+    }
+    foreach (['deploy_workstations_folder_id', 'deploy_servers_folder_id'] as $key) {
+        if ($currentFolderId !== null && $currentFolderId === ($knownFolderIds[$key] ?? 0)) {
+            return $finish(array_merge($base, ['status' => 'UNCHANGED_DEPLOY', 'action' => 'none', 'message' => 'Asset is already in Deploy; no move attempted.']));
+        }
+    }
+    if ($currentFolderId !== $rootFolderId) {
+        return $finish(array_merge($base, ['status' => 'UNCHANGED_NOT_ROOT', 'action' => 'none', 'message' => 'Asset is not in the customer root folder; no move attempted.']));
+    }
+    if (empty($classification['actionable']) || ($classification['platform'] ?? 'unknown') !== 'windows') {
+        return $finish(array_merge($base, ['status' => 'MANUAL_REVIEW', 'action' => 'manual_review', 'message' => 'Manual review: unsupported or unknown OS for V1 root asset intake; asset remains at customer root.']));
+    }
+
+    $targetKey = ($classification['role'] ?? '') === 'server' ? 'deploy_servers_folder_id' : 'deploy_workstations_folder_id';
+    $targetFolderId = (int)($folderMap[$targetKey] ?? 0);
+    $targetLabel = $targetKey === 'deploy_servers_folder_id' ? 'Deploy / Servers' : 'Deploy / Workstations';
+    if ($targetFolderId <= 0) {
+        return $finish(array_merge($base, ['ok' => false, 'status' => 'MISSING_TARGET_FOLDER', 'action' => 'manual_review', 'target' => $targetLabel, 'message' => 'Manual review: target folder ID for ' . $targetLabel . ' is missing; no move attempted.']));
+    }
+
+    $planned = $base + [
+        'status' => $dryRun ? 'DRY_RUN_READY' : 'APPLYING',
+        'action' => $dryRun ? 'would_move' : 'move',
+        'target' => $targetLabel,
+        'target_policy_folder_id' => $targetFolderId,
+        'asset_update_payload' => ['policy_folder_id' => $targetFolderId],
+        'message' => ($dryRun ? 'Dry run: would move ' : 'Moving ') . $assetName . ' to ' . $targetLabel . '.',
+    ];
+    if ($dryRun) {
+        return $finish($planned);
+    }
+
+    $move = syncro_update_customer_asset_policy_folder($assetId, $targetFolderId);
+    if (empty($move['ok'])) {
+        $message = !empty($move['staging_blocked'])
+            ? 'Staging mode blocked the controlled asset folder update; set SYNCRO_ALLOW_STAGING_WRITES=true only for controlled staging apply tests.'
+            : ('Syncro asset folder update failed: ' . implode(' ', array_map('strval', (array)($move['errors'] ?? ['Unknown Syncro error.']))));
+        return $finish(array_merge($planned, ['ok' => false, 'status' => !empty($move['staging_blocked']) ? 'STAGING_BLOCKED' : 'MOVE_FAILED', 'response' => $move, 'message' => $message]));
+    }
+
+    return $finish(array_merge($planned, ['status' => 'MOVED', 'response' => $move, 'message' => 'Moved ' . $assetName . ' to ' . $targetLabel . ' using PUT /api/v1/customer_assets/{asset_id}.']));
+}
+
 function syncro_client_columns_ready(): bool
 {
     return db_column_exists('clients', 'syncro_customer_id') && db_column_exists('clients', 'syncro_sync_status');
