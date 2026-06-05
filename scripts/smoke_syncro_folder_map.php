@@ -52,6 +52,77 @@ if (!str_contains(syncro_policy_assignment_status_message(), 'PENDING_MANUAL')) 
 
 
 
+
+$completePolicyMap = [
+    'manage.deploy.workstations' => 1101,
+    'manage.deploy.servers' => 1102,
+    'manage.production.workstations' => 1103,
+    'manage.production.servers' => 1104,
+    'protect.deploy.workstations' => 2101,
+    'protect.deploy.servers' => 2102,
+    'protect.production.workstations' => 2103,
+    'protect.production.servers' => 2104,
+    'govern.deploy.workstations' => 3101,
+    'govern.deploy.servers' => 3102,
+    'govern.production.workstations' => 3103,
+    'govern.production.servers' => 3104,
+];
+$completeFolderMap = [
+    'deploy_workstations_folder_id' => 5029833,
+    'deploy_servers_folder_id' => 5029834,
+    'production_workstations_folder_id' => 5029835,
+    'production_servers_folder_id' => 5029836,
+];
+foreach (['manage' => 1100, 'protect' => 2100, 'govern' => 3100] as $tier => $basePolicyId) {
+    $payload = syncro_build_selected_tier_policy_assignment_payload($tier, $completeFolderMap, $completePolicyMap);
+    if (empty($payload['ok']) || count((array)($payload['assignments'] ?? [])) !== 4) {
+        $failed[] = ucfirst($tier) . ' tier builds exactly 4 assignments';
+        continue;
+    }
+    $folderIds = array_column((array)$payload['assignments'], 'policy_folder_id');
+    $policyIds = array_column((array)$payload['assignments'], 'policy_id');
+    if (count(array_unique(array_map('intval', $folderIds))) !== 4) {
+        $failed[] = ucfirst($tier) . ' tier has 4 unique assignment folders';
+    }
+    if (array_map('intval', $policyIds) !== [$basePolicyId + 1, $basePolicyId + 2, $basePolicyId + 3, $basePolicyId + 4]) {
+        $failed[] = ucfirst($tier) . ' tier uses only selected tier policies';
+    }
+}
+$unknownTierPayload = syncro_build_selected_tier_policy_assignment_payload('unknown', $completeFolderMap, $completePolicyMap);
+if (!empty($unknownTierPayload['ok']) || !str_contains((string)($unknownTierPayload['message'] ?? ''), 'PENDING_MANUAL')) {
+    $failed[] = 'Missing/unknown tier fails closed';
+}
+$missingPolicyMap = $completePolicyMap;
+unset($missingPolicyMap['protect.production.servers']);
+$missingPolicyPayload = syncro_build_selected_tier_policy_assignment_payload('protect', $completeFolderMap, $missingPolicyMap);
+if (!empty($missingPolicyPayload['ok']) || !in_array('protect.production.servers', (array)($missingPolicyPayload['missing'] ?? []), true)) {
+    $failed[] = 'Missing selected-tier policy ID fails closed';
+}
+$missingFolderMap = $completeFolderMap;
+unset($missingFolderMap['production_servers_folder_id']);
+$missingFolderPayload = syncro_build_selected_tier_policy_assignment_payload('govern', $missingFolderMap, $completePolicyMap);
+if (!empty($missingFolderPayload['ok']) || !in_array('production_servers_folder_id', (array)($missingFolderPayload['missing'] ?? []), true)) {
+    $failed[] = 'Missing folder ID fails closed';
+}
+$duplicateFolderMap = $completeFolderMap;
+$duplicateFolderMap['production_servers_folder_id'] = $duplicateFolderMap['production_workstations_folder_id'];
+$duplicateFolderPayload = syncro_build_selected_tier_policy_assignment_payload('manage', $duplicateFolderMap, $completePolicyMap);
+if (!empty($duplicateFolderPayload['ok']) || !str_contains((string)($duplicateFolderPayload['message'] ?? ''), 'four unique OPS-managed folders')) {
+    $failed[] = 'Duplicate policy_folder_id payload fails closed before API call';
+}
+foreach ([
+    'Manage IT' => 'manage',
+    'ESSENTIAL' => 'manage',
+    'Protect IT' => 'protect',
+    'SECURE' => 'protect',
+    'Govern IT' => 'govern',
+    'COMPLETE' => 'govern',
+] as $input => $expectedTier) {
+    if (syncro_normalize_policy_tier($input) !== $expectedTier) {
+        $failed[] = 'Tier normalization failed for ' . $input;
+    }
+}
+
 $singleRoot = syncro_resolve_customer_root_policy_folder([
     ['id' => 9001, 'name' => 'LnK Consulting, LLC', 'parent_id' => null],
     ['id' => 9002, 'name' => 'Workstations', 'parent_id' => 9001],
