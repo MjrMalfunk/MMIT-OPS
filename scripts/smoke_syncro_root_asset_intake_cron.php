@@ -78,8 +78,8 @@ PHP;
         . "    \$clients = [\n"
         . "        ['client_id' => 7, 'legal_name' => 'No Syncro LLC', 'status' => 'ACTIVE', 'syncro_customer_id' => null, 'syncro_sync_status' => 'SYNCED'],\n"
         . "        ['client_id' => 8, 'legal_name' => 'Incomplete Folder LLC', 'status' => 'ACTIVE', 'syncro_customer_id' => 108, 'syncro_sync_status' => 'SYNCED'],\n"
-        . "        ['client_id' => 9, 'legal_name' => 'Ready Client LLC', 'status' => 'ACTIVE', 'syncro_customer_id' => 109, 'syncro_sync_status' => 'SYNCED', 'active_contract_count' => 1],\n"
-        . "        ['client_id' => 10, 'legal_name' => 'Pre Activation LLC', 'status' => 'ACTIVE', 'syncro_customer_id' => 110, 'syncro_sync_status' => 'SYNCED', 'active_contract_count' => 0],\n"
+        . "        ['client_id' => 9, 'legal_name' => 'Ready Client LLC', 'status' => 'ACTIVE', 'syncro_customer_id' => 109, 'syncro_sync_status' => 'SYNCED', 'active_contract_count' => 1, 'service_tier' => 'Protect', 'services' => []],\n"
+        . "        ['client_id' => 10, 'legal_name' => 'Pre Activation LLC', 'status' => 'ACTIVE', 'syncro_customer_id' => 110, 'syncro_sync_status' => 'SYNCED', 'active_contract_count' => 0, 'service_tier' => 'Manage', 'services' => []],\n"
         . "        ['client_id' => 11, 'legal_name' => 'Policy Pending LLC', 'status' => 'ACTIVE', 'syncro_customer_id' => 111, 'syncro_sync_status' => 'SYNCED'],\n"
         . "    ];\n"
         . "    if (\$clientId !== null && \$clientId > 0) { \$clients = array_values(array_filter(\$clients, static fn(array \$client): bool => (int)\$client['client_id'] === \$clientId)); }\n"
@@ -103,6 +103,7 @@ PHP;
         . "        ['id' => 106, 'name' => 'WIN11-DEPLOY', 'os' => 'Windows 11 Pro', 'policy_folder_id' => 5029833],\n"
         . "        ['id' => 107, 'name' => 'WIN11-PROD', 'os' => 'Windows 11 Pro', 'policy_folder_id' => 5029835],\n"
         . "    ]]]; }\n"
+        . "    if (\$method === 'PUT' && preg_match('/^customer_assets\\/(101|102)$/', \$path) && isset(\$payload['properties'])) { return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => ['id' => (int)basename(\$path)]]]; }\n"
         . "    if (\$method === 'PUT' && \$path === 'customer_assets/101' && (\$payload['policy_folder_id'] ?? null) === 5029833) { return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => ['id' => 101, 'policy_folder_id' => 5029833]]]; }\n"
         . "    if (\$method === 'PUT' && \$path === 'customer_assets/102' && (\$payload['policy_folder_id'] ?? null) === 5029834) { return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => ['id' => 102, 'policy_folder_id' => 5029834]]]; }\n"
         . "    return ['ok' => false, 'status' => 599, 'errors' => ['Unexpected mock request ' . \$method . ' ' . \$path]];\n"
@@ -183,7 +184,7 @@ $calls = json_decode((string)@file_get_contents($callsPath), true) ?: [];
 smoke_cron_check(($apply['exit_code'] ?? null) === 0, 'Explicit apply with staging override should complete successfully', $failed);
 smoke_cron_check(str_contains((string)($apply['stdout'] ?? ''), 'WARNING: OPS staging Syncro POST/PUT/PATCH writes are enabled'), 'Staging override should print controlled write warning', $failed);
 smoke_cron_check(str_contains((string)($apply['stdout'] ?? ''), '[MOVED] #101') && str_contains((string)($apply['stdout'] ?? ''), '[MOVED] #102'), 'Staging override should allow controlled PUT moves', $failed);
-smoke_cron_check(count(array_filter($calls, static fn(array $call): bool => ($call['method'] ?? '') === 'PUT')) === 2, 'Apply override should issue expected PUT calls', $failed);
+smoke_cron_check(count(array_filter($calls, static fn(array $call): bool => ($call['method'] ?? '') === 'PUT')) === 4, 'Apply override should issue expected PUT calls', $failed);
 smoke_cron_check(!array_filter($calls, static fn(array $call): bool => ($call['method'] ?? '') === 'DELETE'), 'Cron runner should never issue DELETE calls', $failed);
 
 @unlink($prepend);

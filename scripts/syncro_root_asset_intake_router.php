@@ -241,7 +241,7 @@ function syncro_root_asset_router_main(array $argv = []): int
         if (!is_array($asset)) {
             continue;
         }
-        $result = syncro_route_root_asset_intake($asset, $folderMap, $rootFolderId, $dryRun);
+        $result = syncro_route_root_asset_intake($asset, $folderMap, $rootFolderId, $dryRun, $client);
         $results[] = $result;
         printf(
             "[%s] #%d %s: %s\n",
@@ -250,6 +250,10 @@ function syncro_root_asset_router_main(array $argv = []): int
             (string)($result['asset_name'] ?? 'unknown asset'),
             (string)($result['message'] ?? '')
         );
+        if ($dryRun && !empty($result['onboarding_fields'])) {
+            echo '  Onboarding fields: ' . json_encode($result['onboarding_fields'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . PHP_EOL;
+            echo '  Target move payload: ' . json_encode($result['asset_update_payload'] ?? [], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . PHP_EOL;
+        }
     }
 
     $failed = array_values(array_filter($results, static fn(array $result): bool => empty($result['ok']) && empty($result['staging_blocked'])));

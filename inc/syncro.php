@@ -490,7 +490,230 @@ function syncro_update_customer_asset_policy_folder(int $assetId, int $targetFol
     return syncro_api_request('PUT', 'customer_assets/' . $assetId, [], ['policy_folder_id' => $targetFolderId]);
 }
 
-function syncro_route_root_asset_intake(array $asset, array $folderMap, int $rootFolderId, bool $dryRun = true): array
+function syncro_asset_onboarding_field_names(): array
+{
+    return [
+        'service_tier' => 'MMIT Service Tier',
+        'asset_role' => 'MMIT Asset Role',
+        'backup_required' => 'MMIT Backup Required',
+        'dns_filtering_required' => 'MMIT DNS Filtering Required',
+        'lab_asset' => 'MMIT Lab Asset',
+        'production_folder_target' => 'MMIT Production Folder Target',
+        'onboarding_status' => 'MMIT Onboarding Status',
+        'ready_to_move' => 'MMIT Ready To Move',
+        'onboarding_result' => 'MMIT Onboarding Result',
+    ];
+}
+
+function syncro_update_customer_asset_onboarding_fields(int $assetId, array $fields): array
+{
+    if ($assetId <= 0) {
+        return ['ok' => false, 'errors' => ['Asset ID is required to stamp Syncro onboarding fields.']];
+    }
+    $fields = array_filter($fields, static fn($value): bool => $value !== null);
+    if (!$fields) {
+        return ['ok' => true, 'skipped' => true];
+    }
+    return syncro_api_request('PUT', 'customer_assets/' . $assetId, [], ['properties' => $fields]);
+}
+
+function syncro_service_requirement_match_text(array $service): string
+{
+    $parts = [];
+    foreach (['item_code', 'service_code', 'bundle_code', 'item_name', 'service_name', 'description', 'notes'] as $field) {
+        $value = trim((string)($service[$field] ?? ''));
+        if ($value !== '') {
+            $parts[] = $value;
+        }
+    }
+    return mb_strtolower(implode(' ', $parts), 'UTF-8');
+}
+
+function syncro_service_row_matches_backup_addon(array $service, bool $serverAsset): bool
+{
+    $text = syncro_service_requirement_match_text($service);
+    if ($text === '') {
+        return false;
+    }
+    if ($serverAsset) {
+        return (bool)preg_match('/\b(srvr|server)[-_ ]?b(?:k|ack)?up\b|\bserver\b.*\bbackup\b|\bsrvr-bk-/i', $text);
+    }
+    if (preg_match('/\b(srvr|server)[-_ ]?(mgmt|management)\b/i', $text)) {
+        return false;
+    }
+    return (bool)preg_match('/\b(ep|endpoint|workstation)[-_ ]?(bkup|backup)\b|\bbackup\b/i', $text)
+        && !preg_match('/\b(srvr|server)[-_ ]?b(?:k|ack)?up\b|\bserver\b.*\bbackup\b|\bsrvr-bk-/i', $text);
+}
+
+function syncro_service_row_matches_dns_addon(array $service): bool
+{
+    $text = syncro_service_requirement_match_text($service);
+    if ($text === '') {
+        return false;
+    }
+    return (bool)preg_match('/\b(dns[-_ ]?fltr|dns[-_ ]?filter|dns filtering|scoutdns|scout dns)\b/i', $text);
+}
+
+function syncro_client_service_rows_for_onboarding(array $client): array
+{
+    foreach (['services', 'client_services', 'service_rows'] as $key) {
+        if (array_key_exists($key, $client) && is_array($client[$key])) {
+            return array_values(array_filter($client[$key], static fn($row): bool => is_array($row)));
+        }
+    }
+
+    $clientId = (int)($client['client_id'] ?? 0);
+    if ($clientId <= 0 || !function_exists('db_table_exists')) {
+        return [];
+    }
+
+    try {
+        if (!db_table_exists('client_service')) {
+            return [];
+        }
+        $select = 'SELECT cs.client_service_id, cs.description, cs.status';
+        $join = '';
+        if (db_table_exists('service_item') && db_column_exists('client_service', 'item_id')) {
+            $select .= ', si.item_code, si.item_name';
+            $join = ' LEFT JOIN service_item si ON si.item_id = cs.item_id';
+        }
+        if (db_column_exists('client_service', 'parent_client_service_id')) {
+            $select .= ', cs.parent_client_service_id';
+        }
+        $order = db_column_exists('client_service', 'start_date')
+            ? ' ORDER BY cs.start_date DESC, cs.client_service_id DESC'
+            : ' ORDER BY cs.client_service_id DESC';
+        $stmt = db()->prepare($select . " FROM client_service cs" . $join . " WHERE cs.client_id = ? AND UPPER(cs.status) IN ('ACTIVE', 'PAUSED')" . $order . ' LIMIT 50');
+        $stmt->execute([$clientId]);
+        return $stmt->fetchAll();
+    } catch (Throwable $e) {
+        syncro_debug_log('client_service_addon_requirement_lookup_failed', ['client_id' => $clientId, 'error' => $e->getMessage()]);
+        return [];
+    }
+}
+
+function syncro_client_service_addon_requirements(array $client, string $tier, string $assetRole): array
+{
+    $rows = syncro_client_service_rows_for_onboarding($client);
+    $serverAsset = strtolower($assetRole) === 'server';
+    $hasDnsAddon = false;
+    $hasWorkstationBackupAddon = false;
+    $hasServerBackupAddon = false;
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        if (syncro_service_row_matches_dns_addon($row)) {
+            $hasDnsAddon = true;
+        }
+        if (syncro_service_row_matches_backup_addon($row, false)) {
+            $hasWorkstationBackupAddon = true;
+        }
+        if (syncro_service_row_matches_backup_addon($row, true)) {
+            $hasServerBackupAddon = true;
+        }
+    }
+
+    $tier = syncro_normalize_policy_tier($tier) ?? 'manage';
+    $dnsRequired = in_array($tier, ['protect', 'govern'], true) || $hasDnsAddon;
+    if ($serverAsset) {
+        $backupRequired = $tier === 'govern' || $hasServerBackupAddon;
+    } else {
+        $backupRequired = in_array($tier, ['protect', 'govern'], true) || $hasWorkstationBackupAddon;
+    }
+
+    return [
+        'dns_required' => $dnsRequired,
+        'backup_required' => $backupRequired,
+        'has_dns_addon' => $hasDnsAddon,
+        'has_workstation_backup_addon' => $hasWorkstationBackupAddon,
+        'has_server_backup_addon' => $hasServerBackupAddon,
+        'service_rows_evaluated' => count($rows),
+    ];
+}
+
+function syncro_client_display_name(array $client): string
+{
+    foreach (['legal_name', 'company_name', 'dba_name', 'name', 'client_name'] as $key) {
+        $value = trim((string)($client[$key] ?? ''));
+        if ($value !== '') {
+            return $value;
+        }
+    }
+    $id = (int)($client['client_id'] ?? 0);
+    return $id > 0 ? ('Client #' . $id) : 'Unknown client';
+}
+
+function syncro_asset_onboarding_lab_default(array $client): string
+{
+    if (!syncro_is_staging_mode()) {
+        return 'No';
+    }
+    $name = strtoupper(syncro_client_display_name($client));
+    $code = strtoupper(trim((string)($client['client_code'] ?? $client['slug'] ?? '')));
+    return (str_starts_with($name, 'TEST-') || str_starts_with($code, 'TEST-')) ? 'Yes' : 'No';
+}
+
+function syncro_build_asset_onboarding_field_values(array $asset, array $client, array $classification, array $folderMap, string $targetLabel, bool $dryRun): array
+{
+    $tierResult = null;
+    foreach (['syncro_policy_tier', 'policy_tier', 'service_tier', 'package_tier', 'service_package', 'package_code', 'package', 'msp_package', 'ops_package', 'sla_level'] as $field) {
+        if (array_key_exists($field, $client)) {
+            $directTier = syncro_normalize_policy_tier((string)$client[$field]);
+            if ($directTier !== null) {
+                $tierResult = ['ok' => true, 'tier' => $directTier, 'source' => 'client.' . $field];
+                break;
+            }
+        }
+    }
+    if ($tierResult === null) {
+        $tierResult = syncro_resolve_client_policy_tier($client);
+    }
+    if (empty($tierResult['ok'])) {
+        return ['ok' => false, 'status' => 'PENDING_MANUAL', 'message' => (string)($tierResult['message'] ?? 'Unable to resolve client Syncro policy tier.'), 'tier_result' => $tierResult];
+    }
+    $tier = ucfirst((string)$tierResult['tier']);
+    $role = (($classification['role'] ?? '') === 'server') ? 'Server' : 'Workstation';
+    $requirements = syncro_client_service_addon_requirements($client, $tier, $role);
+    $productionTarget = $role === 'Server' ? 'Production / Servers' : 'Production / Workstations';
+    $fields = syncro_asset_onboarding_field_names();
+    $summary = sprintf(
+        'Intake %s | client=%s | asset=%s #%d | os=%s (%s/%s) | tier=%s | role=%s | deploy=%s | production=%s | dns=%s | backup=%s | mode=%s',
+        gmdate('c'),
+        syncro_client_display_name($client),
+        syncro_asset_name($asset),
+        syncro_asset_id($asset),
+        (string)($classification['os'] ?? ''),
+        (string)($classification['platform'] ?? 'unknown'),
+        (string)($classification['role'] ?? 'unknown'),
+        $tier,
+        $role,
+        $targetLabel,
+        $productionTarget,
+        !empty($requirements['dns_required']) ? 'Yes' : 'No',
+        !empty($requirements['backup_required']) ? 'Yes' : 'No',
+        $dryRun ? 'dry-run would stamp and move' : 'apply stamping before move'
+    );
+
+    return [
+        'ok' => true,
+        'tier_result' => $tierResult,
+        'requirements' => $requirements,
+        'fields' => [
+            $fields['service_tier'] => $tier,
+            $fields['asset_role'] => $role,
+            $fields['backup_required'] => !empty($requirements['backup_required']) ? 'Yes' : 'No',
+            $fields['dns_filtering_required'] => !empty($requirements['dns_required']) ? 'Yes' : 'No',
+            $fields['lab_asset'] => syncro_asset_onboarding_lab_default($client),
+            $fields['production_folder_target'] => $productionTarget,
+            $fields['onboarding_status'] => 'IN_PROGRESS',
+            $fields['ready_to_move'] => 'No',
+            $fields['onboarding_result'] => $summary,
+        ],
+    ];
+}
+
+function syncro_route_root_asset_intake(array $asset, array $folderMap, int $rootFolderId, bool $dryRun = true, array $client = []): array
 {
     $assetId = syncro_asset_id($asset);
     $assetName = syncro_asset_name($asset);
@@ -543,27 +766,45 @@ function syncro_route_root_asset_intake(array $asset, array $folderMap, int $roo
         return $finish(array_merge($base, ['ok' => false, 'status' => 'MISSING_TARGET_FOLDER', 'action' => 'manual_review', 'target' => $targetLabel, 'message' => 'Manual review: target folder ID for ' . $targetLabel . ' is missing; no move attempted.']));
     }
 
+    $fieldBuild = syncro_build_asset_onboarding_field_values($asset, $client, $classification, $folderMap, $targetLabel, $dryRun);
+    if (empty($fieldBuild['ok'])) {
+        return $finish(array_merge($base, ['ok' => false, 'status' => (string)($fieldBuild['status'] ?? 'PENDING_MANUAL'), 'action' => 'manual_review', 'target' => $targetLabel, 'target_policy_folder_id' => $targetFolderId, 'field_build' => $fieldBuild, 'message' => 'Manual review: ' . (string)($fieldBuild['message'] ?? 'unable to build onboarding field payload; no move attempted.')]));
+    }
+
+    $fieldPayload = (array)($fieldBuild['fields'] ?? []);
     $planned = $base + [
         'status' => $dryRun ? 'DRY_RUN_READY' : 'APPLYING',
-        'action' => $dryRun ? 'would_move' : 'move',
+        'action' => $dryRun ? 'would_stamp_and_move' : 'stamp_and_move',
         'target' => $targetLabel,
         'target_policy_folder_id' => $targetFolderId,
+        'onboarding_fields' => $fieldPayload,
+        'onboarding_requirements' => $fieldBuild['requirements'] ?? [],
+        'tier_result' => $fieldBuild['tier_result'] ?? [],
+        'field_update_payload' => ['properties' => $fieldPayload],
         'asset_update_payload' => ['policy_folder_id' => $targetFolderId],
-        'message' => ($dryRun ? 'Dry run: would move ' : 'Moving ') . $assetName . ' to ' . $targetLabel . '.',
+        'message' => ($dryRun ? 'Dry run: would stamp onboarding fields and move ' : 'Stamping onboarding fields before moving ') . $assetName . ' to ' . $targetLabel . '.',
     ];
     if ($dryRun) {
         return $finish($planned);
     }
 
+    $stamp = syncro_update_customer_asset_onboarding_fields($assetId, $fieldPayload);
+    if (empty($stamp['ok'])) {
+        $message = !empty($stamp['staging_blocked'])
+            ? 'Staging mode blocked the controlled asset onboarding field update; set SYNCRO_ALLOW_STAGING_WRITES=true only for controlled staging apply tests.'
+            : ('Syncro onboarding field update failed; asset was not moved: ' . implode(' ', array_map('strval', (array)($stamp['errors'] ?? ['Unknown Syncro error.']))));
+        return $finish(array_merge($planned, ['ok' => false, 'status' => !empty($stamp['staging_blocked']) ? 'STAGING_BLOCKED' : 'FIELD_STAMP_FAILED', 'field_response' => $stamp, 'response' => $stamp, 'message' => $message]));
+    }
+
     $move = syncro_update_customer_asset_policy_folder($assetId, $targetFolderId);
     if (empty($move['ok'])) {
         $message = !empty($move['staging_blocked'])
-            ? 'Staging mode blocked the controlled asset folder update; set SYNCRO_ALLOW_STAGING_WRITES=true only for controlled staging apply tests.'
-            : ('Syncro asset folder update failed: ' . implode(' ', array_map('strval', (array)($move['errors'] ?? ['Unknown Syncro error.']))));
-        return $finish(array_merge($planned, ['ok' => false, 'status' => !empty($move['staging_blocked']) ? 'STAGING_BLOCKED' : 'MOVE_FAILED', 'response' => $move, 'message' => $message]));
+            ? 'Staging mode blocked the controlled asset folder update after field stamping; set SYNCRO_ALLOW_STAGING_WRITES=true only for controlled staging apply tests.'
+            : ('Syncro asset folder update failed after field stamping: ' . implode(' ', array_map('strval', (array)($move['errors'] ?? ['Unknown Syncro error.']))));
+        return $finish(array_merge($planned, ['ok' => false, 'status' => !empty($move['staging_blocked']) ? 'STAGING_BLOCKED' : 'MOVE_FAILED', 'field_response' => $stamp, 'response' => $move, 'message' => $message]));
     }
 
-    return $finish(array_merge($planned, ['status' => 'MOVED', 'response' => $move, 'message' => 'Moved ' . $assetName . ' to ' . $targetLabel . ' using PUT /api/v1/customer_assets/{asset_id}.']));
+    return $finish(array_merge($planned, ['status' => 'MOVED', 'field_response' => $stamp, 'response' => $move, 'message' => 'Stamped onboarding fields and moved ' . $assetName . ' to ' . $targetLabel . ' using safe PUT /api/v1/customer_assets/{asset_id}.']));
 }
 
 function syncro_client_columns_ready(): bool
