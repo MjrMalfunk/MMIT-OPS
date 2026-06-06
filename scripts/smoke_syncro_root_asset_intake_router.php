@@ -141,6 +141,18 @@ function smoke_contains_value(mixed $value, mixed $needle): bool
     return $value === $needle;
 }
 
+
+function smoke_field_payload_has_exact_keys(array $payload, array $required, array &$failed, string $label): void
+{
+    $keys = array_keys($payload);
+    foreach ($required as $field) {
+        smoke_check(array_key_exists($field, $payload), $label . ' should include ' . $field, $failed);
+        smoke_check(in_array($field, $keys, true), $label . ' payload keys should list ' . $field, $failed);
+    }
+    smoke_check(!array_key_exists('MIMIT Service Tier', $payload), $label . ' should not emit typo MIMIT Service Tier', $failed);
+    smoke_check(!array_key_exists('MITT Service Tier', $payload), $label . ' should not emit typo MITT Service Tier', $failed);
+}
+
 function smoke_asset(int $id, string $name, string $os, int $folderId): array
 {
     return ['id' => $id, 'name' => $name, 'os' => $os, 'policy_folder_id' => $folderId];
@@ -214,6 +226,11 @@ smoke_check(($windows11['status'] ?? null) === 'DRY_RUN_READY', 'Windows 11 root
 smoke_check(($windows11['target_policy_folder_id'] ?? null) === 5029833, 'Windows 11 root asset should route to Deploy / Workstations', $failed);
 smoke_check(($windows11['classification']['platform'] ?? null) === 'windows' && ($windows11['classification']['role'] ?? null) === 'workstation', 'Windows 11 classification should be windows workstation', $failed);
 
+$requiredOnboardingFields = syncro_required_asset_onboarding_field_names();
+smoke_field_payload_has_exact_keys((array)($windows11['field_update_payload']['properties'] ?? []), $requiredOnboardingFields, $failed, 'Manage dry-run API field payload');
+smoke_check(($windows11['field_update_payload']['properties']['MMIT Service Tier'] ?? null) === 'Manage', 'Dry-run API field payload should stamp Service Tier Manage', $failed);
+smoke_check(in_array('MMIT Service Tier', (array)($windows11['field_update_payload_keys'] ?? []), true), 'Dry-run API field payload keys should show MMIT Service Tier', $failed);
+
 smoke_check(($windows11['onboarding_fields']['MMIT Service Tier'] ?? null) === 'Manage', 'Manage workstation should stamp service tier Manage', $failed);
 smoke_check(($windows11['onboarding_fields']['MMIT Asset Role'] ?? null) === 'Workstation', 'Manage workstation should stamp role Workstation', $failed);
 smoke_check(($windows11['onboarding_fields']['MMIT DNS Filtering Required'] ?? null) === 'No', 'Manage workstation without DNS add-on should not require DNS', $failed);
@@ -236,6 +253,8 @@ smoke_check(($manageBackup['onboarding_fields']['MMIT Backup Required'] ?? null)
 
 $protectWorkstation = syncro_route_root_asset_intake(smoke_asset(112, 'WIN11-PROTECT', 'Windows 11 Pro', $rootFolderId), $folderMap, $rootFolderId, true, $protectClient);
 smoke_check(($protectWorkstation['onboarding_fields']['MMIT Service Tier'] ?? null) === 'Protect', 'Protect workstation should stamp Service Tier Protect', $failed);
+smoke_check(($protectWorkstation['field_update_payload']['properties']['MMIT Service Tier'] ?? null) === 'Protect', 'Protect API field payload should stamp Service Tier Protect', $failed);
+smoke_field_payload_has_exact_keys((array)($protectWorkstation['field_update_payload']['properties'] ?? []), $requiredOnboardingFields, $failed, 'Protect dry-run API field payload');
 smoke_check(($protectWorkstation['onboarding_fields']['MMIT DNS Filtering Required'] ?? null) === 'Yes', 'Protect workstation should require DNS', $failed);
 smoke_check(($protectWorkstation['onboarding_fields']['MMIT Backup Required'] ?? null) === 'Yes', 'Protect workstation should require workstation backup by package rule', $failed);
 
@@ -247,6 +266,8 @@ smoke_check(($protectServerNoBackup['onboarding_fields']['MMIT Production Folder
 
 $governServer = syncro_route_root_asset_intake(smoke_asset(114, 'SRV-GOVERN', 'Windows Server 2022 Standard', $rootFolderId), $folderMap, $rootFolderId, true, $governClient);
 smoke_check(($governServer['onboarding_fields']['MMIT Service Tier'] ?? null) === 'Govern', 'Govern server should stamp Service Tier Govern', $failed);
+smoke_check(($governServer['field_update_payload']['properties']['MMIT Service Tier'] ?? null) === 'Govern', 'Govern API field payload should stamp Service Tier Govern', $failed);
+smoke_field_payload_has_exact_keys((array)($governServer['field_update_payload']['properties'] ?? []), $requiredOnboardingFields, $failed, 'Govern dry-run API field payload');
 smoke_check(($governServer['onboarding_fields']['MMIT DNS Filtering Required'] ?? null) === 'Yes', 'Govern server should require DNS', $failed);
 smoke_check(($governServer['onboarding_fields']['MMIT Backup Required'] ?? null) === 'Yes', 'Govern server should require backup', $failed);
 
@@ -292,6 +313,10 @@ unset($GLOBALS['syncro_api_request_mock']);
 smoke_check(($apply['status'] ?? null) === 'MOVED', 'Apply mode should move supported Windows root asset', $failed);
 smoke_check(count($calls) === 2 && isset($calls[0]['payload']['properties']) && isset($calls[1]['payload']['policy_folder_id']), 'Apply mode should use PUT /customer_assets/{asset_id}', $failed);
 smoke_check(isset($calls[0]['payload']['properties']) && isset($calls[1]['payload']['policy_folder_id']), 'Apply mode should stamp fields before moving', $failed);
+smoke_field_payload_has_exact_keys((array)($calls[0]['payload']['properties'] ?? []), $requiredOnboardingFields, $failed, 'Apply API field payload');
+smoke_check(($calls[0]['payload']['properties']['MMIT Service Tier'] ?? null) === 'Manage', 'Apply field stamp should write Service Tier Manage', $failed);
+smoke_check(($apply['field_update_payload']['properties']['MMIT Service Tier'] ?? null) === 'Manage', 'Apply result should expose Service Tier Manage in field update payload', $failed);
+smoke_check(in_array('MMIT Service Tier', (array)($apply['field_update_payload_keys'] ?? []), true), 'Apply result should expose MMIT Service Tier in API field payload keys', $failed);
 smoke_check(($calls[0]['payload']['properties']['MMIT Onboarding Status'] ?? null) === 'NOT_READY', 'Apply field stamp should use onboarding status NOT_READY', $failed);
 smoke_check(($calls[0]['payload']['properties']['MMIT Ready To Move'] ?? null) === 'No', 'Apply field stamp should keep Ready To Move No', $failed);
 smoke_check(str_contains((string)($calls[0]['payload']['properties']['MMIT Onboarding Result'] ?? ''), 'mode=apply stamping before move'), 'Apply onboarding result should include mode detail', $failed);
@@ -313,8 +338,24 @@ $fieldFailure = syncro_route_root_asset_intake(smoke_asset(115, 'WIN11-FIELD-FAI
 unset($GLOBALS['syncro_api_request_mock']);
 smoke_check(($fieldFailure['status'] ?? null) === 'FIELD_STAMP_FAILED', 'Field stamping failure should prevent move', $failed);
 smoke_check(count($failureCalls) === 1 && isset($failureCalls[0]['payload']['properties']), 'Field stamping failure should not call folder move', $failed);
+smoke_check(($failureCalls[0]['payload']['properties']['MMIT Service Tier'] ?? null) === 'Manage', 'Failed field stamp payload should include required Service Tier Manage', $failed);
 smoke_check(($failureCalls[0]['payload']['properties']['MMIT Onboarding Status'] ?? null) === 'NOT_READY', 'Failed field stamp payload should still use onboarding status NOT_READY', $failed);
 smoke_check(!smoke_contains_value($failureCalls, 'IN_PROGRESS'), 'No failed field-stamp payload should use IN_PROGRESS onboarding status', $failed);
+
+$omissionCalls = [];
+$GLOBALS['syncro_root_asset_intake_field_payload_filter'] = static function (array $fields): array {
+    unset($fields['MMIT Service Tier']);
+    return $fields;
+};
+$GLOBALS['syncro_api_request_mock'] = static function (string $method, string $path, array $query, ?array $payload) use (&$omissionCalls): array {
+    $omissionCalls[] = ['method' => $method, 'path' => $path, 'payload' => $payload];
+    return ['ok' => false, 'status' => 599, 'errors' => ['No Syncro calls expected when required Service Tier is omitted.']];
+};
+$serviceTierOmitted = syncro_route_root_asset_intake(smoke_asset(116, 'WIN11-NO-TIER', 'Windows 11 Pro', $rootFolderId), $folderMap, $rootFolderId, false, $manageClient);
+unset($GLOBALS['syncro_root_asset_intake_field_payload_filter'], $GLOBALS['syncro_api_request_mock']);
+smoke_check(($serviceTierOmitted['status'] ?? null) === 'FIELD_STAMP_FAILED', 'Missing Service Tier field should fail stamping before move', $failed);
+smoke_check(in_array('MMIT Service Tier', (array)($serviceTierOmitted['field_validation']['missing'] ?? []), true), 'Missing Service Tier should be named in field validation failure', $failed);
+smoke_check($omissionCalls === [], 'Missing Service Tier should prevent Syncro field and move API calls', $failed);
 
 $GLOBALS['smoke_syncro_staging_mode'] = true;
 $stagingBlocked = syncro_route_root_asset_intake(smoke_asset(109, 'WIN11-STAGING', 'Windows 11 Pro', $rootFolderId), $folderMap, $rootFolderId, false, $manageClient);

@@ -252,6 +252,11 @@ function syncro_root_asset_router_main(array $argv = []): int
         );
         if ($dryRun && !empty($result['onboarding_fields'])) {
             echo '  Onboarding fields: ' . json_encode($result['onboarding_fields'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . PHP_EOL;
+        }
+        if (!empty($result['field_update_payload_keys'])) {
+            echo '  API field payload keys: ' . json_encode($result['field_update_payload_keys'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . PHP_EOL;
+        }
+        if ($dryRun && !empty($result['onboarding_fields'])) {
             echo '  Target move payload: ' . json_encode($result['asset_update_payload'] ?? [], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . PHP_EOL;
         }
     }
