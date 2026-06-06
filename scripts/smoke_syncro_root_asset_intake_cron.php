@@ -76,21 +76,24 @@ PHP;
         . "register_shutdown_function(static function (): void { file_put_contents(" . var_export($callsPath, true) . ", json_encode(\$GLOBALS['smoke_cron_calls'] ?? [])); });\n"
         . "\$GLOBALS['syncro_root_asset_intake_cron_clients_mock'] = static function (?int \$clientId, int \$limit): array {\n"
         . "    \$clients = [\n"
-        . "        ['client_id' => 7, 'legal_name' => 'No Syncro LLC', 'syncro_customer_id' => null],\n"
-        . "        ['client_id' => 8, 'legal_name' => 'Incomplete Folder LLC', 'syncro_customer_id' => 108],\n"
-        . "        ['client_id' => 9, 'legal_name' => 'Ready Client LLC', 'syncro_customer_id' => 109],\n"
+        . "        ['client_id' => 7, 'legal_name' => 'No Syncro LLC', 'status' => 'ACTIVE', 'syncro_customer_id' => null, 'syncro_sync_status' => 'SYNCED'],\n"
+        . "        ['client_id' => 8, 'legal_name' => 'Incomplete Folder LLC', 'status' => 'ACTIVE', 'syncro_customer_id' => 108, 'syncro_sync_status' => 'SYNCED'],\n"
+        . "        ['client_id' => 9, 'legal_name' => 'Ready Client LLC', 'status' => 'ACTIVE', 'syncro_customer_id' => 109, 'syncro_sync_status' => 'SYNCED', 'active_contract_count' => 1],\n"
+        . "        ['client_id' => 10, 'legal_name' => 'Pre Activation LLC', 'status' => 'ACTIVE', 'syncro_customer_id' => 110, 'syncro_sync_status' => 'SYNCED', 'active_contract_count' => 0],\n"
+        . "        ['client_id' => 11, 'legal_name' => 'Policy Pending LLC', 'status' => 'ACTIVE', 'syncro_customer_id' => 111, 'syncro_sync_status' => 'SYNCED'],\n"
         . "    ];\n"
         . "    if (\$clientId !== null && \$clientId > 0) { \$clients = array_values(array_filter(\$clients, static fn(array \$client): bool => (int)\$client['client_id'] === \$clientId)); }\n"
         . "    return \$limit > 0 ? array_slice(\$clients, 0, \$limit) : \$clients;\n"
         . "};\n"
         . "\$GLOBALS['syncro_root_asset_intake_cron_folder_map_mock'] = static function (int \$clientId): array {\n"
         . "    if (\$clientId === 8) { return ['deploy_workstations_folder_id' => 5029833]; }\n"
-        . "    if (\$clientId === 9) { return ['deploy_workstations_folder_id' => 5029833, 'deploy_servers_folder_id' => 5029834, 'production_workstations_folder_id' => 5029835, 'production_servers_folder_id' => 5029836]; }\n"
+        . "    if (\$clientId === 9 || \$clientId === 10) { return ['deploy_workstations_folder_id' => 5029833, 'deploy_servers_folder_id' => 5029834, 'production_workstations_folder_id' => 5029835, 'production_servers_folder_id' => 5029836, 'provision_status' => 'READY', 'policy_assignment_status' => 'READY']; }\n"
+        . "    if (\$clientId === 11) { return ['deploy_workstations_folder_id' => 5029833, 'deploy_servers_folder_id' => 5029834, 'production_workstations_folder_id' => 5029835, 'production_servers_folder_id' => 5029836, 'provision_status' => 'READY', 'policy_assignment_status' => 'PENDING_MANUAL']; }\n"
         . "    return [];\n"
         . "};\n"
         . "\$GLOBALS['syncro_api_request_mock'] = static function (string \$method, string \$path, array \$query, ?array \$payload): array {\n"
         . "    \$GLOBALS['smoke_cron_calls'][] = ['method' => \$method, 'path' => \$path, 'query' => \$query, 'payload' => \$payload];\n"
-        . "    if (\$method === 'GET' && \$path === 'policy_folders') { return ['ok' => true, 'status' => 200, 'data' => ['policy_folders' => [['id' => 4955419, 'name' => 'Ready Client LLC', 'parent_id' => null]]]]; }\n"
+        . "    if (\$method === 'GET' && \$path === 'policy_folders') { \$customerId = (int)(\$query['customer_id'] ?? 0); \$rootName = \$customerId === 110 ? 'Pre Activation LLC' : (\$customerId === 111 ? 'Policy Pending LLC' : 'Ready Client LLC'); return ['ok' => true, 'status' => 200, 'data' => ['policy_folders' => [['id' => 4955419, 'name' => \$rootName, 'parent_id' => null]]]]; }\n"
         . "    if (\$method === 'GET' && \$path === 'customer_assets') { return ['ok' => true, 'status' => 200, 'data' => ['customer_assets' => [\n"
         . "        ['id' => 101, 'name' => 'WIN11-ROOT', 'os' => 'Microsoft Windows 11 Pro', 'policy_folder_id' => 4955419],\n"
         . "        ['id' => 102, 'name' => 'SRV-ROOT', 'os' => 'Windows Server 2022 Standard', 'policy_folder_id' => 4955419],\n"
@@ -138,15 +141,24 @@ smoke_cron_check(($dryRun['exit_code'] ?? null) === 0, 'Dry-run default should c
 smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), 'in dry-run mode'), 'Dry-run default should print dry-run mode', $failed);
 smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), 'SKIP no syncro_customer_id'), 'Clients without Syncro customer ID should be skipped', $failed);
 smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), 'SKIP incomplete Syncro folder map'), 'Clients without complete folder map should be skipped', $failed);
+smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), 'policy_assignment_status=PENDING_MANUAL'), 'Clients without READY policy assignment should be reported clearly', $failed);
+smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), 'Ready Client LLC (#9): customer #109 scanning'), 'Scheduled scan should include ACTIVE synced clients with READY folder/policy assignment', $failed);
+smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), 'Pre Activation LLC (#10): customer #110 scanning'), 'Scheduled scan should include pre-activation clients with READY folder map and no ACTIVE contract', $failed);
 smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), '[DRY_RUN_READY] #101'), 'Supported workstation root asset should be routed in dry-run', $failed);
 smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), '[DRY_RUN_READY] #102'), 'Supported server root asset should be routed in dry-run', $failed);
-smoke_cron_check(substr_count((string)($dryRun['stdout'] ?? ''), '[MANUAL_REVIEW]') === 3, 'macOS/Linux/unknown root assets should remain manual review', $failed);
+smoke_cron_check(substr_count((string)($dryRun['stdout'] ?? ''), '[MANUAL_REVIEW]') === 6, 'macOS/Linux/unknown root assets should remain manual review', $failed);
 smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), '[UNCHANGED_DEPLOY] #106'), 'Deploy assets should be skipped', $failed);
 smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), '[UNCHANGED_PRODUCTION] #107'), 'Production assets should be skipped', $failed);
 smoke_cron_check(!array_filter($calls, static fn(array $call): bool => ($call['method'] ?? '') === 'PUT' || ($call['method'] ?? '') === 'DELETE'), 'Dry-run should not issue writes or DELETE calls', $failed);
 
-$clientOnly = smoke_cron_cli(['--host=ops-test.midwestmanagedit.com', '--client-id=9'], $env, ['-d', 'auto_prepend_file=' . $prepend]);
-smoke_cron_check(($clientOnly['exit_code'] ?? null) === 0 && str_contains((string)($clientOnly['stdout'] ?? ''), '1 clients scanned'), '--client-id should limit scan to one client', $failed);
+$clientOnly = smoke_cron_cli(['--host=ops-test.midwestmanagedit.com', '--client-id=10'], $env, ['-d', 'auto_prepend_file=' . $prepend]);
+smoke_cron_check(($clientOnly['exit_code'] ?? null) === 0 && str_contains((string)($clientOnly['stdout'] ?? ''), '1 clients scanned') && str_contains((string)($clientOnly['stdout'] ?? ''), 'Pre Activation LLC (#10): customer #110 scanning'), '--client-id should include eligible pre-activation clients without ACTIVE contracts', $failed);
+
+$clientNoSyncro = smoke_cron_cli(['--host=ops-test.midwestmanagedit.com', '--client-id=7'], $env, ['-d', 'auto_prepend_file=' . $prepend]);
+smoke_cron_check(($clientNoSyncro['exit_code'] ?? null) === 0 && str_contains((string)($clientNoSyncro['stdout'] ?? ''), 'SKIP no syncro_customer_id'), '--client-id should retain the no Syncro customer ID skip message', $failed);
+
+$clientIncompleteMap = smoke_cron_cli(['--host=ops-test.midwestmanagedit.com', '--client-id=8'], $env, ['-d', 'auto_prepend_file=' . $prepend]);
+smoke_cron_check(($clientIncompleteMap['exit_code'] ?? null) === 0 && str_contains((string)($clientIncompleteMap['stdout'] ?? ''), 'SKIP incomplete Syncro folder map'), '--client-id should retain the incomplete folder map skip message', $failed);
 
 $limited = smoke_cron_cli(['--host=ops-test.midwestmanagedit.com', '--limit=2'], $env, ['-d', 'auto_prepend_file=' . $prepend]);
 smoke_cron_check(($limited['exit_code'] ?? null) === 0 && str_contains((string)($limited['stdout'] ?? ''), '2 clients scanned') && !str_contains((string)($limited['stdout'] ?? ''), 'Ready Client LLC: customer'), '--limit should cap scanned clients', $failed);
