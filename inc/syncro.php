@@ -631,29 +631,79 @@ function syncro_policy_assignment_missing_ids(?array $policyMap = null): array
     return $missing;
 }
 
-function syncro_policy_assignment_status(): string
+function syncro_policy_assignment_missing_details(?array $policyMap = null, ?array $keys = null): array
 {
-    $missing = syncro_policy_assignment_missing_ids();
-    if (!$missing) {
-        return 'CONFIGURED';
+    $policyMap = $policyMap ?? syncro_policy_assignment_map();
+    $checkKeys = $keys ?? array_keys($policyMap);
+    $missing = [];
+    foreach ($checkKeys as $key) {
+        if (!array_key_exists($key, $policyMap) || !syncro_policy_id_configured($policyMap[$key])) {
+            $missing[] = [
+                'key' => (string)$key,
+                'value' => array_key_exists($key, $policyMap) ? syncro_describe_policy_assignment_value($policyMap[$key]) : 'missing',
+            ];
+        }
     }
-    return count($missing) === count(syncro_policy_assignment_map()) ? 'PENDING_MANUAL' : 'PARTIAL_CONFIGURED';
+    return $missing;
 }
 
-function syncro_staging_policy_assignment_prefixes_valid(array $policyMap): bool
+function syncro_format_policy_assignment_detail(array $detail): string
+{
+    return (string)($detail['key'] ?? '') . '=' . (string)($detail['value'] ?? 'missing');
+}
+
+function syncro_policy_assignment_status(): string
+{
+    $policyMap = syncro_policy_assignment_map();
+    $missing = syncro_policy_assignment_missing_ids($policyMap);
+    if (!$missing) {
+        return syncro_staging_policy_assignment_validation_error($policyMap) === null ? 'CONFIGURED' : 'PENDING_MANUAL';
+    }
+    return count($missing) === count($policyMap) ? 'PENDING_MANUAL' : 'PARTIAL_CONFIGURED';
+}
+
+function syncro_describe_policy_assignment_value(mixed $policyId): string
+{
+    if ($policyId === null) {
+        return 'null';
+    }
+    if (is_bool($policyId)) {
+        return $policyId ? 'true' : 'false';
+    }
+    if (is_scalar($policyId)) {
+        $value = trim((string)$policyId);
+        return $value === '' ? 'empty' : $value;
+    }
+    return gettype($policyId);
+}
+
+function syncro_staging_policy_assignment_validation_error(array $policyMap): ?array
 {
     if (!syncro_is_staging_mode()) {
-        return true;
+        return null;
     }
     foreach ($policyMap as $key => $policyId) {
         if (!syncro_policy_id_configured($policyId)) {
             continue;
         }
-        if (!is_string($policyId) || !str_starts_with($policyId, 'MMIT-Test-')) {
-            return false;
+        if (is_numeric($policyId)) {
+            continue;
+        }
+        $value = trim((string)$policyId);
+        if (!str_starts_with($value, 'MMIT-Test-')) {
+            return [
+                'key' => (string)$key,
+                'value' => syncro_describe_policy_assignment_value($policyId),
+                'message' => 'Staging policy assignment ' . (string)$key . ' value ' . syncro_describe_policy_assignment_value($policyId) . ' must be either a configured positive numeric Syncro policy ID or an MMIT-Test-* policy name.',
+            ];
         }
     }
-    return true;
+    return null;
+}
+
+function syncro_staging_policy_assignment_prefixes_valid(array $policyMap): bool
+{
+    return syncro_staging_policy_assignment_validation_error($policyMap) === null;
 }
 
 function syncro_policy_assignment_status_message(): string
@@ -667,8 +717,9 @@ function syncro_policy_assignment_status_message(): string
     if ($missing) {
         $message = 'PENDING_MANUAL: Missing Syncro policy IDs for ' . implode(', ', $missing) . '. No Syncro policy folder PUTs will be attempted until every required policy ID is configured.';
     }
-    if (!syncro_staging_policy_assignment_prefixes_valid($policyMap)) {
-        $message .= ($message !== '' ? ' ' : 'PENDING_MANUAL: ') . 'Staging policy assignment IDs must use MMIT-Test-* policies.';
+    $stagingError = syncro_staging_policy_assignment_validation_error($policyMap);
+    if ($stagingError !== null) {
+        $message .= ($message !== '' ? ' ' : 'PENDING_MANUAL: ') . (string)($stagingError['message'] ?? 'Staging policy assignment IDs must use MMIT-Test-* policies.');
     }
     return $message;
 }
@@ -818,18 +869,16 @@ function syncro_build_selected_tier_policy_assignment_payload(string $tier, arra
     }
 
     $policies = $policyMap ?? syncro_policy_assignment_map();
-    if (!syncro_staging_policy_assignment_prefixes_valid($policies)) {
-        return ['ok' => false, 'status' => 'PENDING_MANUAL', 'message' => 'PENDING_MANUAL: Staging policy assignment IDs must use MMIT-Test-* policies. No Syncro policy folder PUT was attempted.', 'tier' => $tier];
+    $stagingError = syncro_staging_policy_assignment_validation_error($policies);
+    if ($stagingError !== null) {
+        return ['ok' => false, 'status' => 'PENDING_MANUAL', 'message' => 'PENDING_MANUAL: ' . (string)($stagingError['message'] ?? 'Staging policy assignment IDs must use MMIT-Test-* policies.') . ' No Syncro policy folder PUT was attempted.', 'invalid' => $stagingError, 'tier' => $tier];
     }
     $required = syncro_selected_tier_policy_keys($tier);
-    $missingPolicies = [];
-    foreach ($required as $key) {
-        if (!array_key_exists($key, $policies) || !syncro_policy_id_configured($policies[$key])) {
-            $missingPolicies[] = $key;
-        }
-    }
-    if ($missingPolicies) {
-        return ['ok' => false, 'status' => 'PENDING_MANUAL', 'message' => 'PENDING_MANUAL: Missing Syncro policy IDs for selected ' . $tier . ' tier: ' . implode(', ', $missingPolicies) . '. No Syncro policy folder PUT was attempted.', 'missing' => $missingPolicies, 'tier' => $tier];
+    $missingDetails = syncro_policy_assignment_missing_details($policies, $required);
+    if ($missingDetails) {
+        $missingPolicies = array_map(static fn(array $detail): string => (string)$detail['key'], $missingDetails);
+        $missingDisplay = implode(', ', array_map('syncro_format_policy_assignment_detail', $missingDetails));
+        return ['ok' => false, 'status' => 'PENDING_MANUAL', 'message' => 'PENDING_MANUAL: Missing or invalid Syncro policy IDs for selected ' . $tier . ' tier: ' . $missingDisplay . '. No Syncro policy folder PUT was attempted.', 'missing' => $missingPolicies, 'missing_details' => $missingDetails, 'tier' => $tier];
     }
 
     $segments = [
