@@ -769,6 +769,56 @@ function syncro_resolve_tier_from_contract_row(array $contract): ?string
     return null;
 }
 
+function syncro_client_service_row_is_parent_package(array $service): bool
+{
+    if (!array_key_exists('parent_client_service_id', $service)) {
+        return false;
+    }
+    $parentId = $service['parent_client_service_id'];
+    return $parentId === null || $parentId === '' || (is_numeric($parentId) && (int)$parentId === 0);
+}
+
+function syncro_resolve_tier_from_client_service_row(array $service): ?string
+{
+    foreach (['item_code', 'item_name', 'description'] as $field) {
+        $tier = syncro_normalize_policy_tier((string)($service[$field] ?? ''));
+        if ($tier !== null) {
+            return $tier;
+        }
+    }
+    return null;
+}
+
+function syncro_resolve_tier_from_client_service_rows(array $services, string $source, bool $parentOnly = false): ?array
+{
+    foreach ($services as $service) {
+        if (!is_array($service)) {
+            continue;
+        }
+        if ($parentOnly && !syncro_client_service_row_is_parent_package($service)) {
+            continue;
+        }
+        $tier = syncro_resolve_tier_from_client_service_row($service);
+        if ($tier !== null) {
+            $result = ['ok' => true, 'tier' => $tier, 'source' => $source];
+            if (!empty($service['client_service_id'])) {
+                $result['client_service_id'] = (int)$service['client_service_id'];
+            }
+            return $result;
+        }
+    }
+    return null;
+}
+
+function syncro_resolve_tier_from_client_service_candidates(array $activeServices, array $pausedParentServices): ?array
+{
+    $active = syncro_resolve_tier_from_client_service_rows($activeServices, 'active_client_service');
+    if ($active !== null) {
+        return $active;
+    }
+    return syncro_resolve_tier_from_client_service_rows($pausedParentServices, 'paused_parent_client_service', true);
+}
+
 function syncro_resolve_client_policy_tier(array $client): array
 {
     $clientId = (int)($client['client_id'] ?? 0);
@@ -813,24 +863,39 @@ function syncro_resolve_client_policy_tier(array $client): array
     }
 
     if ($clientId > 0 && db_table_exists('client_service')) {
-        $select = 'SELECT cs.description';
+        $select = 'SELECT cs.client_service_id, cs.description';
         $join = '';
         if (db_table_exists('service_item') && db_column_exists('client_service', 'item_id')) {
             $select .= ', si.item_code, si.item_name';
             $join = ' LEFT JOIN service_item si ON si.item_id = cs.item_id';
+        }
+        $parentColumn = null;
+        foreach (['parent_client_service_id', 'parent_service_id', 'parent_id'] as $candidateParentColumn) {
+            if (db_column_exists('client_service', $candidateParentColumn)) {
+                $parentColumn = $candidateParentColumn;
+                $select .= ', cs.`' . $candidateParentColumn . '` AS parent_client_service_id';
+                break;
+            }
         }
         $clientServiceOrder = db_column_exists('client_service', 'start_date')
             ? ' ORDER BY cs.start_date DESC, cs.client_service_id DESC'
             : ' ORDER BY cs.client_service_id DESC';
         $stmt = db()->prepare($select . " FROM client_service cs" . $join . " WHERE cs.client_id = ? AND cs.status = 'ACTIVE'" . $clientServiceOrder . " LIMIT 20");
         $stmt->execute([$clientId]);
-        foreach ($stmt->fetchAll() as $svc) {
-            foreach (['item_code', 'item_name', 'description'] as $field) {
-                $tier = syncro_normalize_policy_tier((string)($svc[$field] ?? ''));
-                if ($tier !== null) {
-                    return ['ok' => true, 'tier' => $tier, 'source' => 'active_client_service'];
-                }
-            }
+        $activeServices = $stmt->fetchAll();
+
+        $pausedParentServices = [];
+        if ($parentColumn !== null) {
+            $pausedStmt = db()->prepare(
+                $select . " FROM client_service cs" . $join . " WHERE cs.client_id = ? AND cs.status = 'PAUSED' AND (cs.`" . $parentColumn . "` IS NULL OR cs.`" . $parentColumn . "` = 0)" . $clientServiceOrder . " LIMIT 20"
+            );
+            $pausedStmt->execute([$clientId]);
+            $pausedParentServices = $pausedStmt->fetchAll();
+        }
+
+        $serviceTier = syncro_resolve_tier_from_client_service_candidates($activeServices, $pausedParentServices);
+        if ($serviceTier !== null) {
+            return $serviceTier;
         }
     }
 
