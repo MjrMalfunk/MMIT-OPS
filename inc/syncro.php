@@ -505,6 +505,37 @@ function syncro_asset_onboarding_field_names(): array
     ];
 }
 
+function syncro_required_asset_onboarding_field_names(): array
+{
+    $fields = syncro_asset_onboarding_field_names();
+    return [
+        $fields['service_tier'],
+        $fields['asset_role'],
+        $fields['backup_required'],
+        $fields['dns_filtering_required'],
+        $fields['lab_asset'],
+        $fields['production_folder_target'],
+        $fields['onboarding_status'],
+        $fields['ready_to_move'],
+        $fields['onboarding_result'],
+    ];
+}
+
+function syncro_validate_required_asset_onboarding_fields(array $fields): array
+{
+    $missing = [];
+    foreach (syncro_required_asset_onboarding_field_names() as $name) {
+        if (!array_key_exists($name, $fields) || $fields[$name] === null || (is_string($fields[$name]) && trim($fields[$name]) === '')) {
+            $missing[] = $name;
+        }
+    }
+    return [
+        'ok' => $missing === [],
+        'missing' => $missing,
+        'field_payload_keys' => array_keys($fields),
+    ];
+}
+
 function syncro_prepare_asset_onboarding_api_field_values(array $fields): array
 {
     $names = syncro_asset_onboarding_field_names();
@@ -794,7 +825,11 @@ function syncro_route_root_asset_intake(array $asset, array $folderMap, int $roo
     }
 
     $fieldPayload = (array)($fieldBuild['fields'] ?? []);
+    if (!empty($GLOBALS['syncro_root_asset_intake_field_payload_filter']) && is_callable($GLOBALS['syncro_root_asset_intake_field_payload_filter'])) {
+        $fieldPayload = (array)call_user_func($GLOBALS['syncro_root_asset_intake_field_payload_filter'], $fieldPayload, $asset, $client, $classification);
+    }
     $apiFieldPayload = syncro_prepare_asset_onboarding_api_field_values($fieldPayload);
+    $fieldValidation = syncro_validate_required_asset_onboarding_fields($apiFieldPayload);
     $planned = $base + [
         'status' => $dryRun ? 'DRY_RUN_READY' : 'APPLYING',
         'action' => $dryRun ? 'would_stamp_and_move' : 'stamp_and_move',
@@ -804,9 +839,20 @@ function syncro_route_root_asset_intake(array $asset, array $folderMap, int $roo
         'onboarding_requirements' => $fieldBuild['requirements'] ?? [],
         'tier_result' => $fieldBuild['tier_result'] ?? [],
         'field_update_payload' => ['properties' => $apiFieldPayload],
+        'field_update_payload_keys' => $fieldValidation['field_payload_keys'] ?? array_keys($apiFieldPayload),
         'asset_update_payload' => ['policy_folder_id' => $targetFolderId],
         'message' => ($dryRun ? 'Dry run: would stamp onboarding fields and move ' : 'Stamping onboarding fields before moving ') . $assetName . ' to ' . $targetLabel . '.',
     ];
+    if (empty($fieldValidation['ok'])) {
+        $missing = array_map('strval', (array)($fieldValidation['missing'] ?? []));
+        return $finish(array_merge($planned, [
+            'ok' => false,
+            'status' => 'FIELD_STAMP_FAILED',
+            'field_validation' => $fieldValidation,
+            'message' => 'Syncro onboarding field payload is missing required fields; asset was not moved: ' . implode(', ', $missing),
+        ]));
+    }
+
     if ($dryRun) {
         return $finish($planned);
     }
