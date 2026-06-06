@@ -99,13 +99,39 @@ function syncro_root_asset_intake_cron_active_clients(?int $clientId = null, int
         return array_values(array_filter($clients, static fn($client): bool => is_array($client)));
     }
 
-    $where = 'WHERE EXISTS (SELECT 1 FROM contract ctr WHERE ctr.client_id = c.client_id AND ctr.status = "ACTIVE")';
     $params = [];
+    $successfulSyncStatuses = ['SYNCED', 'READY', 'SUCCESS', 'COMPLETED', 'COMPLETE', 'OK'];
+    $successfulSyncPlaceholders = implode(',', array_fill(0, count($successfulSyncStatuses), '?'));
+    $folderMapReadySql = "fm.client_id IS NOT NULL
+        AND COALESCE(fm.deploy_workstations_folder_id, 0) > 0
+        AND COALESCE(fm.deploy_servers_folder_id, 0) > 0
+        AND COALESCE(fm.production_workstations_folder_id, 0) > 0
+        AND COALESCE(fm.production_servers_folder_id, 0) > 0
+        AND UPPER(COALESCE(fm.provision_status, '')) = 'READY'
+        AND UPPER(COALESCE(fm.policy_assignment_status, '')) = 'READY'";
+
+    $where = '';
     if ($clientId !== null && $clientId > 0) {
-        $where .= ' AND c.client_id = ?';
+        $where = 'WHERE c.client_id = ?';
         $params[] = $clientId;
+    } else {
+        $where = "WHERE UPPER(COALESCE(c.status, '')) = 'ACTIVE'
+            AND COALESCE(c.syncro_customer_id, 0) > 0
+            AND UPPER(COALESCE(c.syncro_sync_status, '')) IN ({$successfulSyncPlaceholders})
+            AND {$folderMapReadySql}";
+        array_push($params, ...$successfulSyncStatuses);
     }
-    $sql = 'SELECT c.*, (SELECT COUNT(*) FROM contract ctr WHERE ctr.client_id = c.client_id AND ctr.status = "ACTIVE") AS active_contract_count FROM clients c ' . $where . ' ORDER BY c.legal_name ASC, c.client_id ASC';
+
+    $sql = 'SELECT c.*, fm.syncro_customer_id AS folder_map_syncro_customer_id,
+            fm.deploy_workstations_folder_id, fm.deploy_servers_folder_id,
+            fm.production_workstations_folder_id, fm.production_servers_folder_id,
+            fm.provision_status AS folder_map_provision_status,
+            fm.policy_assignment_status AS folder_map_policy_assignment_status,
+            (SELECT COUNT(*) FROM contract ctr WHERE ctr.client_id = c.client_id AND ctr.status = "ACTIVE") AS active_contract_count
+        FROM clients c
+        LEFT JOIN client_syncro_folder_map fm ON fm.client_id = c.client_id
+        ' . $where . '
+        ORDER BY c.legal_name ASC, c.client_id ASC';
     if ($limit > 0) {
         $sql .= ' LIMIT ' . (int)$limit;
     }
@@ -128,6 +154,7 @@ function syncro_root_asset_intake_cron_empty_totals(): array
         'clients_processed' => 0,
         'clients_skipped_no_customer_id' => 0,
         'clients_skipped_incomplete_folder_map' => 0,
+        'clients_skipped_not_ready' => 0,
         'clients_failed' => 0,
         'assets_evaluated' => 0,
         'assets_ready_or_moved' => 0,
@@ -160,6 +187,16 @@ function syncro_root_asset_intake_cron_process_client(array $client, bool $dryRu
     if (!syncro_folder_map_complete($folderMap)) {
         $summary['clients_skipped_incomplete_folder_map'] = 1;
         echo "Client {$label}: SKIP incomplete Syncro folder map.\n";
+        return ['ok' => true, 'summary' => $summary];
+    }
+
+    $provisionStatus = strtoupper(trim((string)($folderMap['provision_status'] ?? $client['folder_map_provision_status'] ?? '')));
+    $policyAssignmentStatus = strtoupper(trim((string)($folderMap['policy_assignment_status'] ?? $client['folder_map_policy_assignment_status'] ?? '')));
+    if ($provisionStatus !== 'READY' || $policyAssignmentStatus !== 'READY') {
+        $summary['clients_skipped_not_ready'] = 1;
+        $provisionText = $provisionStatus !== '' ? $provisionStatus : 'UNKNOWN';
+        $policyText = $policyAssignmentStatus !== '' ? $policyAssignmentStatus : 'UNKNOWN';
+        echo "Client {$label}: SKIP Syncro folder/policy readiness not READY (provision_status={$provisionText}, policy_assignment_status={$policyText}).\n";
         return ['ok' => true, 'summary' => $summary];
     }
 
@@ -289,11 +326,12 @@ function syncro_root_asset_intake_cron_main(array $argv = []): int
         }
 
         printf(
-            "Syncro root asset intake cron V1 complete: %d clients scanned, %d processed, %d skipped no customer ID, %d skipped incomplete folder map, %d client failures, %d assets evaluated, %d ready/moved, %d manual review, %d skipped, %d asset failures, %d staging blocked.\n",
+            "Syncro root asset intake cron V1 complete: %d clients scanned, %d processed, %d skipped no customer ID, %d skipped incomplete folder map, %d skipped not ready, %d client failures, %d assets evaluated, %d ready/moved, %d manual review, %d skipped, %d asset failures, %d staging blocked.\n",
             $totals['clients_scanned'],
             $totals['clients_processed'],
             $totals['clients_skipped_no_customer_id'],
             $totals['clients_skipped_incomplete_folder_map'],
+            $totals['clients_skipped_not_ready'],
             $totals['clients_failed'],
             $totals['assets_evaluated'],
             $totals['assets_ready_or_moved'],
