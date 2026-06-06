@@ -25,6 +25,12 @@ $folderMap = [
     'production_servers_folder_id' => 5029836,
 ];
 $rootFolderId = 4955419;
+$manageClient = ['service_tier' => 'Manage', 'legal_name' => 'Acme Manage'];
+$manageDnsClient = ['service_tier' => 'Manage', 'legal_name' => 'Acme DNS', 'services' => [['item_code' => 'DNS-FLTR', 'item_name' => 'DNS Filtering', 'description' => 'ScoutDNS filtering add-on', 'status' => 'PAUSED']]];
+$manageBackupClient = ['service_tier' => 'Manage', 'legal_name' => 'Acme Backup', 'services' => [['item_code' => 'EP-BKUP', 'item_name' => 'Endpoint Backup', 'description' => 'Workstation backup add-on', 'status' => 'ACTIVE']]];
+$protectClient = ['service_tier' => 'Protect', 'legal_name' => 'Acme Protect'];
+$protectServerBackupClient = ['service_tier' => 'Protect', 'legal_name' => 'Acme Protect Servers', 'services' => [['item_code' => 'SRVR-BK-500', 'item_name' => 'Server Backup 500GB', 'description' => 'Server backup add-on', 'status' => 'PAUSED']]];
+$governClient = ['service_tier' => 'Govern', 'legal_name' => 'Acme Govern'];
 
 function smoke_router_cli(array $args, array $env = [], array $phpOptions = []): array
 {
@@ -190,50 +196,97 @@ smoke_check(($applyCli['exit_code'] ?? null) === 0, 'Router apply mode should ru
 smoke_check(str_contains((string)($applyCli['stdout'] ?? ''), 'Syncro root asset intake router V1 starting for customer #123 root folder #' . (string)$rootFolderId . ' in apply mode.'), 'Router apply mode should print startup line', $failed);
 smoke_check(str_contains((string)($applyCli['stdout'] ?? ''), 'OPS staging Syncro writes are blocked by default.'), 'Router apply mode should keep staging write guard status output', $failed);
 
-$windows11 = syncro_route_root_asset_intake(smoke_asset(101, 'WIN11-ROOT', 'Microsoft Windows 11 Pro', $rootFolderId), $folderMap, $rootFolderId, true);
+$windows11 = syncro_route_root_asset_intake(smoke_asset(101, 'WIN11-ROOT', 'Microsoft Windows 11 Pro', $rootFolderId), $folderMap, $rootFolderId, true, $manageClient);
 smoke_check(($windows11['status'] ?? null) === 'DRY_RUN_READY', 'Windows 11 root asset should be dry-run ready', $failed);
 smoke_check(($windows11['target_policy_folder_id'] ?? null) === 5029833, 'Windows 11 root asset should route to Deploy / Workstations', $failed);
 smoke_check(($windows11['classification']['platform'] ?? null) === 'windows' && ($windows11['classification']['role'] ?? null) === 'workstation', 'Windows 11 classification should be windows workstation', $failed);
 
-$server = syncro_route_root_asset_intake(smoke_asset(102, 'SRV-ROOT', 'Windows Server 2022 Standard', $rootFolderId), $folderMap, $rootFolderId, true);
+smoke_check(($windows11['onboarding_fields']['MMIT Service Tier'] ?? null) === 'Manage', 'Manage workstation should stamp service tier Manage', $failed);
+smoke_check(($windows11['onboarding_fields']['MMIT Asset Role'] ?? null) === 'Workstation', 'Manage workstation should stamp role Workstation', $failed);
+smoke_check(($windows11['onboarding_fields']['MMIT DNS Filtering Required'] ?? null) === 'No', 'Manage workstation without DNS add-on should not require DNS', $failed);
+smoke_check(($windows11['onboarding_fields']['MMIT Backup Required'] ?? null) === 'No', 'Manage workstation without backup add-on should not require backup', $failed);
+smoke_check(($windows11['onboarding_fields']['MMIT Production Folder Target'] ?? null) === 'Production / Workstations', 'Workstation should target Production / Workstations', $failed);
+
+$manageDns = syncro_route_root_asset_intake(smoke_asset(110, 'WIN11-DNS', 'Windows 11 Pro', $rootFolderId), $folderMap, $rootFolderId, true, $manageDnsClient);
+smoke_check(($manageDns['onboarding_fields']['MMIT DNS Filtering Required'] ?? null) === 'Yes', 'Manage workstation with DNS add-on should require DNS', $failed);
+
+$manageBackup = syncro_route_root_asset_intake(smoke_asset(111, 'WIN11-BACKUP', 'Windows 11 Pro', $rootFolderId), $folderMap, $rootFolderId, true, $manageBackupClient);
+smoke_check(($manageBackup['onboarding_fields']['MMIT Backup Required'] ?? null) === 'Yes', 'Manage workstation with backup add-on should require backup', $failed);
+
+$protectWorkstation = syncro_route_root_asset_intake(smoke_asset(112, 'WIN11-PROTECT', 'Windows 11 Pro', $rootFolderId), $folderMap, $rootFolderId, true, $protectClient);
+smoke_check(($protectWorkstation['onboarding_fields']['MMIT Service Tier'] ?? null) === 'Protect', 'Protect workstation should stamp Service Tier Protect', $failed);
+smoke_check(($protectWorkstation['onboarding_fields']['MMIT DNS Filtering Required'] ?? null) === 'Yes', 'Protect workstation should require DNS', $failed);
+smoke_check(($protectWorkstation['onboarding_fields']['MMIT Backup Required'] ?? null) === 'Yes', 'Protect workstation should require workstation backup by package rule', $failed);
+
+$protectServerNoBackup = syncro_route_root_asset_intake(smoke_asset(113, 'SRV-NOBACKUP', 'Windows Server 2022 Standard', $rootFolderId), $folderMap, $rootFolderId, true, $protectClient);
+smoke_check(($protectServerNoBackup['onboarding_fields']['MMIT Asset Role'] ?? null) === 'Server', 'Protect server should stamp role Server', $failed);
+smoke_check(($protectServerNoBackup['onboarding_fields']['MMIT DNS Filtering Required'] ?? null) === 'Yes', 'Protect server should require DNS', $failed);
+smoke_check(($protectServerNoBackup['onboarding_fields']['MMIT Backup Required'] ?? null) === 'No', 'Protect server without server backup add-on should not require backup', $failed);
+smoke_check(($protectServerNoBackup['onboarding_fields']['MMIT Production Folder Target'] ?? null) === 'Production / Servers', 'Server should target Production / Servers', $failed);
+
+$governServer = syncro_route_root_asset_intake(smoke_asset(114, 'SRV-GOVERN', 'Windows Server 2022 Standard', $rootFolderId), $folderMap, $rootFolderId, true, $governClient);
+smoke_check(($governServer['onboarding_fields']['MMIT Service Tier'] ?? null) === 'Govern', 'Govern server should stamp Service Tier Govern', $failed);
+smoke_check(($governServer['onboarding_fields']['MMIT DNS Filtering Required'] ?? null) === 'Yes', 'Govern server should require DNS', $failed);
+smoke_check(($governServer['onboarding_fields']['MMIT Backup Required'] ?? null) === 'Yes', 'Govern server should require backup', $failed);
+
+$server = syncro_route_root_asset_intake(smoke_asset(102, 'SRV-ROOT', 'Windows Server 2022 Standard', $rootFolderId), $folderMap, $rootFolderId, true, $protectServerBackupClient);
 smoke_check(($server['status'] ?? null) === 'DRY_RUN_READY', 'Windows Server root asset should be dry-run ready', $failed);
 smoke_check(($server['target_policy_folder_id'] ?? null) === 5029834, 'Windows Server root asset should route to Deploy / Servers', $failed);
 smoke_check(($server['classification']['platform'] ?? null) === 'windows' && ($server['classification']['role'] ?? null) === 'server', 'Windows Server classification should be windows server', $failed);
 
-$mac = syncro_route_root_asset_intake(smoke_asset(103, 'MAC-ROOT', 'macOS Sonoma 14.5', $rootFolderId), $folderMap, $rootFolderId, true);
+smoke_check(($server['onboarding_fields']['MMIT Backup Required'] ?? null) === 'Yes', 'Protect server with Server Backup add-on should require backup', $failed);
+smoke_check(($server['onboarding_fields']['MMIT Production Folder Target'] ?? null) === 'Production / Servers', 'Protect server with Server Backup add-on should target Production / Servers', $failed);
+
+$mac = syncro_route_root_asset_intake(smoke_asset(103, 'MAC-ROOT', 'macOS Sonoma 14.5', $rootFolderId), $folderMap, $rootFolderId, true, $manageClient);
 smoke_check(($mac['status'] ?? null) === 'MANUAL_REVIEW', 'macOS root asset should remain unmoved for manual review', $failed);
 smoke_check(($mac['action'] ?? null) === 'manual_review' && ($mac['classification']['platform'] ?? null) === 'macos', 'macOS classification/manual review action', $failed);
 
-$linux = syncro_route_root_asset_intake(smoke_asset(104, 'LINUX-ROOT', 'Ubuntu Linux Server 24.04', $rootFolderId), $folderMap, $rootFolderId, true);
+$linux = syncro_route_root_asset_intake(smoke_asset(104, 'LINUX-ROOT', 'Ubuntu Linux Server 24.04', $rootFolderId), $folderMap, $rootFolderId, true, $manageClient);
 smoke_check(($linux['status'] ?? null) === 'MANUAL_REVIEW', 'Linux root asset should remain unmoved for manual review', $failed);
 smoke_check(($linux['classification']['platform'] ?? null) === 'linux' && ($linux['classification']['role'] ?? null) === 'server', 'Linux server classification should be structured but not actionable', $failed);
 
-$unknown = syncro_route_root_asset_intake(smoke_asset(105, 'UNKNOWN-ROOT', '', $rootFolderId), $folderMap, $rootFolderId, true);
+$unknown = syncro_route_root_asset_intake(smoke_asset(105, 'UNKNOWN-ROOT', '', $rootFolderId), $folderMap, $rootFolderId, true, $manageClient);
 smoke_check(($unknown['status'] ?? null) === 'MANUAL_REVIEW', 'Unknown/blank OS should remain unmoved for manual review', $failed);
 smoke_check(($unknown['classification']['platform'] ?? null) === 'unknown', 'Blank OS classification should be unknown', $failed);
 
-$alreadyDeploy = syncro_route_root_asset_intake(smoke_asset(106, 'WIN11-DEPLOY', 'Windows 11 Pro', 5029833), $folderMap, $rootFolderId, true);
+$alreadyDeploy = syncro_route_root_asset_intake(smoke_asset(106, 'WIN11-DEPLOY', 'Windows 11 Pro', 5029833), $folderMap, $rootFolderId, true, $manageClient);
 smoke_check(($alreadyDeploy['status'] ?? null) === 'UNCHANGED_DEPLOY', 'Asset already in Deploy should remain unchanged', $failed);
 
-$alreadyProduction = syncro_route_root_asset_intake(smoke_asset(107, 'WIN11-PROD', 'Windows 11 Pro', 5029835), $folderMap, $rootFolderId, true);
+$alreadyProduction = syncro_route_root_asset_intake(smoke_asset(107, 'WIN11-PROD', 'Windows 11 Pro', 5029835), $folderMap, $rootFolderId, true, $manageClient);
 smoke_check(($alreadyProduction['status'] ?? null) === 'UNCHANGED_PRODUCTION', 'Asset already in Production should remain unchanged', $failed);
 
 $calls = [];
 $GLOBALS['syncro_api_request_mock'] = static function (string $method, string $path, array $query, ?array $payload) use (&$calls): array {
     $calls[] = ['method' => $method, 'path' => $path, 'payload' => $payload];
+    if ($method === 'PUT' && $path === 'customer_assets/108' && isset($payload['properties'])) {
+        return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => ['id' => 108]], 'request' => ['method' => 'PUT', 'path' => '/api/v1/customer_assets/108']];
+    }
     if ($method === 'PUT' && $path === 'customer_assets/108' && ($payload['policy_folder_id'] ?? null) === 5029833) {
         return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => ['id' => 108, 'policy_folder_id' => 5029833]], 'request' => ['method' => 'PUT', 'path' => '/api/v1/customer_assets/108']];
     }
     return ['ok' => false, 'status' => 599, 'errors' => ['Unexpected ' . $method . ' ' . $path]];
 };
-$apply = syncro_route_root_asset_intake(smoke_asset(108, 'WIN11-APPLY', 'Windows 11 Pro', $rootFolderId), $folderMap, $rootFolderId, false);
+$apply = syncro_route_root_asset_intake(smoke_asset(108, 'WIN11-APPLY', 'Windows 11 Pro', $rootFolderId), $folderMap, $rootFolderId, false, $manageClient);
 unset($GLOBALS['syncro_api_request_mock']);
 smoke_check(($apply['status'] ?? null) === 'MOVED', 'Apply mode should move supported Windows root asset', $failed);
-smoke_check(count($calls) === 1 && ($calls[0]['method'] ?? null) === 'PUT' && ($calls[0]['path'] ?? null) === 'customer_assets/108', 'Apply mode should use PUT /customer_assets/{asset_id}', $failed);
+smoke_check(count($calls) === 2 && isset($calls[0]['payload']['properties']) && isset($calls[1]['payload']['policy_folder_id']), 'Apply mode should use PUT /customer_assets/{asset_id}', $failed);
 smoke_check(!array_filter($calls, static fn(array $call): bool => ($call['method'] ?? '') === 'DELETE'), 'Router should not issue DELETE calls', $failed);
 
+$failureCalls = [];
+$GLOBALS['syncro_api_request_mock'] = static function (string $method, string $path, array $query, ?array $payload) use (&$failureCalls): array {
+    $failureCalls[] = ['method' => $method, 'path' => $path, 'payload' => $payload];
+    if ($method === 'PUT' && $path === 'customer_assets/115' && isset($payload['properties'])) {
+        return ['ok' => false, 'status' => 422, 'errors' => ['field write rejected']];
+    }
+    return ['ok' => false, 'status' => 599, 'errors' => ['Unexpected request after failed stamp']];
+};
+$fieldFailure = syncro_route_root_asset_intake(smoke_asset(115, 'WIN11-FIELD-FAIL', 'Windows 11 Pro', $rootFolderId), $folderMap, $rootFolderId, false, $manageClient);
+unset($GLOBALS['syncro_api_request_mock']);
+smoke_check(($fieldFailure['status'] ?? null) === 'FIELD_STAMP_FAILED', 'Field stamping failure should prevent move', $failed);
+smoke_check(count($failureCalls) === 1 && isset($failureCalls[0]['payload']['properties']), 'Field stamping failure should not call folder move', $failed);
+
 $GLOBALS['smoke_syncro_staging_mode'] = true;
-$stagingBlocked = syncro_route_root_asset_intake(smoke_asset(109, 'WIN11-STAGING', 'Windows 11 Pro', $rootFolderId), $folderMap, $rootFolderId, false);
+$stagingBlocked = syncro_route_root_asset_intake(smoke_asset(109, 'WIN11-STAGING', 'Windows 11 Pro', $rootFolderId), $folderMap, $rootFolderId, false, $manageClient);
 $GLOBALS['smoke_syncro_staging_mode'] = false;
 smoke_check(($stagingBlocked['status'] ?? null) === 'STAGING_BLOCKED', 'Staging default should block apply write', $failed);
 smoke_check(!empty($stagingBlocked['response']['staging_blocked']), 'Staging blocked response should be surfaced', $failed);

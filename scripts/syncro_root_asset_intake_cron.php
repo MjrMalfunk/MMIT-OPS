@@ -227,7 +227,7 @@ function syncro_root_asset_intake_cron_process_client(array $client, bool $dryRu
         if (!is_array($asset)) {
             continue;
         }
-        $result = syncro_route_root_asset_intake($asset, $folderMap, $rootFolderId, $dryRun);
+        $result = syncro_route_root_asset_intake($asset, $folderMap, $rootFolderId, $dryRun, $client);
         $summary['assets_evaluated']++;
         $status = (string)($result['status'] ?? 'UNKNOWN');
         if (in_array($status, ['DRY_RUN_READY', 'MOVED'], true)) {
@@ -250,6 +250,10 @@ function syncro_root_asset_intake_cron_process_client(array $client, bool $dryRu
             (string)($result['asset_name'] ?? 'unknown asset'),
             (string)($result['message'] ?? '')
         );
+        if ($dryRun && !empty($result['onboarding_fields'])) {
+            echo 'Client ' . $label . ': onboarding fields ' . json_encode($result['onboarding_fields'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . PHP_EOL;
+            echo 'Client ' . $label . ': target move payload ' . json_encode($result['asset_update_payload'] ?? [], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . PHP_EOL;
+        }
     }
 
     printf(
