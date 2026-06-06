@@ -505,6 +505,28 @@ function syncro_asset_onboarding_field_names(): array
     ];
 }
 
+function syncro_prepare_asset_onboarding_api_field_values(array $fields): array
+{
+    $names = syncro_asset_onboarding_field_names();
+    foreach (['backup_required', 'dns_filtering_required', 'lab_asset'] as $key) {
+        $name = $names[$key] ?? '';
+        if ($name === '' || !array_key_exists($name, $fields)) {
+            continue;
+        }
+        $value = $fields[$name];
+        if (is_bool($value)) {
+            continue;
+        }
+        $normalized = strtolower(trim((string)$value));
+        if (in_array($normalized, ['yes', 'true', '1', 'on'], true)) {
+            $fields[$name] = true;
+        } elseif (in_array($normalized, ['no', 'false', '0', 'off', ''], true)) {
+            $fields[$name] = false;
+        }
+    }
+    return $fields;
+}
+
 function syncro_update_customer_asset_onboarding_fields(int $assetId, array $fields): array
 {
     if ($assetId <= 0) {
@@ -706,7 +728,7 @@ function syncro_build_asset_onboarding_field_values(array $asset, array $client,
             $fields['dns_filtering_required'] => !empty($requirements['dns_required']) ? 'Yes' : 'No',
             $fields['lab_asset'] => syncro_asset_onboarding_lab_default($client),
             $fields['production_folder_target'] => $productionTarget,
-            $fields['onboarding_status'] => 'IN_PROGRESS',
+            $fields['onboarding_status'] => 'NOT_READY',
             $fields['ready_to_move'] => 'No',
             $fields['onboarding_result'] => $summary,
         ],
@@ -772,6 +794,7 @@ function syncro_route_root_asset_intake(array $asset, array $folderMap, int $roo
     }
 
     $fieldPayload = (array)($fieldBuild['fields'] ?? []);
+    $apiFieldPayload = syncro_prepare_asset_onboarding_api_field_values($fieldPayload);
     $planned = $base + [
         'status' => $dryRun ? 'DRY_RUN_READY' : 'APPLYING',
         'action' => $dryRun ? 'would_stamp_and_move' : 'stamp_and_move',
@@ -780,7 +803,7 @@ function syncro_route_root_asset_intake(array $asset, array $folderMap, int $roo
         'onboarding_fields' => $fieldPayload,
         'onboarding_requirements' => $fieldBuild['requirements'] ?? [],
         'tier_result' => $fieldBuild['tier_result'] ?? [],
-        'field_update_payload' => ['properties' => $fieldPayload],
+        'field_update_payload' => ['properties' => $apiFieldPayload],
         'asset_update_payload' => ['policy_folder_id' => $targetFolderId],
         'message' => ($dryRun ? 'Dry run: would stamp onboarding fields and move ' : 'Stamping onboarding fields before moving ') . $assetName . ' to ' . $targetLabel . '.',
     ];
@@ -788,7 +811,7 @@ function syncro_route_root_asset_intake(array $asset, array $folderMap, int $roo
         return $finish($planned);
     }
 
-    $stamp = syncro_update_customer_asset_onboarding_fields($assetId, $fieldPayload);
+    $stamp = syncro_update_customer_asset_onboarding_fields($assetId, $apiFieldPayload);
     if (empty($stamp['ok'])) {
         $message = !empty($stamp['staging_blocked'])
             ? 'Staging mode blocked the controlled asset onboarding field update; set SYNCRO_ALLOW_STAGING_WRITES=true only for controlled staging apply tests.'

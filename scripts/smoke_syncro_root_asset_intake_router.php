@@ -128,6 +128,19 @@ function smoke_check(bool $condition, string $message, array &$failed): void
     }
 }
 
+function smoke_contains_value(mixed $value, mixed $needle): bool
+{
+    if (is_array($value)) {
+        foreach ($value as $item) {
+            if (smoke_contains_value($item, $needle)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    return $value === $needle;
+}
+
 function smoke_asset(int $id, string $name, string $os, int $folderId): array
 {
     return ['id' => $id, 'name' => $name, 'os' => $os, 'policy_folder_id' => $folderId];
@@ -206,6 +219,14 @@ smoke_check(($windows11['onboarding_fields']['MMIT Asset Role'] ?? null) === 'Wo
 smoke_check(($windows11['onboarding_fields']['MMIT DNS Filtering Required'] ?? null) === 'No', 'Manage workstation without DNS add-on should not require DNS', $failed);
 smoke_check(($windows11['onboarding_fields']['MMIT Backup Required'] ?? null) === 'No', 'Manage workstation without backup add-on should not require backup', $failed);
 smoke_check(($windows11['onboarding_fields']['MMIT Production Folder Target'] ?? null) === 'Production / Workstations', 'Workstation should target Production / Workstations', $failed);
+smoke_check(($windows11['onboarding_fields']['MMIT Onboarding Status'] ?? null) === 'NOT_READY', 'Intake payload should stamp onboarding status NOT_READY', $failed);
+smoke_check(($windows11['onboarding_fields']['MMIT Ready To Move'] ?? null) === 'No', 'Intake payload should keep Ready To Move No', $failed);
+smoke_check(str_contains((string)($windows11['onboarding_fields']['MMIT Onboarding Result'] ?? ''), 'mode=dry-run would stamp and move'), 'Dry-run onboarding result should include mode detail', $failed);
+smoke_check(($windows11['field_update_payload']['properties']['MMIT Onboarding Status'] ?? null) === 'NOT_READY', 'Dry-run API field payload should stamp onboarding status NOT_READY', $failed);
+smoke_check(($windows11['field_update_payload']['properties']['MMIT Backup Required'] ?? null) === false, 'API field payload should use boolean false for Backup Required checkbox', $failed);
+smoke_check(($windows11['field_update_payload']['properties']['MMIT DNS Filtering Required'] ?? null) === false, 'API field payload should use boolean false for DNS Filtering Required checkbox', $failed);
+smoke_check(($windows11['field_update_payload']['properties']['MMIT Lab Asset'] ?? null) === false, 'API field payload should use boolean false for Lab Asset checkbox', $failed);
+smoke_check(!smoke_contains_value($windows11, 'IN_PROGRESS'), 'No dry-run intake payload value should use IN_PROGRESS onboarding status', $failed);
 
 $manageDns = syncro_route_root_asset_intake(smoke_asset(110, 'WIN11-DNS', 'Windows 11 Pro', $rootFolderId), $folderMap, $rootFolderId, true, $manageDnsClient);
 smoke_check(($manageDns['onboarding_fields']['MMIT DNS Filtering Required'] ?? null) === 'Yes', 'Manage workstation with DNS add-on should require DNS', $failed);
@@ -270,6 +291,14 @@ $apply = syncro_route_root_asset_intake(smoke_asset(108, 'WIN11-APPLY', 'Windows
 unset($GLOBALS['syncro_api_request_mock']);
 smoke_check(($apply['status'] ?? null) === 'MOVED', 'Apply mode should move supported Windows root asset', $failed);
 smoke_check(count($calls) === 2 && isset($calls[0]['payload']['properties']) && isset($calls[1]['payload']['policy_folder_id']), 'Apply mode should use PUT /customer_assets/{asset_id}', $failed);
+smoke_check(isset($calls[0]['payload']['properties']) && isset($calls[1]['payload']['policy_folder_id']), 'Apply mode should stamp fields before moving', $failed);
+smoke_check(($calls[0]['payload']['properties']['MMIT Onboarding Status'] ?? null) === 'NOT_READY', 'Apply field stamp should use onboarding status NOT_READY', $failed);
+smoke_check(($calls[0]['payload']['properties']['MMIT Ready To Move'] ?? null) === 'No', 'Apply field stamp should keep Ready To Move No', $failed);
+smoke_check(str_contains((string)($calls[0]['payload']['properties']['MMIT Onboarding Result'] ?? ''), 'mode=apply stamping before move'), 'Apply onboarding result should include mode detail', $failed);
+smoke_check(($calls[0]['payload']['properties']['MMIT Backup Required'] ?? null) === false, 'Apply field stamp should use boolean false for Backup Required checkbox', $failed);
+smoke_check(($calls[0]['payload']['properties']['MMIT DNS Filtering Required'] ?? null) === false, 'Apply field stamp should use boolean false for DNS Filtering Required checkbox', $failed);
+smoke_check(($calls[0]['payload']['properties']['MMIT Lab Asset'] ?? null) === false, 'Apply field stamp should use boolean false for Lab Asset checkbox', $failed);
+smoke_check(!smoke_contains_value($calls, 'IN_PROGRESS'), 'No apply payload should use IN_PROGRESS onboarding status', $failed);
 smoke_check(!array_filter($calls, static fn(array $call): bool => ($call['method'] ?? '') === 'DELETE'), 'Router should not issue DELETE calls', $failed);
 
 $failureCalls = [];
@@ -284,6 +313,8 @@ $fieldFailure = syncro_route_root_asset_intake(smoke_asset(115, 'WIN11-FIELD-FAI
 unset($GLOBALS['syncro_api_request_mock']);
 smoke_check(($fieldFailure['status'] ?? null) === 'FIELD_STAMP_FAILED', 'Field stamping failure should prevent move', $failed);
 smoke_check(count($failureCalls) === 1 && isset($failureCalls[0]['payload']['properties']), 'Field stamping failure should not call folder move', $failed);
+smoke_check(($failureCalls[0]['payload']['properties']['MMIT Onboarding Status'] ?? null) === 'NOT_READY', 'Failed field stamp payload should still use onboarding status NOT_READY', $failed);
+smoke_check(!smoke_contains_value($failureCalls, 'IN_PROGRESS'), 'No failed field-stamp payload should use IN_PROGRESS onboarding status', $failed);
 
 $GLOBALS['smoke_syncro_staging_mode'] = true;
 $stagingBlocked = syncro_route_root_asset_intake(smoke_asset(109, 'WIN11-STAGING', 'Windows 11 Pro', $rootFolderId), $folderMap, $rootFolderId, false, $manageClient);
