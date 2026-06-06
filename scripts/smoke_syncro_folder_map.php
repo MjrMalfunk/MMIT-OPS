@@ -185,6 +185,49 @@ foreach ([
     }
 }
 
+$activeProtect = syncro_resolve_tier_from_client_service_candidates([
+    ['client_service_id' => 101, 'item_code' => 'MSP-SEC', 'item_name' => 'Protect IT Service', 'description' => 'Protect IT Service', 'parent_client_service_id' => null],
+], []);
+if (($activeProtect['tier'] ?? null) !== 'protect' || ($activeProtect['source'] ?? null) !== 'active_client_service') {
+    $failed[] = 'ACTIVE Protect parent client service resolves protect';
+}
+$pausedProtect = syncro_resolve_tier_from_client_service_candidates([], [
+    ['client_service_id' => 201, 'item_code' => 'MSP-SEC', 'item_name' => 'Protect IT Service', 'description' => 'Protect IT Service', 'parent_client_service_id' => null],
+]);
+if (($pausedProtect['tier'] ?? null) !== 'protect' || ($pausedProtect['source'] ?? null) !== 'paused_parent_client_service') {
+    $failed[] = 'PAUSED Protect parent client service resolves protect when no ACTIVE tier exists';
+}
+$activePreferred = syncro_resolve_tier_from_client_service_candidates([
+    ['client_service_id' => 301, 'item_code' => 'MSP-ESS', 'item_name' => 'Manage IT Service', 'description' => 'Manage IT Service', 'parent_client_service_id' => null],
+], [
+    ['client_service_id' => 302, 'item_code' => 'MSP-SEC', 'item_name' => 'Protect IT Service', 'description' => 'Protect IT Service', 'parent_client_service_id' => null],
+]);
+if (($activePreferred['tier'] ?? null) !== 'manage' || ($activePreferred['source'] ?? null) !== 'active_client_service') {
+    $failed[] = 'ACTIVE client service tier is preferred over PAUSED parent service tier';
+}
+$pausedAddonSkipped = syncro_resolve_tier_from_client_service_candidates([], [
+    ['client_service_id' => 401, 'item_code' => 'MSP-COMP', 'item_name' => 'Govern IT Add-on', 'description' => 'Govern IT Add-on', 'parent_client_service_id' => 402],
+    ['client_service_id' => 402, 'item_code' => 'MSP-SEC', 'item_name' => 'Protect IT Service', 'description' => 'Protect IT Service', 'parent_client_service_id' => null],
+]);
+if (($pausedAddonSkipped['tier'] ?? null) !== 'protect' || ($pausedAddonSkipped['client_service_id'] ?? null) !== 402) {
+    $failed[] = 'PAUSED add-on rows do not override the PAUSED parent package tier';
+}
+$pendingTier = syncro_resolve_client_policy_tier(['client_id' => 0, 'legal_name' => 'No Tier Client']);
+if (($pendingTier['status'] ?? null) !== 'PENDING_MANUAL') {
+    $failed[] = 'No client service or client field tier returns PENDING_MANUAL';
+}
+foreach ([
+    ['item_code' => 'MSP-ESS', 'item_name' => 'Manage IT Service', 'description' => 'Manage IT Service', 'parent_client_service_id' => null, 'expected' => 'manage'],
+    ['item_code' => 'MSP-COMP', 'item_name' => 'Govern IT Service', 'description' => 'Govern IT Service', 'parent_client_service_id' => null, 'expected' => 'govern'],
+] as $svc) {
+    $expected = (string)$svc['expected'];
+    unset($svc['expected']);
+    $resolved = syncro_resolve_tier_from_client_service_candidates([$svc], []);
+    if (($resolved['tier'] ?? null) !== $expected) {
+        $failed[] = 'Existing ' . ucfirst($expected) . ' tier detection still works for client service rows';
+    }
+}
+
 $singleRoot = syncro_resolve_customer_root_policy_folder([
     ['id' => 9001, 'name' => 'LnK Consulting, LLC', 'parent_id' => null],
     ['id' => 9002, 'name' => 'Workstations', 'parent_id' => 9001],
