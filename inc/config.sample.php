@@ -91,8 +91,9 @@ define('SYNCRO_SUBDOMAIN', 'midwestmanagedit');
 define('SYNCRO_API_KEY', '');
 define('SYNCRO_BASE_URL', ''); // Optional override. Leave blank to use https://<subdomain>.syncromsp.com/api/v1/
 define('SYNCRO_POLICY_ASSIGNMENTS', [
-    // Configure real production Syncro policy IDs only; leave null to fail closed with PENDING_MANUAL.
-    // In staging, configured policy values must refer to MMIT-Test-* policies.
+    // Configure real Syncro policy IDs only; leave null to fail closed with PENDING_MANUAL.
+    // In staging, positive numeric IDs are accepted only when explicitly listed here.
+    // If staging policy values are strings, they must refer to MMIT-Test-* policies.
     'manage.standard.root' => null,
     'manage.deploy.workstations' => null,
     'manage.deploy.servers' => null,

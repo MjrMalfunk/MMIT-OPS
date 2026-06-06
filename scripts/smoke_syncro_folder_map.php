@@ -73,6 +73,23 @@ $completePolicyMap = [
     'govern.production.workstations' => 'MMIT-Test-3103',
     'govern.production.servers' => 'MMIT-Test-3104',
 ];
+$numericStagingPolicyMap = [
+    'manage.standard.root' => 226570,
+    'manage.deploy.workstations' => 226614,
+    'manage.deploy.servers' => 226613,
+    'manage.production.workstations' => 226567,
+    'manage.production.servers' => 226571,
+    'protect.standard.root' => 226562,
+    'protect.deploy.workstations' => 226566,
+    'protect.deploy.servers' => 226565,
+    'protect.production.workstations' => 226561,
+    'protect.production.servers' => 226563,
+    'govern.standard.root' => 226560,
+    'govern.deploy.workstations' => 226559,
+    'govern.deploy.servers' => 226558,
+    'govern.production.workstations' => 226554,
+    'govern.production.servers' => 226556,
+];
 $completeFolderMap = [
     'root_policy_folder_id' => 4955419,
     'deploy_workstations_folder_id' => 5029833,
@@ -106,11 +123,41 @@ if (!empty($missingPolicyPayload['ok']) || !in_array('protect.standard.root', (a
     $failed[] = 'Missing selected-tier root standard policy ID fails closed';
 }
 
+$numericPayload = syncro_build_selected_tier_policy_assignment_payload('manage', $completeFolderMap, $numericStagingPolicyMap);
+if (empty($numericPayload['ok']) || count((array)($numericPayload['assignments'] ?? [])) !== 5) {
+    $failed[] = 'Staging numeric 15-ID map builds selected Manage payload';
+} else {
+    $numericPolicyIds = array_map('intval', array_column((array)$numericPayload['assignments'], 'partial_policy_id'));
+    if ($numericPolicyIds !== [226570, 226614, 226613, 226567, 226571]) {
+        $failed[] = 'Staging numeric Manage payload includes standard.root and four child assignments';
+    }
+}
+
+foreach (['missing' => null, 'null' => null, 'zero' => 0] as $case => $value) {
+    $badPolicyMap = $numericStagingPolicyMap;
+    if ($case === 'missing') {
+        unset($badPolicyMap['manage.standard.root']);
+    } else {
+        $badPolicyMap['manage.standard.root'] = $value;
+    }
+    $badPayload = syncro_build_selected_tier_policy_assignment_payload('manage', $completeFolderMap, $badPolicyMap);
+    $message = (string)($badPayload['message'] ?? '');
+    if (!empty($badPayload['ok']) || !str_contains($message, 'manage.standard.root')) {
+        $failed[] = 'Missing/null/zero manage.standard.root fails clearly for ' . $case;
+    }
+}
+
 $unsafeStagingPolicyMap = $completePolicyMap;
-$unsafeStagingPolicyMap['manage.standard.root'] = 1100;
+$unsafeStagingPolicyMap['manage.standard.root'] = 'MMIT-Prod-1100';
 $unsafeStagingPayload = syncro_build_selected_tier_policy_assignment_payload('manage', $completeFolderMap, $unsafeStagingPolicyMap);
-if (!empty($unsafeStagingPayload['ok']) || !str_contains((string)($unsafeStagingPayload['message'] ?? ''), 'MMIT-Test-*')) {
-    $failed[] = 'Staging policy IDs must use MMIT-Test policies';
+$unsafeMessage = (string)($unsafeStagingPayload['message'] ?? '');
+if (!empty($unsafeStagingPayload['ok']) || !str_contains($unsafeMessage, 'manage.standard.root') || !str_contains($unsafeMessage, 'MMIT-Prod-1100')) {
+    $failed[] = 'Non-MMIT-Test staging policy string fails with key and value';
+}
+
+$stringStagingPayload = syncro_build_selected_tier_policy_assignment_payload('manage', $completeFolderMap, $completePolicyMap);
+if (empty($stringStagingPayload['ok'])) {
+    $failed[] = 'MMIT-Test string staging policy values pass';
 }
 
 $missingFolderMap = $completeFolderMap;
@@ -263,21 +310,21 @@ define('SYNCRO_API_KEY', 'smoke-test-key-not-secret');
 define('SYNCRO_BASE_URL', 'https://127.0.0.1/never-called/');
 define('SYNCRO_ALLOW_STAGING_WRITES', true);
 define('SYNCRO_POLICY_ASSIGNMENTS', [
-    'manage.standard.root' => 'MMIT-Test-1100',
-    'manage.deploy.workstations' => 'MMIT-Test-1101',
-    'manage.deploy.servers' => 'MMIT-Test-1102',
-    'manage.production.workstations' => 'MMIT-Test-1103',
-    'manage.production.servers' => 'MMIT-Test-1104',
-    'protect.standard.root' => 'MMIT-Test-2100',
-    'protect.deploy.workstations' => 'MMIT-Test-2101',
-    'protect.deploy.servers' => 'MMIT-Test-2102',
-    'protect.production.workstations' => 'MMIT-Test-2103',
-    'protect.production.servers' => 'MMIT-Test-2104',
-    'govern.standard.root' => 'MMIT-Test-3100',
-    'govern.deploy.workstations' => 'MMIT-Test-3101',
-    'govern.deploy.servers' => 'MMIT-Test-3102',
-    'govern.production.workstations' => 'MMIT-Test-3103',
-    'govern.production.servers' => 'MMIT-Test-3104',
+    'manage.standard.root' => 226570,
+    'manage.deploy.workstations' => 226614,
+    'manage.deploy.servers' => 226613,
+    'manage.production.workstations' => 226567,
+    'manage.production.servers' => 226571,
+    'protect.standard.root' => 226562,
+    'protect.deploy.workstations' => 226566,
+    'protect.deploy.servers' => 226565,
+    'protect.production.workstations' => 226561,
+    'protect.production.servers' => 226563,
+    'govern.standard.root' => 226560,
+    'govern.deploy.workstations' => 226559,
+    'govern.deploy.servers' => 226558,
+    'govern.production.workstations' => 226554,
+    'govern.production.servers' => 226556,
 ]);
 require_once getcwd() . '/inc/syncro.php';
 $failed = [];
@@ -297,7 +344,12 @@ $baseFolders = [
     ['id' => 5029836, 'name' => 'Servers', 'parent_id' => 7002, 'partial_policy_id' => 0],
     ['id' => 9999999, 'name' => 'Non OPS Folder', 'parent_id' => 4955419, 'partial_policy_id' => 123],
 ];
-foreach (['manage' => 1100, 'protect' => 2100, 'govern' => 3100] as $tier => $basePolicyId) {
+$expectedPolicyIdsByTier = [
+    'manage' => [226570, 226614, 226613, 226567, 226571],
+    'protect' => [226562, 226566, 226565, 226561, 226563],
+    'govern' => [226560, 226559, 226558, 226554, 226556],
+];
+foreach ($expectedPolicyIdsByTier as $tier => $expectedPolicyIds) {
     $calls = [];
     $GLOBALS['syncro_api_request_mock'] = static function (string $method, string $path, array $query, ?array $payload) use (&$calls, $baseFolders): array {
         $calls[] = ['method' => $method, 'path' => $path, 'query' => $query, 'payload' => $payload];
@@ -323,7 +375,7 @@ foreach (['manage' => 1100, 'protect' => 2100, 'govern' => 3100] as $tier => $ba
         continue;
     }
     foreach ($puts as $offset => $call) {
-        $expectedPolicyId = 'MMIT-Test-' . ($basePolicyId + $offset);
+        $expectedPolicyId = (string)$expectedPolicyIds[$offset];
         if (!str_starts_with((string)$call['path'], 'policy_folders/')) {
             $failed[] = $tier . ' used wrong PUT path';
         }
@@ -351,11 +403,11 @@ foreach (['manage' => 1100, 'protect' => 2100, 'govern' => 3100] as $tier => $ba
 }
 
 $correctFolders = $baseFolders;
-$correctFolders[0]['partial_policy_id'] = 'MMIT-Test-2100';
-$correctFolders[3]['partial_policy_id'] = 'MMIT-Test-2101';
-$correctFolders[4]['partial_policy_id'] = 'MMIT-Test-2102';
-$correctFolders[5]['partial_policy_id'] = 'MMIT-Test-2103';
-$correctFolders[6]['partial_policy_id'] = 'MMIT-Test-2104';
+$correctFolders[0]['partial_policy_id'] = 226562;
+$correctFolders[3]['partial_policy_id'] = 226566;
+$correctFolders[4]['partial_policy_id'] = 226565;
+$correctFolders[5]['partial_policy_id'] = 226561;
+$correctFolders[6]['partial_policy_id'] = 226563;
 $calls = [];
 $GLOBALS['syncro_api_request_mock'] = static function (string $method, string $path, array $query, ?array $payload) use (&$calls, $correctFolders): array {
     $calls[] = ['method' => $method, 'path' => $path, 'payload' => $payload];
