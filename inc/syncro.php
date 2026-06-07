@@ -688,19 +688,22 @@ function syncro_collect_custom_field_option_definitions(mixed $data): array
     return $definitions;
 }
 
-function syncro_configured_custom_field_option_definitions(): array
+function syncro_configured_service_tier_option_ids(): array
 {
-    $definitions = [];
-    $serviceTierName = syncro_asset_onboarding_field_names()['service_tier'] ?? 'MMIT Service Tier';
-    $serviceTierKey = syncro_normalize_match_text($serviceTierName);
+    $options = [];
 
     $json = defined('MMIT_SYNCRO_SERVICE_TIER_OPTION_IDS') ? trim((string)MMIT_SYNCRO_SERVICE_TIER_OPTION_IDS) : '';
+    if ($json === '') {
+        $envJson = getenv('MMIT_SYNCRO_SERVICE_TIER_OPTION_IDS');
+        $json = is_string($envJson) ? trim($envJson) : '';
+    }
     if ($json !== '') {
         $decoded = json_decode($json, true);
         if (is_array($decoded)) {
             foreach ($decoded as $label => $optionId) {
-                if (syncro_custom_field_numeric_option_value($optionId)) {
-                    $definitions[$serviceTierKey][trim((string)$optionId)] = trim((string)$label);
+                $label = trim((string)$label);
+                if ($label !== '' && syncro_custom_field_numeric_option_value($optionId)) {
+                    $options[$label] = trim((string)$optionId);
                 }
             }
         }
@@ -708,9 +711,28 @@ function syncro_configured_custom_field_option_definitions(): array
 
     foreach (['Manage', 'Protect', 'Govern'] as $label) {
         $constant = 'MMIT_SYNCRO_SERVICE_TIER_OPTION_ID_' . strtoupper($label);
-        if (defined($constant) && syncro_custom_field_numeric_option_value((string)constant($constant))) {
-            $definitions[$serviceTierKey][trim((string)constant($constant))] = $label;
+        $envName = $constant;
+        $optionId = defined($constant) ? (string)constant($constant) : '';
+        if ($optionId === '') {
+            $envOptionId = getenv($envName);
+            $optionId = is_string($envOptionId) ? $envOptionId : '';
         }
+        if (syncro_custom_field_numeric_option_value($optionId)) {
+            $options[$label] = trim((string)$optionId);
+        }
+    }
+
+    return $options;
+}
+
+function syncro_configured_custom_field_option_definitions(): array
+{
+    $definitions = [];
+    $serviceTierName = syncro_asset_onboarding_field_names()['service_tier'] ?? 'MMIT Service Tier';
+    $serviceTierKey = syncro_normalize_match_text($serviceTierName);
+
+    foreach (syncro_configured_service_tier_option_ids() as $label => $optionId) {
+        $definitions[$serviceTierKey][(string)$optionId] = (string)$label;
     }
 
     return $definitions;
@@ -743,6 +765,19 @@ function syncro_custom_field_option_definitions(): array
     return $definitions;
 }
 
+function syncro_custom_field_option_map_summary(array $definitions): array
+{
+    $summary = [];
+    foreach ($definitions as $fieldKey => $options) {
+        $labels = [];
+        foreach ((array)$options as $optionId => $optionLabel) {
+            $labels[] = ['id' => (string)$optionId, 'label' => (string)$optionLabel];
+        }
+        $summary[(string)$fieldKey] = $labels;
+    }
+    return $summary;
+}
+
 function syncro_resolve_custom_field_option_id_for_label(string $fieldName, mixed $label, ?array $optionDefinitions = null): array
 {
     $display = trim((string)$label);
@@ -762,11 +797,35 @@ function syncro_resolve_custom_field_option_id_for_label(string $fieldName, mixe
     $targetKey = syncro_normalize_match_text($display);
     foreach ((array)($definitions[$fieldKey] ?? []) as $optionId => $optionLabel) {
         if (syncro_normalize_match_text((string)$optionLabel) === $targetKey && syncro_custom_field_numeric_option_value((string)$optionId)) {
-            return ['ok' => true, 'value' => (string)$optionId, 'display' => $display, 'source' => 'option_definition'];
+            return ['ok' => true, 'value' => (string)$optionId, 'display' => $display, 'source' => isset($configuredDefinitions[$fieldKey][(string)$optionId]) ? 'configured_option_map' : 'option_definition'];
         }
     }
 
-    return ['ok' => false, 'value' => $label, 'display' => $display, 'source' => 'label_fallback'];
+    return [
+        'ok' => false,
+        'value' => null,
+        'display' => $display,
+        'source' => 'unresolved_option_id',
+        'field_key' => $fieldKey,
+        'available_option_maps' => syncro_custom_field_option_map_summary($definitions),
+    ];
+}
+
+function syncro_resolve_service_tier_field_value(mixed $label, ?array $optionDefinitions = null): array
+{
+    $serviceTierName = syncro_asset_onboarding_field_names()['service_tier'] ?? 'MMIT Service Tier';
+    $resolved = syncro_resolve_custom_field_option_id_for_label($serviceTierName, $label, $optionDefinitions);
+    if (empty($resolved['ok'])) {
+        syncro_debug_log('service_tier_option_id_unresolved', [
+            'field' => $serviceTierName,
+            'requested_label' => (string)$label,
+            'source' => (string)($resolved['source'] ?? 'unresolved_option_id'),
+            'available_option_maps' => $resolved['available_option_maps'] ?? [],
+            'message' => 'MMIT Service Tier is dropdown-based; refusing to send raw label text without a Syncro option ID.',
+        ]);
+        $resolved['error'] = 'Unable to resolve Syncro option ID for MMIT Service Tier "' . trim((string)$label) . '"; refusing to send raw label text to dropdown field.';
+    }
+    return $resolved;
 }
 
 function syncro_prepare_asset_onboarding_api_field_payload(array $fields, bool $readableDropdowns = false): array
@@ -794,18 +853,26 @@ function syncro_prepare_asset_onboarding_api_field_payload(array $fields, bool $
 
     $serviceTierName = $names['service_tier'] ?? '';
     if (!$readableDropdowns && $serviceTierName !== '' && array_key_exists($serviceTierName, $fields)) {
-        $resolved = syncro_resolve_custom_field_option_id_for_label($serviceTierName, $fields[$serviceTierName]);
-        if (!empty($resolved['ok']) && ($resolved['source'] ?? '') !== 'already_option_id') {
+        $originalServiceTierValue = $fields[$serviceTierName];
+        $resolved = syncro_resolve_service_tier_field_value($originalServiceTierValue);
+        if (!empty($resolved['ok'])) {
             $fields[$serviceTierName] = $resolved['value'];
         }
         $sources[$serviceTierName] = [
-            'source' => (string)($resolved['source'] ?? 'label_fallback'),
-            'api_value' => $fields[$serviceTierName],
-            'display_value' => (string)($resolved['display'] ?? $fields[$serviceTierName]),
+            'ok' => !empty($resolved['ok']),
+            'source' => (string)($resolved['source'] ?? 'unresolved_option_id'),
+            'api_value' => !empty($resolved['ok']) ? $fields[$serviceTierName] : null,
+            'display_value' => (string)($resolved['display'] ?? $originalServiceTierValue),
             'used_option_id' => !empty($resolved['ok']) && syncro_custom_field_numeric_option_value($fields[$serviceTierName]),
         ];
+        if (empty($resolved['ok'])) {
+            unset($fields[$serviceTierName]);
+            $sources[$serviceTierName]['error'] = (string)($resolved['error'] ?? 'Unable to resolve Syncro option ID for MMIT Service Tier.');
+            $sources[$serviceTierName]['available_option_maps'] = $resolved['available_option_maps'] ?? [];
+        }
     } elseif ($serviceTierName !== '' && array_key_exists($serviceTierName, $fields)) {
         $sources[$serviceTierName] = [
+            'ok' => true,
             'source' => 'dry_run_readable_label',
             'api_value' => $fields[$serviceTierName],
             'display_value' => (string)$fields[$serviceTierName],
@@ -1215,7 +1282,7 @@ function syncro_route_root_asset_intake(array $asset, array $folderMap, int $roo
     if (!empty($GLOBALS['syncro_root_asset_intake_field_payload_filter']) && is_callable($GLOBALS['syncro_root_asset_intake_field_payload_filter'])) {
         $fieldPayload = (array)call_user_func($GLOBALS['syncro_root_asset_intake_field_payload_filter'], $fieldPayload, $asset, $client, $classification);
     }
-    $apiFieldPreparation = syncro_prepare_asset_onboarding_api_field_payload($fieldPayload, $dryRun);
+    $apiFieldPreparation = syncro_prepare_asset_onboarding_api_field_payload($fieldPayload, false);
     $apiFieldPayload = (array)($apiFieldPreparation['fields'] ?? []);
     $fieldValidation = syncro_validate_required_asset_onboarding_fields($apiFieldPayload);
     $planned = $base + [

@@ -90,6 +90,13 @@ define('SYNCRO_ALLOW_STAGING_WRITES', false);
 define('SYNCRO_SUBDOMAIN', 'midwestmanagedit');
 define('SYNCRO_API_KEY', '');
 define('SYNCRO_BASE_URL', ''); // Optional override. Leave blank to use https://<subdomain>.syncromsp.com/api/v1/
+// Required when Syncro GET /settings omits dropdown options for MMIT Service Tier.
+// Populate from the admin Syncro custom-field metadata diagnostic or a live asset custom_fields dump.
+// OPS fails closed instead of sending raw Manage/Protect/Govern labels to this dropdown if these IDs cannot be resolved.
+// define('MMIT_SYNCRO_SERVICE_TIER_OPTION_IDS', '{"Manage":"REPLACE_WITH_MANAGE_OPTION_ID","Protect":"REPLACE_WITH_PROTECT_OPTION_ID","Govern":"REPLACE_WITH_GOVERN_OPTION_ID"}');
+// define('MMIT_SYNCRO_SERVICE_TIER_OPTION_ID_MANAGE', '');
+// define('MMIT_SYNCRO_SERVICE_TIER_OPTION_ID_PROTECT', '');
+// define('MMIT_SYNCRO_SERVICE_TIER_OPTION_ID_GOVERN', '');
 define('SYNCRO_POLICY_ASSIGNMENTS', [
     // Configure real Syncro policy IDs only; leave null to fail closed with PENDING_MANUAL.
     // In staging, positive numeric IDs are accepted only when explicitly listed here.
