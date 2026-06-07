@@ -538,7 +538,241 @@ function syncro_validate_required_asset_onboarding_fields(array $fields): array
 
 function syncro_prepare_asset_onboarding_api_field_values(array $fields): array
 {
+    return syncro_prepare_asset_onboarding_api_field_payload($fields, true)['fields'];
+}
+
+function syncro_custom_field_numeric_option_value(mixed $value): bool
+{
+    if (is_int($value)) {
+        return true;
+    }
+    if (!is_string($value)) {
+        return false;
+    }
+    $text = trim($value);
+    return $text !== '' && preg_match('/^\d+$/', $text) === 1;
+}
+
+function syncro_custom_field_option_label_from_row(mixed $row): string
+{
+    if (is_string($row) || is_numeric($row) || is_bool($row)) {
+        return trim((string)$row);
+    }
+    if (!is_array($row)) {
+        return '';
+    }
+    foreach (['label', 'name', 'display_name', 'displayName', 'display_value', 'displayValue', 'value_text', 'valueText', 'text', 'title', 'value'] as $key) {
+        if (array_key_exists($key, $row) && !is_array($row[$key])) {
+            $label = trim((string)$row[$key]);
+            if ($label !== '' && !syncro_custom_field_numeric_option_value($label)) {
+                return $label;
+            }
+        }
+    }
+    return '';
+}
+
+function syncro_custom_field_option_id_from_row(mixed $key, mixed $row): string
+{
+    if (is_string($key) && syncro_custom_field_numeric_option_value($key)) {
+        return trim($key);
+    }
+    if (!is_array($row)) {
+        return '';
+    }
+    foreach (['id', 'key', 'option_id', 'optionId', 'field_option_id', 'fieldOptionId', 'answer_id', 'answerId', 'value'] as $idKey) {
+        if (array_key_exists($idKey, $row) && syncro_custom_field_numeric_option_value($row[$idKey])) {
+            return trim((string)$row[$idKey]);
+        }
+    }
+    return '';
+}
+
+function syncro_custom_field_definition_field_name(array $row): string
+{
+    foreach (['name', 'field_name', 'fieldName', 'label', 'title'] as $key) {
+        if (array_key_exists($key, $row) && !is_array($row[$key])) {
+            $name = trim((string)$row[$key]);
+            if ($name !== '' && !syncro_custom_field_numeric_option_value($name)) {
+                return $name;
+            }
+        }
+    }
+    return '';
+}
+
+function syncro_custom_field_definition_id(array $row): string
+{
+    foreach (['id', 'field_definition_id', 'fieldDefinitionId', 'asset_type_field_id', 'assetTypeFieldId', 'custom_field_id', 'customFieldId'] as $key) {
+        if (array_key_exists($key, $row) && syncro_custom_field_numeric_option_value($row[$key])) {
+            return trim((string)$row[$key]);
+        }
+    }
+    return '';
+}
+
+function syncro_custom_field_add_definition_options(array &$definitions, string $fieldName, mixed $options): void
+{
+    $fieldKey = syncro_normalize_match_text($fieldName);
+    if ($fieldKey === '' || !is_array($options)) {
+        return;
+    }
+    $rootOptionId = syncro_custom_field_option_id_from_row('', $options);
+    $rootLabel = syncro_custom_field_option_label_from_row($options);
+    if ($rootOptionId !== '' && $rootLabel !== '' && syncro_normalize_match_text($rootLabel) !== $fieldKey) {
+        $definitions[$fieldKey][$rootOptionId] = $rootLabel;
+    }
+    foreach ($options as $key => $row) {
+        $optionId = syncro_custom_field_option_id_from_row($key, $row);
+        $label = syncro_custom_field_option_label_from_row($row);
+        if ($optionId !== '' && $label !== '') {
+            $definitions[$fieldKey][$optionId] = $label;
+        }
+        if (is_array($row)) {
+            foreach ($row as $child) {
+                if (is_array($child)) {
+                    syncro_custom_field_add_definition_options($definitions, $fieldName, $child);
+                }
+            }
+        }
+    }
+}
+
+function syncro_collect_custom_field_option_definitions(mixed $data): array
+{
+    $definitions = [];
+    $fieldNamesById = [];
+    $walk = function (mixed $node) use (&$walk, &$definitions, &$fieldNamesById): void {
+        if (!is_array($node)) {
+            return;
+        }
+        $fieldName = syncro_custom_field_definition_field_name($node);
+        $definitionId = syncro_custom_field_definition_id($node);
+        if ($fieldName !== '' && $definitionId !== '') {
+            $fieldNamesById[$definitionId] = $fieldName;
+        }
+        if ($fieldName !== '') {
+            foreach (['options', 'option_definition', 'option_definitions', 'optionDefinition', 'optionDefinitions', 'choices', 'answers', 'dropdown_options', 'dropdownOptions', 'field_options', 'fieldOptions', 'possible_values', 'possibleValues', 'values', 'selections'] as $optionsKey) {
+                if (isset($node[$optionsKey]) && is_array($node[$optionsKey])) {
+                    syncro_custom_field_add_definition_options($definitions, $fieldName, $node[$optionsKey]);
+                }
+            }
+        }
+        foreach ($node as $child) {
+            $walk($child);
+        }
+    };
+    $walk($data);
+
+    $linkAnswers = function (mixed $node) use (&$linkAnswers, &$definitions, &$fieldNamesById): void {
+        if (!is_array($node)) {
+            return;
+        }
+        foreach (['field_definition_id', 'fieldDefinitionId', 'asset_type_field_id', 'assetTypeFieldId', 'custom_field_id', 'customFieldId', 'field_id', 'fieldId'] as $fieldIdKey) {
+            if (array_key_exists($fieldIdKey, $node) && syncro_custom_field_numeric_option_value($node[$fieldIdKey])) {
+                $fieldId = trim((string)$node[$fieldIdKey]);
+                $fieldName = $fieldNamesById[$fieldId] ?? '';
+                $optionId = syncro_custom_field_option_id_from_row('', $node);
+                $label = syncro_custom_field_option_label_from_row($node);
+                if ($fieldName !== '' && $optionId !== '' && $label !== '') {
+                    $definitions[syncro_normalize_match_text($fieldName)][$optionId] = $label;
+                }
+            }
+        }
+        foreach ($node as $child) {
+            $linkAnswers($child);
+        }
+    };
+    $linkAnswers($data);
+
+    return $definitions;
+}
+
+function syncro_configured_custom_field_option_definitions(): array
+{
+    $definitions = [];
+    $serviceTierName = syncro_asset_onboarding_field_names()['service_tier'] ?? 'MMIT Service Tier';
+    $serviceTierKey = syncro_normalize_match_text($serviceTierName);
+
+    $json = defined('MMIT_SYNCRO_SERVICE_TIER_OPTION_IDS') ? trim((string)MMIT_SYNCRO_SERVICE_TIER_OPTION_IDS) : '';
+    if ($json !== '') {
+        $decoded = json_decode($json, true);
+        if (is_array($decoded)) {
+            foreach ($decoded as $label => $optionId) {
+                if (syncro_custom_field_numeric_option_value($optionId)) {
+                    $definitions[$serviceTierKey][trim((string)$optionId)] = trim((string)$label);
+                }
+            }
+        }
+    }
+
+    foreach (['Manage', 'Protect', 'Govern'] as $label) {
+        $constant = 'MMIT_SYNCRO_SERVICE_TIER_OPTION_ID_' . strtoupper($label);
+        if (defined($constant) && syncro_custom_field_numeric_option_value((string)constant($constant))) {
+            $definitions[$serviceTierKey][trim((string)constant($constant))] = $label;
+        }
+    }
+
+    return $definitions;
+}
+
+function syncro_custom_field_option_definitions(): array
+{
+    if (array_key_exists('syncro_custom_field_option_definitions_mock', $GLOBALS) && is_array($GLOBALS['syncro_custom_field_option_definitions_mock'])) {
+        return $GLOBALS['syncro_custom_field_option_definitions_mock'];
+    }
+
+    static $definitions = null;
+    if ($definitions !== null) {
+        return $definitions;
+    }
+    $definitions = [];
+    if (defined('MMIT_SYNCRO_DISABLE_CUSTOM_FIELD_METADATA_FETCH') && MMIT_SYNCRO_DISABLE_CUSTOM_FIELD_METADATA_FETCH) {
+        return $definitions;
+    }
+
+    $settings = syncro_api_request('GET', 'settings');
+    if (empty($settings['ok'])) {
+        syncro_debug_log('custom_field_metadata_unavailable', [
+            'errors' => array_map('syncro_mask_secrets', (array)($settings['errors'] ?? [])),
+        ]);
+        return $definitions;
+    }
+
+    $definitions = syncro_collect_custom_field_option_definitions($settings['data'] ?? []);
+    return $definitions;
+}
+
+function syncro_resolve_custom_field_option_id_for_label(string $fieldName, mixed $label, ?array $optionDefinitions = null): array
+{
+    $display = trim((string)$label);
+    if ($display === '') {
+        return ['ok' => false, 'value' => $label, 'display' => $display, 'source' => 'empty'];
+    }
+    if (syncro_custom_field_numeric_option_value($display)) {
+        return ['ok' => true, 'value' => $display, 'display' => $display, 'source' => 'already_option_id'];
+    }
+
+    $definitions = $optionDefinitions ?? syncro_custom_field_option_definitions();
+    $configuredDefinitions = syncro_configured_custom_field_option_definitions();
+    foreach ($configuredDefinitions as $configuredFieldKey => $configuredOptions) {
+        $definitions[$configuredFieldKey] = array_replace((array)($definitions[$configuredFieldKey] ?? []), (array)$configuredOptions);
+    }
+    $fieldKey = syncro_normalize_match_text($fieldName);
+    $targetKey = syncro_normalize_match_text($display);
+    foreach ((array)($definitions[$fieldKey] ?? []) as $optionId => $optionLabel) {
+        if (syncro_normalize_match_text((string)$optionLabel) === $targetKey && syncro_custom_field_numeric_option_value((string)$optionId)) {
+            return ['ok' => true, 'value' => (string)$optionId, 'display' => $display, 'source' => 'option_definition'];
+        }
+    }
+
+    return ['ok' => false, 'value' => $label, 'display' => $display, 'source' => 'label_fallback'];
+}
+
+function syncro_prepare_asset_onboarding_api_field_payload(array $fields, bool $readableDropdowns = false): array
+{
     $names = syncro_asset_onboarding_field_names();
+    $sources = [];
     foreach (['backup_required', 'dns_filtering_required', 'lab_asset'] as $key) {
         $name = $names[$key] ?? '';
         if ($name === '' || !array_key_exists($name, $fields)) {
@@ -546,6 +780,7 @@ function syncro_prepare_asset_onboarding_api_field_values(array $fields): array
         }
         $value = $fields[$name];
         if (is_bool($value)) {
+            $sources[$name] = ['source' => 'boolean', 'api_value' => $value, 'display_value' => $value ? 'Yes' : 'No'];
             continue;
         }
         $normalized = strtolower(trim((string)$value));
@@ -554,8 +789,31 @@ function syncro_prepare_asset_onboarding_api_field_values(array $fields): array
         } elseif (in_array($normalized, ['no', 'false', '0', 'off', ''], true)) {
             $fields[$name] = false;
         }
+        $sources[$name] = ['source' => 'checkbox_normalized', 'api_value' => $fields[$name], 'display_value' => !empty($fields[$name]) ? 'Yes' : 'No'];
     }
-    return $fields;
+
+    $serviceTierName = $names['service_tier'] ?? '';
+    if (!$readableDropdowns && $serviceTierName !== '' && array_key_exists($serviceTierName, $fields)) {
+        $resolved = syncro_resolve_custom_field_option_id_for_label($serviceTierName, $fields[$serviceTierName]);
+        if (!empty($resolved['ok']) && ($resolved['source'] ?? '') !== 'already_option_id') {
+            $fields[$serviceTierName] = $resolved['value'];
+        }
+        $sources[$serviceTierName] = [
+            'source' => (string)($resolved['source'] ?? 'label_fallback'),
+            'api_value' => $fields[$serviceTierName],
+            'display_value' => (string)($resolved['display'] ?? $fields[$serviceTierName]),
+            'used_option_id' => !empty($resolved['ok']) && syncro_custom_field_numeric_option_value($fields[$serviceTierName]),
+        ];
+    } elseif ($serviceTierName !== '' && array_key_exists($serviceTierName, $fields)) {
+        $sources[$serviceTierName] = [
+            'source' => 'dry_run_readable_label',
+            'api_value' => $fields[$serviceTierName],
+            'display_value' => (string)$fields[$serviceTierName],
+            'used_option_id' => false,
+        ];
+    }
+
+    return ['fields' => $fields, 'value_sources' => $sources];
 }
 
 function syncro_update_customer_asset_onboarding_fields(int $assetId, array $fields): array
@@ -568,6 +826,135 @@ function syncro_update_customer_asset_onboarding_fields(int $assetId, array $fie
         return ['ok' => true, 'skipped' => true];
     }
     return syncro_api_request('PUT', 'customer_assets/' . $assetId, [], ['properties' => $fields]);
+}
+
+function syncro_fetch_customer_asset(int $assetId): array
+{
+    if ($assetId <= 0) {
+        return ['ok' => false, 'errors' => ['Asset ID is required to fetch a Syncro asset.']];
+    }
+    $resp = syncro_api_request('GET', 'customer_assets/' . $assetId);
+    if (empty($resp['ok'])) {
+        return ['ok' => false, 'errors' => $resp['errors'] ?? ['Unable to fetch Syncro asset.'], 'response' => $resp];
+    }
+    $asset = syncro_extract_asset_from_response($resp['data'] ?? []);
+    if (!$asset) {
+        return ['ok' => false, 'errors' => ['Syncro asset fetch did not return an asset record.'], 'response' => $resp];
+    }
+    return ['ok' => true, 'asset' => $asset, 'response' => $resp];
+}
+
+function syncro_custom_field_read_value(mixed $field): mixed
+{
+    if (!is_array($field)) {
+        return $field;
+    }
+    foreach (['display_value', 'displayValue', 'value_text', 'valueText', 'text', 'field_value', 'fieldValue', 'content', 'answer', 'selected_value', 'selectedValue', 'value'] as $key) {
+        if (array_key_exists($key, $field) && !is_array($field[$key])) {
+            $value = trim((string)$field[$key]);
+            if ($value !== '') {
+                return $field[$key];
+            }
+        }
+    }
+    return '';
+}
+
+function syncro_extract_asset_custom_fields(array $asset): array
+{
+    $fields = [];
+    foreach (['custom_fields', 'properties', 'asset_properties', 'fields'] as $sourceKey) {
+        if (empty($asset[$sourceKey]) || !is_array($asset[$sourceKey])) {
+            continue;
+        }
+        foreach ($asset[$sourceKey] as $key => $value) {
+            if (is_string($key)) {
+                $fields[$key] = syncro_custom_field_read_value($value);
+                continue;
+            }
+            if (!is_array($value)) {
+                continue;
+            }
+            $name = '';
+            foreach (['name', 'field_name', 'fieldName', 'label', 'title'] as $nameKey) {
+                if (array_key_exists($nameKey, $value) && !is_array($value[$nameKey])) {
+                    $name = trim((string)$value[$nameKey]);
+                    if ($name !== '') {
+                        break;
+                    }
+                }
+            }
+            if ($name !== '') {
+                $fields[$name] = syncro_custom_field_read_value($value);
+            }
+        }
+    }
+    return $fields;
+}
+
+function syncro_display_custom_field_value(string $fieldName, mixed $rawValue, ?array $optionDefinitions = null): array
+{
+    $value = syncro_custom_field_read_value($rawValue);
+    if (is_bool($value)) {
+        return ['value' => $value ? 'Yes' : 'No', 'source' => is_array($rawValue) ? 'embedded_display' : 'direct_boolean'];
+    }
+    $normalized = trim((string)$value);
+    if ($normalized === '') {
+        return ['value' => '', 'source' => 'empty'];
+    }
+    if (!syncro_custom_field_numeric_option_value($normalized)) {
+        return ['value' => $normalized, 'source' => is_array($rawValue) ? 'embedded_display' : 'direct'];
+    }
+    $fieldKey = syncro_normalize_match_text($fieldName);
+    $definitions = $optionDefinitions ?? syncro_custom_field_option_definitions();
+    if (isset($definitions[$fieldKey][$normalized])) {
+        return ['value' => $definitions[$fieldKey][$normalized], 'source' => 'option_definition'];
+    }
+    return ['value' => $normalized, 'source' => 'unresolved_numeric'];
+}
+
+function syncro_verify_asset_onboarding_field_persistence(array $asset, array $expectedDisplayFields, array $expectedApiFields): array
+{
+    $persisted = syncro_extract_asset_custom_fields($asset);
+    $definitions = syncro_custom_field_option_definitions();
+    foreach (syncro_configured_custom_field_option_definitions() as $configuredFieldKey => $configuredOptions) {
+        $definitions[$configuredFieldKey] = array_replace((array)($definitions[$configuredFieldKey] ?? []), (array)$configuredOptions);
+    }
+    $status = [];
+    $missing = [];
+    foreach (syncro_required_asset_onboarding_field_names() as $fieldName) {
+        $exists = array_key_exists($fieldName, $persisted);
+        $raw = $exists ? $persisted[$fieldName] : null;
+        $display = $exists ? syncro_display_custom_field_value($fieldName, $raw, $definitions) : ['value' => '', 'source' => 'missing'];
+        $blank = !$exists || $raw === null || (is_string($raw) && trim($raw) === '') || (!is_bool($raw) && trim((string)($display['value'] ?? '')) === '');
+        $expectedDisplay = $expectedDisplayFields[$fieldName] ?? ($expectedApiFields[$fieldName] ?? null);
+        $expectedApi = $expectedApiFields[$fieldName] ?? null;
+        $ok = !$blank;
+        if ($fieldName === (syncro_asset_onboarding_field_names()['service_tier'] ?? '')) {
+            $expectedKey = syncro_normalize_match_text((string)$expectedDisplay);
+            $displayKey = syncro_normalize_match_text((string)($display['value'] ?? ''));
+            $rawKey = syncro_normalize_match_text((string)$raw);
+            $apiKey = syncro_normalize_match_text((string)$expectedApi);
+            $ok = $ok && ($displayKey === $expectedKey || ($apiKey !== '' && $rawKey === $apiKey));
+        }
+        if (!$ok) {
+            $missing[] = $fieldName;
+        }
+        $status[$fieldName] = [
+            'ok' => $ok,
+            'expected_display' => $expectedDisplay,
+            'expected_api' => $expectedApi,
+            'persisted_raw' => $raw,
+            'persisted_display' => $display['value'] ?? '',
+            'display_source' => $display['source'] ?? '',
+        ];
+    }
+    return [
+        'ok' => $missing === [],
+        'missing' => $missing,
+        'required' => $status,
+        'persisted_field_keys' => array_keys($persisted),
+    ];
 }
 
 function syncro_service_requirement_match_text(array $service): string
@@ -828,7 +1215,8 @@ function syncro_route_root_asset_intake(array $asset, array $folderMap, int $roo
     if (!empty($GLOBALS['syncro_root_asset_intake_field_payload_filter']) && is_callable($GLOBALS['syncro_root_asset_intake_field_payload_filter'])) {
         $fieldPayload = (array)call_user_func($GLOBALS['syncro_root_asset_intake_field_payload_filter'], $fieldPayload, $asset, $client, $classification);
     }
-    $apiFieldPayload = syncro_prepare_asset_onboarding_api_field_values($fieldPayload);
+    $apiFieldPreparation = syncro_prepare_asset_onboarding_api_field_payload($fieldPayload, $dryRun);
+    $apiFieldPayload = (array)($apiFieldPreparation['fields'] ?? []);
     $fieldValidation = syncro_validate_required_asset_onboarding_fields($apiFieldPayload);
     $planned = $base + [
         'status' => $dryRun ? 'DRY_RUN_READY' : 'APPLYING',
@@ -840,6 +1228,7 @@ function syncro_route_root_asset_intake(array $asset, array $folderMap, int $roo
         'tier_result' => $fieldBuild['tier_result'] ?? [],
         'field_update_payload' => ['properties' => $apiFieldPayload],
         'field_update_payload_keys' => $fieldValidation['field_payload_keys'] ?? array_keys($apiFieldPayload),
+        'field_update_value_sources' => $apiFieldPreparation['value_sources'] ?? [],
         'asset_update_payload' => ['policy_folder_id' => $targetFolderId],
         'message' => ($dryRun ? 'Dry run: would stamp onboarding fields and move ' : 'Stamping onboarding fields before moving ') . $assetName . ' to ' . $targetLabel . '.',
     ];
@@ -865,6 +1254,35 @@ function syncro_route_root_asset_intake(array $asset, array $folderMap, int $roo
         return $finish(array_merge($planned, ['ok' => false, 'status' => !empty($stamp['staging_blocked']) ? 'STAGING_BLOCKED' : 'FIELD_STAMP_FAILED', 'field_response' => $stamp, 'response' => $stamp, 'message' => $message]));
     }
 
+    $verifyFields = syncro_fetch_customer_asset($assetId);
+    if (empty($verifyFields['ok'])) {
+        $message = 'Syncro onboarding field persistence verification failed after field stamping; asset was not moved: '
+            . implode(' ', array_map('strval', (array)($verifyFields['errors'] ?? ['Unable to re-fetch Syncro asset.'])));
+        return $finish(array_merge($planned, [
+            'ok' => false,
+            'status' => 'FIELD_STAMP_FAILED',
+            'field_response' => $stamp,
+            'field_persistence' => ['ok' => false, 'errors' => $verifyFields['errors'] ?? []],
+            'response' => $verifyFields,
+            'message' => $message,
+        ]));
+    }
+
+    $fieldPersistence = syncro_verify_asset_onboarding_field_persistence((array)($verifyFields['asset'] ?? []), $fieldPayload, $apiFieldPayload);
+    if (empty($fieldPersistence['ok'])) {
+        $missing = implode(', ', array_map('strval', (array)($fieldPersistence['missing'] ?? [])));
+        $message = 'Syncro onboarding field persistence verification failed after field stamping; asset was not moved.'
+            . ($missing !== '' ? ' Missing/blank required fields: ' . $missing : '');
+        return $finish(array_merge($planned, [
+            'ok' => false,
+            'status' => 'FIELD_STAMP_FAILED',
+            'field_response' => $stamp,
+            'field_persistence' => $fieldPersistence,
+            'response' => $verifyFields,
+            'message' => $message,
+        ]));
+    }
+
     $move = syncro_update_customer_asset_policy_folder($assetId, $targetFolderId);
     if (empty($move['ok'])) {
         $message = !empty($move['staging_blocked'])
@@ -873,7 +1291,7 @@ function syncro_route_root_asset_intake(array $asset, array $folderMap, int $roo
         return $finish(array_merge($planned, ['ok' => false, 'status' => !empty($move['staging_blocked']) ? 'STAGING_BLOCKED' : 'MOVE_FAILED', 'field_response' => $stamp, 'response' => $move, 'message' => $message]));
     }
 
-    return $finish(array_merge($planned, ['status' => 'MOVED', 'field_response' => $stamp, 'response' => $move, 'message' => 'Stamped onboarding fields and moved ' . $assetName . ' to ' . $targetLabel . ' using safe PUT /api/v1/customer_assets/{asset_id}.']));
+    return $finish(array_merge($planned, ['status' => 'MOVED', 'field_response' => $stamp, 'field_persistence' => $fieldPersistence, 'response' => $move, 'message' => 'Stamped onboarding fields, verified required onboarding field persistence, and moved ' . $assetName . ' to ' . $targetLabel . ' using safe PUT /api/v1/customer_assets/{asset_id}.']));
 }
 
 function syncro_client_columns_ready(): bool
