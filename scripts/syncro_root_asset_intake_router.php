@@ -256,6 +256,12 @@ function syncro_root_asset_router_main(array $argv = []): int
         if (!empty($result['field_update_payload_keys'])) {
             echo '  API field payload keys: ' . json_encode($result['field_update_payload_keys'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . PHP_EOL;
         }
+        if (!empty($result['field_update_value_sources'])) {
+            echo '  API field value sources: ' . json_encode($result['field_update_value_sources'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . PHP_EOL;
+        }
+        if (!empty($result['field_persistence'])) {
+            echo '  Field persistence: ' . json_encode($result['field_persistence'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . PHP_EOL;
+        }
         if ($dryRun && !empty($result['onboarding_fields'])) {
             echo '  Target move payload: ' . json_encode($result['asset_update_payload'] ?? [], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . PHP_EOL;
         }
