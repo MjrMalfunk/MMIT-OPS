@@ -17,6 +17,8 @@ function ops_is_staging_env(): bool
 
 require_once __DIR__ . '/../inc/syncro.php';
 
+$GLOBALS['syncro_custom_field_option_definitions_mock'] = [];
+
 $failed = [];
 $folderMap = [
     'deploy_workstations_folder_id' => 5029833,
@@ -298,10 +300,16 @@ $alreadyProduction = syncro_route_root_asset_intake(smoke_asset(107, 'WIN11-PROD
 smoke_check(($alreadyProduction['status'] ?? null) === 'UNCHANGED_PRODUCTION', 'Asset already in Production should remain unchanged', $failed);
 
 $calls = [];
-$GLOBALS['syncro_api_request_mock'] = static function (string $method, string $path, array $query, ?array $payload) use (&$calls): array {
+$stampedProperties = [];
+$GLOBALS['syncro_custom_field_option_definitions_mock'] = [];
+$GLOBALS['syncro_api_request_mock'] = static function (string $method, string $path, array $query, ?array $payload) use (&$calls, &$stampedProperties): array {
     $calls[] = ['method' => $method, 'path' => $path, 'payload' => $payload];
     if ($method === 'PUT' && $path === 'customer_assets/108' && isset($payload['properties'])) {
+        $stampedProperties = (array)$payload['properties'];
         return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => ['id' => 108]], 'request' => ['method' => 'PUT', 'path' => '/api/v1/customer_assets/108']];
+    }
+    if ($method === 'GET' && $path === 'customer_assets/108') {
+        return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => ['id' => 108, 'properties' => $stampedProperties]], 'request' => ['method' => 'GET', 'path' => '/api/v1/customer_assets/108']];
     }
     if ($method === 'PUT' && $path === 'customer_assets/108' && ($payload['policy_folder_id'] ?? null) === 5029833) {
         return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => ['id' => 108, 'policy_folder_id' => 5029833]], 'request' => ['method' => 'PUT', 'path' => '/api/v1/customer_assets/108']];
@@ -311,8 +319,9 @@ $GLOBALS['syncro_api_request_mock'] = static function (string $method, string $p
 $apply = syncro_route_root_asset_intake(smoke_asset(108, 'WIN11-APPLY', 'Windows 11 Pro', $rootFolderId), $folderMap, $rootFolderId, false, $manageClient);
 unset($GLOBALS['syncro_api_request_mock']);
 smoke_check(($apply['status'] ?? null) === 'MOVED', 'Apply mode should move supported Windows root asset', $failed);
-smoke_check(count($calls) === 2 && isset($calls[0]['payload']['properties']) && isset($calls[1]['payload']['policy_folder_id']), 'Apply mode should use PUT /customer_assets/{asset_id}', $failed);
-smoke_check(isset($calls[0]['payload']['properties']) && isset($calls[1]['payload']['policy_folder_id']), 'Apply mode should stamp fields before moving', $failed);
+smoke_check(count($calls) === 3 && isset($calls[0]['payload']['properties']) && ($calls[1]['method'] ?? null) === 'GET' && isset($calls[2]['payload']['policy_folder_id']), 'Apply mode should use PUT fields, GET verification, then PUT folder move', $failed);
+smoke_check(isset($calls[0]['payload']['properties']) && ($calls[1]['method'] ?? null) === 'GET' && isset($calls[2]['payload']['policy_folder_id']), 'Apply mode should stamp fields and verify persistence before moving', $failed);
+smoke_check(!empty($apply['field_persistence']['ok']), 'Apply mode should expose successful required field persistence status', $failed);
 smoke_field_payload_has_exact_keys((array)($calls[0]['payload']['properties'] ?? []), $requiredOnboardingFields, $failed, 'Apply API field payload');
 smoke_check(($calls[0]['payload']['properties']['MMIT Service Tier'] ?? null) === 'Manage', 'Apply field stamp should write Service Tier Manage', $failed);
 smoke_check(($apply['field_update_payload']['properties']['MMIT Service Tier'] ?? null) === 'Manage', 'Apply result should expose Service Tier Manage in field update payload', $failed);
@@ -341,6 +350,57 @@ smoke_check(count($failureCalls) === 1 && isset($failureCalls[0]['payload']['pro
 smoke_check(($failureCalls[0]['payload']['properties']['MMIT Service Tier'] ?? null) === 'Manage', 'Failed field stamp payload should include required Service Tier Manage', $failed);
 smoke_check(($failureCalls[0]['payload']['properties']['MMIT Onboarding Status'] ?? null) === 'NOT_READY', 'Failed field stamp payload should still use onboarding status NOT_READY', $failed);
 smoke_check(!smoke_contains_value($failureCalls, 'IN_PROGRESS'), 'No failed field-stamp payload should use IN_PROGRESS onboarding status', $failed);
+
+$persistenceFailureCalls = [];
+$persistenceProperties = [];
+$GLOBALS['syncro_custom_field_option_definitions_mock'] = [];
+$GLOBALS['syncro_api_request_mock'] = static function (string $method, string $path, array $query, ?array $payload) use (&$persistenceFailureCalls, &$persistenceProperties): array {
+    $persistenceFailureCalls[] = ['method' => $method, 'path' => $path, 'payload' => $payload];
+    if ($method === 'PUT' && $path === 'customer_assets/117' && isset($payload['properties'])) {
+        $persistenceProperties = (array)$payload['properties'];
+        return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => ['id' => 117]]];
+    }
+    if ($method === 'GET' && $path === 'customer_assets/117') {
+        unset($persistenceProperties['MMIT Service Tier']);
+        return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => ['id' => 117, 'properties' => $persistenceProperties]]];
+    }
+    return ['ok' => false, 'status' => 599, 'errors' => ['Unexpected request after persistence failure']];
+};
+$persistenceFailure = syncro_route_root_asset_intake(smoke_asset(117, 'WIN11-PERSIST-FAIL', 'Windows 11 Pro', $rootFolderId), $folderMap, $rootFolderId, false, $manageClient);
+unset($GLOBALS['syncro_api_request_mock']);
+smoke_check(($persistenceFailure['status'] ?? null) === 'FIELD_STAMP_FAILED', 'Field persistence verification should fail when Service Tier is omitted by Syncro', $failed);
+smoke_check(count($persistenceFailureCalls) === 2 && ($persistenceFailureCalls[0]['method'] ?? null) === 'PUT' && ($persistenceFailureCalls[1]['method'] ?? null) === 'GET', 'Persistence failure should stamp and verify but not move', $failed);
+smoke_check(in_array('MMIT Service Tier', (array)($persistenceFailure['field_persistence']['missing'] ?? []), true), 'Persistence failure should name missing Service Tier', $failed);
+
+$serviceTierOptionMap = [syncro_normalize_match_text('MMIT Service Tier') => ['2001' => 'Manage', '2002' => 'Protect', '2003' => 'Govern']];
+foreach ([['client' => $protectClient, 'asset_id' => 118, 'label' => 'Protect', 'id' => '2002'], ['client' => $manageClient, 'asset_id' => 119, 'label' => 'Manage', 'id' => '2001'], ['client' => $governClient, 'asset_id' => 120, 'label' => 'Govern', 'id' => '2003']] as $case) {
+    $optionCalls = [];
+    $optionProperties = [];
+    $GLOBALS['syncro_custom_field_option_definitions_mock'] = $serviceTierOptionMap;
+    $GLOBALS['syncro_api_request_mock'] = static function (string $method, string $path, array $query, ?array $payload) use (&$optionCalls, &$optionProperties, $case): array {
+        $optionCalls[] = ['method' => $method, 'path' => $path, 'payload' => $payload];
+        $assetPath = 'customer_assets/' . (string)$case['asset_id'];
+        if ($method === 'PUT' && $path === $assetPath && isset($payload['properties'])) {
+            $optionProperties = (array)$payload['properties'];
+            return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => ['id' => $case['asset_id']]]];
+        }
+        if ($method === 'GET' && $path === $assetPath) {
+            $persisted = $optionProperties;
+            $persisted['MMIT Service Tier'] = $case['id'];
+            return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => ['id' => $case['asset_id'], 'properties' => $persisted]]];
+        }
+        if ($method === 'PUT' && $path === $assetPath && isset($payload['policy_folder_id'])) {
+            return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => ['id' => $case['asset_id'], 'policy_folder_id' => $payload['policy_folder_id']]]];
+        }
+        return ['ok' => false, 'status' => 599, 'errors' => ['Unexpected option case request']];
+    };
+    $optionResult = syncro_route_root_asset_intake(smoke_asset((int)$case['asset_id'], 'WIN11-' . strtoupper((string)$case['label']), 'Windows 11 Pro', $rootFolderId), $folderMap, $rootFolderId, false, (array)$case['client']);
+    unset($GLOBALS['syncro_api_request_mock']);
+    smoke_check(($optionResult['status'] ?? null) === 'MOVED', (string)$case['label'] . ' Service Tier option ID should verify and move', $failed);
+    smoke_check(($optionCalls[0]['payload']['properties']['MMIT Service Tier'] ?? null) === $case['id'], (string)$case['label'] . ' Service Tier should stamp as dropdown option ID', $failed);
+    smoke_check(($optionResult['field_persistence']['required']['MMIT Service Tier']['persisted_display'] ?? null) === $case['label'], (string)$case['label'] . ' Service Tier persisted option ID should resolve to display label', $failed);
+}
+$GLOBALS['syncro_custom_field_option_definitions_mock'] = [];
 
 $omissionCalls = [];
 $GLOBALS['syncro_root_asset_intake_field_payload_filter'] = static function (array $fields): array {
