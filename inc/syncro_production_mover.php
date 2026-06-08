@@ -859,6 +859,11 @@ function syncro_production_move_validate_asset(array $asset): array
         $errors[] = MMIT_SYNCRO_FIELD_PRODUCTION_TARGET . ' must be Production/Workstations or Production/Servers.';
     }
 
+    $currentFolderId = syncro_production_move_asset_folder_id($asset);
+    if (!in_array($currentFolderId, [MMIT_SYNCRO_FOLDER_DEPLOY_WORKSTATIONS, MMIT_SYNCRO_FOLDER_DEPLOY_SERVERS], true)) {
+        $errors[] = 'Asset must currently be under a Deploy folder.';
+    }
+
     $validation = [
         'ok' => !$errors,
         'errors' => $errors,
@@ -866,7 +871,7 @@ function syncro_production_move_validate_asset(array $asset): array
         'ready_to_move' => $ready,
         'target' => $target,
         'target_folder_id' => $targetFolderId,
-        'current_folder_id' => syncro_production_move_asset_folder_id($asset),
+        'current_folder_id' => $currentFolderId,
     ];
     $validation['custom_field_debug'] = syncro_production_move_custom_field_debug($asset, [
         MMIT_SYNCRO_FIELD_ONBOARDING_STATUS,
@@ -977,6 +982,8 @@ function syncro_production_move_write_result(int $assetId, string $message, bool
 {
     $fields = [MMIT_SYNCRO_FIELD_AUTO_MOVE_RESULT => syncro_production_move_mask_secrets($message)];
     if ($completed) {
+        $fields[MMIT_SYNCRO_FIELD_ONBOARDING_STATUS] = 'COMPLETED';
+        $fields[MMIT_SYNCRO_FIELD_READY_TO_MOVE] = 'No';
         $fields[MMIT_SYNCRO_FIELD_COMPLETED_AT] = syncro_production_move_now_utc();
     }
     return syncro_production_move_update_asset_fields($assetId, $fields);
@@ -1040,6 +1047,41 @@ function syncro_production_move_asset(int $customerId, int $assetId, ?int $ready
     }
 
     $assetName = syncro_production_move_asset_name($asset);
+    if ($readyTicketId === null || $readyTicketId <= 0) {
+        $message = 'Move failed validation for ' . $assetName . ': open MMIT Auto Move Ready ticket is required.';
+        if (!$dryRun) {
+            syncro_production_move_write_result($assetId, $message, false);
+        }
+        return ['ok' => false, 'dry_run' => $dryRun, 'asset' => $asset, 'validation' => ['ok' => false, 'errors' => ['open MMIT Auto Move Ready ticket is required']], 'errors' => ['open MMIT Auto Move Ready ticket is required'], 'message' => $message];
+    }
+    $preTarget = syncro_production_move_custom_field($asset, MMIT_SYNCRO_FIELD_PRODUCTION_TARGET);
+    $preTargetFolderId = syncro_production_move_target_folder_id($preTarget);
+    $preCurrentFolderId = syncro_production_move_asset_folder_id($asset);
+    if ($preTargetFolderId !== null && $preCurrentFolderId !== null && (int)$preCurrentFolderId === (int)$preTargetFolderId) {
+        $message = 'Already in target folder.';
+        $preValidation = [
+            'ok' => true,
+            'errors' => [],
+            'status' => syncro_production_move_custom_field($asset, MMIT_SYNCRO_FIELD_ONBOARDING_STATUS),
+            'ready_to_move' => syncro_production_move_custom_field($asset, MMIT_SYNCRO_FIELD_READY_TO_MOVE),
+            'target' => $preTarget,
+            'target_folder_id' => $preTargetFolderId,
+            'current_folder_id' => $preCurrentFolderId,
+        ];
+        if (!$dryRun) {
+            $write = syncro_production_move_write_result($assetId, $message, true);
+            $ticket = syncro_production_move_update_ticket($readyTicketId, $message, false);
+            $warnings = [];
+            if (empty($write['ok'])) {
+                $warnings[] = syncro_production_move_response_errors($write, 'Already-in-target result write-back failed.');
+            }
+            if (empty($ticket['ok'])) {
+                $warnings[] = implode(' ', (array)($ticket['errors'] ?? ['Already-in-target ticket update failed.']));
+            }
+            return ['ok' => true, 'dry_run' => false, 'noop' => true, 'message' => $message, 'validation' => $preValidation, 'write' => $write, 'ticket' => $ticket, 'warnings' => $warnings];
+        }
+        return ['ok' => true, 'dry_run' => true, 'noop' => true, 'message' => $message, 'validation' => $preValidation];
+    }
     $validation = syncro_production_move_validate_asset($asset);
     if (empty($validation['ok'])) {
         $message = 'Move failed validation for ' . $assetName . ': ' . implode(' ', $validation['errors']);
@@ -1171,7 +1213,7 @@ function syncro_production_move_asset(int $customerId, int $assetId, ?int $ready
         ];
     }
 
-    $success = 'Moved to target folder ' . $targetLabel . '.';
+    $success = 'moved to Production at ' . syncro_production_move_now_utc() . ' ticket id ' . (int)$readyTicketId . ' target ' . $targetLabel . '.';
     $write = syncro_production_move_write_result($assetId, $success, true);
     $ticket = syncro_production_move_update_ticket($readyTicketId, $success, $closeTicket);
     $warnings = [];

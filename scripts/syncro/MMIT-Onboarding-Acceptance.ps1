@@ -18,7 +18,8 @@ $script:MMITRequiredCustomFields = @(
     'MMIT DNS Filtering Required',
     'MMIT Onboarding Status',
     'MMIT Ready To Move',
-    'MMIT Onboarding Result'
+    'MMIT Onboarding Result',
+    'MMIT Auto Move Result'
 )
 
 function ConvertTo-MMITText {
@@ -617,11 +618,11 @@ function New-MMITReadyMoveTicket {
 
     $subject = $script:MMITReadyTicketSubject
     $bodyText = @(
-        'MMIT onboarding acceptance is READY.',
+        'MMIT Auto Move Ready ticket type: MMIT_AUTO_MOVE_READY.',
         '',
-        ('Computer Name: {0}' -f $ComputerName),
+        ('Asset name: {0}' -f $ComputerName),
         '',
-        'Do not move assets from this acceptance script. Use the production move/deploy process after reviewing the target folder.',
+        'Do not move assets from this acceptance script. Trusted OPS auto-remediation must verify READY, Ready To Move, Deploy source, Production target, and this open ticket before moving.',
         '',
         $Decision.Summary
     ) -join [Environment]::NewLine
@@ -657,10 +658,16 @@ function Write-MMITOnboardingAcceptanceResult {
 
     Write-Output $Decision.Summary
 
+    $autoMoveResult = if ($Decision.Status -eq 'READY') {
+        ('Ready for production move at {0}' -f ([DateTime]::UtcNow.ToString('o')))
+    } else {
+        ('Not ready for production move at {0}' -f ([DateTime]::UtcNow.ToString('o')))
+    }
     $fieldUpdates = @{
         'MMIT Onboarding Status' = $Decision.Status
         'MMIT Ready To Move' = $Decision.ReadyToMove
         'MMIT Onboarding Result' = $Decision.Summary
+        'MMIT Auto Move Result' = $autoMoveResult
     }
 
     $fieldsUpdated = $false
@@ -709,7 +716,7 @@ function Invoke-MMITOnboardingAcceptance {
 
     $script:MMITWhatIfSyncro = [bool]$WhatIfSyncro
     $computerName = Get-MMITComputerName
-    $script:MMITReadyTicketSubject = if ((ConvertTo-MMITText $ReadyTicketSubject) -ne '') { $ReadyTicketSubject } else { ('MMIT onboarding acceptance ready to move - {0}' -f $computerName) }
+    $script:MMITReadyTicketSubject = if ((ConvertTo-MMITText $ReadyTicketSubject) -ne '') { $ReadyTicketSubject } else { ('MMIT Auto Move Ready - {0}' -f $computerName) }
 
     Import-MMITSyncroModule
     $subdomain = Get-MMITSyncroSubdomain
