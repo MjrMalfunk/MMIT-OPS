@@ -46,6 +46,22 @@ $signedPendingDocumentsFlowExists = (bool)preg_match(
     '/function\s+esignatures_mark_signed_pending_documents\s*\([^)]*\)\s*:\s*array\s*\{.*?SIGNED_PENDING_DOCUMENTS/s',
     $esignaturesSource
 );
+$signedCopyFunctionStart = strpos($accountingSource, 'function accounting_contract_complete_signed_copy');
+$signedCopyFunctionEnd = strpos($accountingSource, 'function accounting_contract_upload_signed_copy', $signedCopyFunctionStart === false ? 0 : $signedCopyFunctionStart);
+$signedCopyFunctionSource = ($signedCopyFunctionStart !== false && $signedCopyFunctionEnd !== false)
+    ? substr($accountingSource, $signedCopyFunctionStart, $signedCopyFunctionEnd - $signedCopyFunctionStart)
+    : '';
+$signedCopyMovesToSignedPendingOnboarding = str_contains($signedCopyFunctionSource, 'onboarding_started_at')
+    && str_contains($signedCopyFunctionSource, 'accounting_contract_status_update($contractId, ' . "'SIGNED_PENDING_ONBOARDING'");
+$signedCopyDoesNotActivateBilling = $signedCopyMovesToSignedPendingOnboarding
+    && !str_contains($signedCopyFunctionSource, 'go_live_at')
+    && !str_contains($signedCopyFunctionSource, 'billing_start_date')
+    && !str_contains($signedCopyFunctionSource, 'accounting_generate_contract_initial_invoice')
+    && !str_contains($signedCopyFunctionSource, "'ACTIVE'");
+$viewedOrSentEventsDoNotComplete = str_contains($esignaturesSource, 'if (!esignatures_is_signed_status($status))')
+    && str_contains($esignaturesSource, "'completed' => false, 'message' => 'eSignatures webhook status stored.'");
+$auditTrailIsBestEffort = str_contains($esignaturesSource, 'eSignatures appends Electronic Signature Records & Audit Trail pages to the final PDF.')
+    && str_contains($esignaturesSource, 'if ($auditReference === ' . "''" . ' && $signedReference !== ' . "''" . ')');
 $syncroWriteBlocked = syncro_block_staging_write_if_needed('POST', 'customers') !== null;
 
 $checks = [
@@ -57,6 +73,10 @@ $checks = [
     'manual upload path delegates to shared signed completion helper' => $manualUploadUsesSharedHelper,
     'eSignatures completion delegates to shared signed completion helper' => $esignaturesCompletionUsesSharedHelper,
     'eSignatures signed-pending-documents flow is available' => $signedPendingDocumentsFlowExists,
+    'signed webhook moves contract to SIGNED_PENDING_ONBOARDING' => $signedCopyMovesToSignedPendingOnboarding,
+    'signed-contract onboarding does not activate contract or billing dates' => $signedCopyDoesNotActivateBilling,
+    'later sent/viewed events do not downgrade or complete signed status' => $viewedOrSentEventsDoNotComplete,
+    'missing audit trail remains best-effort and does not block onboarding' => $auditTrailIsBestEffort,
     'staging Syncro write attempts are blocked before external API calls' => $syncroWriteBlocked,
 ];
 

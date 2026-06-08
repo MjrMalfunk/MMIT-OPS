@@ -6813,7 +6813,7 @@ function accounting_contract_complete_signed_copy(int $contractId, string $signe
         $meta['audit_document_path'] = $auditReference;
     }
 
-    return accounting_contract_status_update($contractId, 'ONBOARDING', (int)($options['user_id'] ?? (current_user()['user_id'] ?? 0)), $meta);
+    return accounting_contract_status_update($contractId, 'SIGNED_PENDING_ONBOARDING', (int)($options['user_id'] ?? (current_user()['user_id'] ?? 0)), $meta);
 }
 
 function accounting_contract_upload_signed_copy(int $contractId, array $file): array {
