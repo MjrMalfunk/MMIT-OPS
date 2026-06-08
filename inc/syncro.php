@@ -2865,6 +2865,7 @@ function syncro_status_badge_html(?string $status, ?int $syncroCustomerId = null
         'CONFLICT' => ['bg' => 'rgba(245,158,11,.20)', 'border' => 'rgba(245,158,11,.32)', 'color' => '#fde68a', 'label' => 'CONFLICT'],
         'MANUAL_REVIEW' => ['bg' => 'rgba(168,85,247,.20)', 'border' => 'rgba(168,85,247,.30)', 'color' => '#e9d5ff', 'label' => 'MANUAL REVIEW'],
         'STAGING_BLOCKED' => ['bg' => 'rgba(14,165,233,.18)', 'border' => 'rgba(14,165,233,.32)', 'color' => '#bae6fd', 'label' => 'STAGING BLOCKED'],
+        'STALE_LINK' => ['bg' => 'rgba(245,158,11,.20)', 'border' => 'rgba(245,158,11,.34)', 'color' => '#fde68a', 'label' => 'STALE LINK'],
         'ERROR' => ['bg' => 'rgba(248,113,113,.18)', 'border' => 'rgba(248,113,113,.30)', 'color' => '#fecaca', 'label' => 'ERROR'],
     ];
     $style = $map[$status] ?? $map['PENDING'];
@@ -2884,6 +2885,106 @@ function syncro_retry_contract_sync(int $contractId): array
         return ['ok' => false, 'errors' => ['Invalid contract for Syncro retry.']];
     }
     return syncro_contract_activation_sync($contractId);
+}
+
+
+function syncro_stale_customer_link_message(): string
+{
+    return 'Stored Syncro customer ID no longer exists. Clear Syncro link and retry to recreate customer.';
+}
+
+function syncro_response_is_not_found_or_deleted(array $response): bool
+{
+    $status = (int)($response['status'] ?? 0);
+    if (in_array($status, [404, 410], true)) {
+        return true;
+    }
+
+    $parts = [];
+    foreach (['errors', 'data', 'raw_body'] as $key) {
+        if (!array_key_exists($key, $response)) continue;
+        $value = $response[$key];
+        $parts[] = is_string($value) ? $value : (json_encode($value, JSON_UNESCAPED_SLASHES) ?: '');
+    }
+    $text = strtolower(implode(' ', $parts));
+    if ($text === '') {
+        return false;
+    }
+
+    return str_contains($text, 'not found')
+        || str_contains($text, 'no longer exists')
+        || str_contains($text, 'deleted')
+        || str_contains($text, 'gone')
+        || str_contains($text, 'could not find');
+}
+
+function syncro_validate_existing_customer_link(int $syncroCustomerId): array
+{
+    if ($syncroCustomerId <= 0) {
+        return ['ok' => false, 'errors' => ['Invalid Syncro customer ID.']];
+    }
+
+    $response = syncro_api_request('GET', 'customers/' . $syncroCustomerId);
+    if (!empty($response['ok'])) {
+        return ['ok' => true, 'syncro_customer_id' => $syncroCustomerId, 'response' => $response];
+    }
+
+    if (syncro_response_is_not_found_or_deleted($response)) {
+        return [
+            'ok' => false,
+            'stale_link' => true,
+            'status' => 'STALE_LINK',
+            'syncro_customer_id' => $syncroCustomerId,
+            'errors' => [syncro_stale_customer_link_message()],
+            'response' => $response,
+        ];
+    }
+
+    return [
+        'ok' => false,
+        'status' => 'ERROR',
+        'syncro_customer_id' => $syncroCustomerId,
+        'errors' => $response['errors'] ?? ['Unable to validate stored Syncro customer before update.'],
+        'response' => $response,
+    ];
+}
+
+function syncro_mark_stale_customer_link(int $clientId, int $syncroCustomerId, array $response = []): array
+{
+    $message = syncro_stale_customer_link_message();
+    syncro_debug_log('stale_customer_link', [
+        'client_id' => $clientId,
+        'syncro_customer_id' => $syncroCustomerId,
+        'response' => $response['data'] ?? null,
+        'raw_body' => $response['raw_body'] ?? null,
+        'status' => 'STALE_LINK',
+    ]);
+    syncro_mark_client($clientId, $syncroCustomerId, 'STALE_LINK', $message);
+    return [
+        'ok' => false,
+        'stale_link' => true,
+        'syncro_customer_id' => $syncroCustomerId,
+        'status' => 'STALE_LINK',
+        'errors' => [$message],
+        'message' => $message,
+    ];
+}
+
+function syncro_repair_stale_customer_link(int $clientId): array
+{
+    if ($clientId <= 0) return ['ok' => false, 'errors' => ['Invalid client for Syncro stale-link repair.']];
+    if (!syncro_client_columns_ready()) return ['ok' => false, 'errors' => ['Run the Syncro integration SQL migration first.']];
+
+    $client = client_get_by_id($clientId);
+    if (!$client) return ['ok' => false, 'errors' => ['Client record not found.']];
+
+    $oldSyncroId = !empty($client['syncro_customer_id']) ? (int)$client['syncro_customer_id'] : 0;
+    syncro_mark_client($clientId, null, 'PENDING', $oldSyncroId > 0 ? 'Cleared stale Syncro customer ID #' . $oldSyncroId . ' before recreate retry.' : 'Syncro link cleared before recreate retry.');
+
+    $result = syncro_sync_client($clientId);
+    $result['repaired_stale_link'] = true;
+    $result['cleared_syncro_customer_id'] = $oldSyncroId;
+    return $result;
 }
 
 function syncro_mark_client(int $clientId, ?int $syncroCustomerId, string $status, string $message = ''): void
@@ -2944,22 +3045,31 @@ function syncro_sync_client(int $clientId): array
     $syncroId = !empty($client['syncro_customer_id']) ? (int)$client['syncro_customer_id'] : 0;
 
     if ($syncroId > 0) {
+        $validationResult = syncro_validate_existing_customer_link($syncroId);
+        if (empty($validationResult['ok'])) {
+            if (!empty($validationResult['stale_link'])) {
+                return syncro_mark_stale_customer_link($clientId, $syncroId, (array)($validationResult['response'] ?? []));
+            }
+            $msg = implode(' ', array_map('strval', (array)($validationResult['errors'] ?? ['Unable to validate stored Syncro customer before update.'])));
+            syncro_debug_log('customer_validation_failed', ['client_id' => $clientId, 'syncro_customer_id' => $syncroId, 'message' => $msg, 'response' => $validationResult['response']['data'] ?? null, 'raw_body' => $validationResult['response']['raw_body'] ?? null]);
+            syncro_mark_client($clientId, $syncroId, 'ERROR', $msg);
+            return ['ok' => false, 'errors' => $validationResult['errors'] ?? ['Unable to validate stored Syncro customer before update.'], 'status' => 'ERROR'];
+        }
+
         $resp = syncro_api_request('PUT', 'customers/' . $syncroId, [], $payload);
         if (!empty($resp['ok'])) {
             syncro_mark_client($clientId, $syncroId, 'SYNCED', 'Updated in Syncro.');
             return syncro_attach_folder_provisioning_result(['ok' => true, 'syncro_customer_id' => $syncroId, 'action' => 'updated', 'status' => 'SYNCED'], $clientId, $syncroId);
         }
 
-        $msg = implode(' ', (array)($resp['errors'] ?? []));
-        $normalized = strtolower($msg);
-        if (($resp['status'] ?? 0) === 404 || str_contains($normalized, 'not found')) {
-            syncro_debug_log('stale_customer_link', ['client_id' => $clientId, 'syncro_customer_id' => $syncroId, 'message' => $msg]);
-            $syncroId = 0;
-        } else {
-            syncro_debug_log('update_failed', ['client_id' => $clientId, 'syncro_customer_id' => $syncroId, 'payload' => $payload, 'response' => $resp['data'] ?? null, 'raw_body' => $resp['raw_body'] ?? null]);
-            syncro_mark_client($clientId, $syncroId, 'ERROR', $msg);
-            return ['ok' => false, 'errors' => $resp['errors'] ?? ['Unable to update Syncro customer.']];
+        if (syncro_response_is_not_found_or_deleted($resp)) {
+            return syncro_mark_stale_customer_link($clientId, $syncroId, $resp);
         }
+
+        $msg = implode(' ', (array)($resp['errors'] ?? []));
+        syncro_debug_log('update_failed', ['client_id' => $clientId, 'syncro_customer_id' => $syncroId, 'payload' => $payload, 'response' => $resp['data'] ?? null, 'raw_body' => $resp['raw_body'] ?? null]);
+        syncro_mark_client($clientId, $syncroId, 'ERROR', $msg);
+        return ['ok' => false, 'errors' => $resp['errors'] ?? ['Unable to update Syncro customer.'], 'status' => 'ERROR'];
     }
 
     $existing = syncro_attempt_existing_customer_link($clientId, $payload);
