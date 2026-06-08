@@ -152,7 +152,7 @@ smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), 'Pre Activation
 smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), '[DRY_RUN_READY] #101'), 'Supported workstation root asset should be routed in dry-run', $failed);
 smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), '[DRY_RUN_READY] #102'), 'Supported server root asset should be routed in dry-run', $failed);
 smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), '"MMIT Service Tier":"Protect"'), 'Dry-run output should include MMIT Service Tier in onboarding fields', $failed);
-smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), 'API field payload keys') && str_contains((string)($dryRun['stdout'] ?? ''), 'MMIT Service Tier'), 'Dry-run output should show API field payload keys including MMIT Service Tier', $failed);
+smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), 'API field value sources') && str_contains((string)($dryRun['stdout'] ?? ''), 'MMIT Service Tier'), 'Dry-run output should show best-effort Service Tier field value source metadata', $failed);
 smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), '"api_value":"2002"') && str_contains((string)($dryRun['stdout'] ?? ''), '"used_option_id":true'), 'Dry-run output should show Service Tier Protect resolved to an option ID', $failed);
 smoke_cron_check(substr_count((string)($dryRun['stdout'] ?? ''), '[MANUAL_REVIEW]') === 6, 'macOS/Linux/unknown root assets should remain manual review', $failed);
 smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), '[UNCHANGED_DEPLOY] #106'), 'Deploy assets should be skipped', $failed);
@@ -191,12 +191,12 @@ $calls = json_decode((string)@file_get_contents($callsPath), true) ?: [];
 smoke_cron_check(($apply['exit_code'] ?? null) === 0, 'Explicit apply with staging override should complete successfully', $failed);
 smoke_cron_check(str_contains((string)($apply['stdout'] ?? ''), 'WARNING: OPS staging Syncro POST/PUT/PATCH writes are enabled'), 'Staging override should print controlled write warning', $failed);
 smoke_cron_check(str_contains((string)($apply['stdout'] ?? ''), '[MOVED] #101') && str_contains((string)($apply['stdout'] ?? ''), '[MOVED] #102'), 'Staging override should allow controlled PUT moves', $failed);
-smoke_cron_check(count(array_filter($calls, static fn(array $call): bool => ($call['method'] ?? '') === 'PUT')) === 4, 'Apply override should issue expected PUT calls', $failed);
+smoke_cron_check(count(array_filter($calls, static fn(array $call): bool => ($call['method'] ?? '') === 'PUT')) === 6, 'Apply override should issue expected required-field, optional Service Tier, and move PUT calls', $failed);
 $applyFieldCalls = array_values(array_filter($calls, static fn(array $call): bool => ($call['method'] ?? '') === 'PUT' && isset($call['payload']['properties'])));
-smoke_cron_check(count($applyFieldCalls) === 2, 'Apply override should stamp onboarding fields before folder moves', $failed);
-smoke_cron_check(($applyFieldCalls[0]['payload']['properties']['MMIT Service Tier'] ?? null) === '2002', 'Apply override workstation field payload should include Service Tier Protect option ID', $failed);
-smoke_cron_check(($applyFieldCalls[0]['payload']['properties']['MMIT Onboarding Status'] ?? null) === 'NOT_READY', 'Apply override field payload should preserve onboarding status NOT_READY', $failed);
-smoke_cron_check(array_key_exists('MMIT Asset Role', $applyFieldCalls[0]['payload']['properties'] ?? []), 'Apply override field payload should preserve Asset Role field', $failed);
+smoke_cron_check(count($applyFieldCalls) === 4, 'Apply override should stamp required onboarding fields and best-effort Service Tier fields before folder moves', $failed);
+smoke_cron_check(!array_key_exists('MMIT Service Tier', $applyFieldCalls[0]['payload']['properties'] ?? []) && (($applyFieldCalls[1]['payload']['properties']['MMIT Service Tier'] ?? null) === '2002'), 'Apply override should write Service Tier Protect option ID as a separate best-effort field payload', $failed);
+smoke_cron_check(($applyFieldCalls[0]['payload']['properties']['MMIT Onboarding Status'] ?? null) === 'NOT_READY', 'Apply override required field payload should preserve onboarding status NOT_READY', $failed);
+smoke_cron_check(array_key_exists('MMIT Asset Role', $applyFieldCalls[0]['payload']['properties'] ?? []), 'Apply override required field payload should preserve Asset Role field', $failed);
 smoke_cron_check(!array_filter($calls, static fn(array $call): bool => ($call['method'] ?? '') === 'DELETE'), 'Cron runner should never issue DELETE calls', $failed);
 
 @unlink($prepend);
