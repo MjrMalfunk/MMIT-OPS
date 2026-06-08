@@ -358,6 +358,8 @@ function syncro_onboarding_contract_completion_status(array $contract, array $as
 {
     $expected = syncro_onboarding_contract_expected_assets($contract, $assets);
     $incomplete = [];
+    $notCompleted = [];
+    $notInProduction = [];
     foreach ($expected as $expectedAsset) {
         $assetId = (int)($expectedAsset['id'] ?? $expectedAsset['asset_id'] ?? 0);
         $asset = $expectedAsset;
@@ -367,43 +369,59 @@ function syncro_onboarding_contract_completion_status(array $contract, array $as
                 break;
             }
         }
+        $assetLabel = $assetId > 0 ? (string)$assetId : syncro_production_move_asset_name($asset);
         $status = syncro_production_move_custom_field($asset, MMIT_SYNCRO_FIELD_ONBOARDING_STATUS);
-        if (!syncro_onboarding_asset_in_production($asset) || mb_strtoupper($status, 'UTF-8') !== 'COMPLETED') {
-            $incomplete[] = $assetId > 0 ? (string)$assetId : syncro_production_move_asset_name($asset);
+        $isCompleted = mb_strtoupper($status, 'UTF-8') === 'COMPLETED';
+        $isInProduction = syncro_onboarding_asset_in_production($asset);
+        if (!$isCompleted) {
+            $notCompleted[] = $assetLabel;
+        }
+        if (!$isInProduction) {
+            $notInProduction[] = $assetLabel;
+        }
+        if (!$isCompleted || !$isInProduction) {
+            $incomplete[] = $assetLabel;
         }
     }
     $contractStatus = strtoupper((string)($contract['status'] ?? ''));
     $eligibleStatus = in_array($contractStatus, ['SIGNED_PENDING_ONBOARDING', 'ONBOARDING'], true);
+    $billingReadinessAvailable = array_key_exists('billing_profile_ready', $contract) || array_key_exists('invoice_autogen_enabled', $contract);
+    $billingProfileReady = syncro_onboarding_contract_billing_ready($contract);
+    $readyForManualActivation = $eligibleStatus && $incomplete === [] && $openTickets === [] && $billingProfileReady;
     return [
-        'ok' => $eligibleStatus && $incomplete === [] && $openTickets === [] && syncro_onboarding_contract_billing_ready($contract),
+        'ok' => $readyForManualActivation,
+        'ready_for_manual_activation' => $readyForManualActivation,
         'eligible_status' => $eligibleStatus,
         'incomplete_assets' => $incomplete,
+        'not_completed_assets' => $notCompleted,
+        'not_in_production_assets' => $notInProduction,
+        'all_expected_assets_completed' => $notCompleted === [],
+        'all_expected_assets_in_production' => $notInProduction === [],
         'open_move_tickets' => $openTickets,
-        'billing_profile_ready' => syncro_onboarding_contract_billing_ready($contract),
+        'no_open_auto_move_tickets' => $openTickets === [],
+        'billing_profile_ready' => $billingProfileReady,
+        'billing_readiness_available' => $billingReadinessAvailable,
+        'billing_readiness' => [
+            'available' => $billingReadinessAvailable,
+            'ready' => $billingProfileReady,
+        ],
     ];
 }
 
 function syncro_onboarding_activate_contract_if_complete(array $contract, array $assets, array $openTickets = [], int $userId = 0): array
 {
     $status = syncro_onboarding_contract_completion_status($contract, $assets, $openTickets);
-    if (empty($status['ok'])) {
-        return ['ok' => true, 'activated' => false, 'status' => $status];
+    if (empty($status['ready_for_manual_activation'])) {
+        return ['ok' => true, 'activated' => false, 'ready_for_manual_activation' => false, 'status' => $status];
     }
     $contractId = (int)($contract['contract_id'] ?? 0);
-    $message = 'Contract activated automatically after onboarding completion.';
-    if ($contractId > 0 && function_exists('accounting_contract_status_update')) {
-        $result = accounting_contract_status_update($contractId, 'ACTIVE', $userId, ['billing_start_date' => date('Y-m-d'), 'go_live_at' => date('Y-m-d H:i:s')]);
-        if (empty($result['ok'])) {
-            syncro_onboarding_alert_keith('MMIT contract activation failure', 'Contract activation failed/manual review required.', ['contract_id' => $contractId, 'errors' => $result['errors'] ?? []]);
-            return ['ok' => false, 'activated' => false, 'errors' => $result['errors'] ?? ['Contract activation failed.'], 'status' => $status];
-        }
-    }
+    $message = 'All onboarding checks complete. Contract is ready for manual go-live.';
     $eventHandler = $GLOBALS['syncro_onboarding_contract_event_handler'] ?? null;
     if (is_callable($eventHandler)) {
         $eventHandler($contractId, $message, $contract, $status);
     } else {
         error_log('[mmit-onboarding] ' . $message . ' contract_id=' . $contractId);
     }
-    syncro_onboarding_alert_keith('MMIT contract became Active', $message, ['contract_id' => $contractId]);
-    return ['ok' => true, 'activated' => true, 'message' => $message, 'status' => $status];
+    syncro_onboarding_alert_keith('MMIT contract ready for manual go-live', $message, ['contract_id' => $contractId, 'status' => $status]);
+    return ['ok' => true, 'activated' => false, 'ready_for_manual_activation' => true, 'message' => $message, 'status' => $status];
 }

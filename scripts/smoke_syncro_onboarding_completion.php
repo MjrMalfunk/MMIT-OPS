@@ -10,6 +10,12 @@ define('MMIT_SYNCRO_PRODUCTION_MOVER_DISABLE_METADATA_FETCH', true);
 
 $GLOBALS['smoke_syncro_staging_mode'] = false;
 function ops_is_staging_env(): bool { return !empty($GLOBALS['smoke_syncro_staging_mode']); }
+$GLOBALS['smoke_accounting_contract_status_updates'] = [];
+function accounting_contract_status_update(int $contractId, string $status, int $userId = 0, array $meta = []): array
+{
+    $GLOBALS['smoke_accounting_contract_status_updates'][] = compact('contractId', 'status', 'userId', 'meta');
+    return ['ok' => true, 'message' => 'Smoke status update recorded.'];
+}
 
 require_once __DIR__ . '/../inc/syncro_onboarding_completion.php';
 
@@ -130,6 +136,8 @@ $incompleteAsset['properties'][MMIT_SYNCRO_FIELD_ONBOARDING_STATUS] = 'READY';
 $contractWithExpected = $contract + ['expected_assets' => [['id' => 12561086], ['id' => 12561087]]];
 $notActive = syncro_onboarding_activate_contract_if_complete($contractWithExpected, [$completedAsset, $incompleteAsset], [], 0);
 smoke_assert(($notActive['activated'] ?? true) === false, 'contract remains onboarding while any asset incomplete', $failed);
+smoke_assert(($notActive['ready_for_manual_activation'] ?? true) === false, 'incomplete assets are not ready for manual activation', $failed);
+smoke_assert(($notActive['status']['all_expected_assets_completed'] ?? true) === false, 'incomplete assets report incomplete completion gate', $failed);
 
 $events = [];
 $alerts = [];
@@ -137,10 +145,19 @@ $GLOBALS['syncro_onboarding_contract_event_handler'] = static function (int $con
 $GLOBALS['syncro_onboarding_alert_handler'] = static function (string $subject, string $body, array $context) use (&$alerts): void { $alerts[] = [$subject, $body, $context]; };
 $incompleteAsset['properties'][MMIT_SYNCRO_FIELD_ONBOARDING_STATUS] = 'COMPLETED';
 $incompleteAsset['policy_folder_id'] = MMIT_SYNCRO_FOLDER_PRODUCTION_WORKSTATIONS;
-$active = syncro_onboarding_activate_contract_if_complete($contractWithExpected, [$completedAsset, $incompleteAsset], [], 0);
-smoke_assert(($active['activated'] ?? false) === true, 'contract becomes active when all expected assets complete', $failed);
-smoke_assert(($events[0][1] ?? '') === 'Contract activated automatically after onboarding completion.', 'contract activation event/note emitted', $failed);
-smoke_assert(($alerts[0][0] ?? '') === 'MMIT contract became Active', 'Keith activation alert emitted', $failed);
+$readyForManual = syncro_onboarding_activate_contract_if_complete($contractWithExpected, [$completedAsset, $incompleteAsset], [], 0);
+smoke_assert(($readyForManual['activated'] ?? true) === false, 'completed assets do not automatically set contract active', $failed);
+smoke_assert(($readyForManual['ready_for_manual_activation'] ?? false) === true, 'all assets complete returns ready for manual activation', $failed);
+smoke_assert(($readyForManual['message'] ?? '') === 'All onboarding checks complete. Contract is ready for manual go-live.', 'manual go-live readiness message emitted', $failed);
+smoke_assert(($events[0][1] ?? '') === 'All onboarding checks complete. Contract is ready for manual go-live.', 'manual go-live readiness event/note emitted', $failed);
+smoke_assert(($alerts[0][0] ?? '') === 'MMIT contract ready for manual go-live', 'Keith manual go-live readiness alert emitted', $failed);
+smoke_assert($GLOBALS['smoke_accounting_contract_status_updates'] === [], 'accounting_contract_status_update is not called by onboarding completion automation', $failed);
+
+$accountingSource = file_get_contents(__DIR__ . '/../inc/accounting.php') ?: '';
+$invoiceViewSource = file_get_contents(__DIR__ . '/../accounting/invoice_view.php') ?: '';
+smoke_assert(str_contains($accountingSource, "'status' => 'DRAFT',") && str_contains($accountingSource, 'Initial draft invoice created.'), 'contract go-live billing creates draft invoices for review', $failed);
+smoke_assert(str_contains($accountingSource, 'if ((string)$invoice[\'status\'] === \'DRAFT\')') && str_contains($accountingSource, 'Issue the invoice before sending it.'), 'draft invoices are not sent until issued manually', $failed);
+smoke_assert(str_contains($invoiceViewSource, 'issue_and_send_invoice') && str_contains($invoiceViewSource, 'Issue and send invoice'), 'invoice sending remains behind manual issue/send approval flow', $failed);
 
 if ($failed) {
     fwrite(STDERR, 'Syncro onboarding completion smoke check failed: ' . implode(', ', $failed) . PHP_EOL);
