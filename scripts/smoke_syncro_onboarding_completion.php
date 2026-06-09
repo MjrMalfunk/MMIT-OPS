@@ -123,7 +123,16 @@ $closedTicket = false;
 foreach ($moveRequests as $request) {
     if (($request['method'] ?? '') === 'PUT' && ($request['path'] ?? '') === 'tickets/5000' && (($request['payload']['ticket']['status'] ?? '') === 'Resolved')) $closedTicket = true;
 }
-smoke_assert($closedTicket, 'mover closes ticket', $failed);
+smoke_assert(!$closedTicket, 'mover leaves onboarding ticket open for manual closure', $failed);
+$completionNote = '';
+foreach ($moveRequests as $request) {
+    if (($request['method'] ?? '') === 'POST' && ($request['path'] ?? '') === 'tickets/5000/comments') {
+        $completionNote = (string)($request['payload']['comment']['body'] ?? '');
+    }
+}
+smoke_assert(str_contains($completionNote, 'MMIT Auto Move Result') && str_contains($completionNote, 'Asset name: ACME-WS-01') && str_contains($completionNote, 'Asset ID: 12561086'), 'mover adds completion note with asset details', $failed);
+smoke_assert(str_contains($completionNote, 'Source policy_folder_id: ' . MMIT_SYNCRO_FOLDER_DEPLOY_WORKSTATIONS) && str_contains($completionNote, 'Target policy_folder_id: ' . MMIT_SYNCRO_FOLDER_PRODUCTION_WORKSTATIONS), 'mover completion note includes source and target folders', $failed);
+smoke_assert(str_contains($completionNote, 'Verification result: PASS') && str_contains($completionNote, 'UTC completion timestamp:') && str_contains($completionNote, 'Manual technician verification is still required'), 'mover completion note includes verification, timestamp, and manual verification message', $failed);
 unset($GLOBALS['syncro_production_move_api_request_handler']);
 
 $completedAsset = $movedAsset;
