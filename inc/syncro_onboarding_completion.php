@@ -8,8 +8,12 @@ const MMIT_SYNCRO_FIELD_BACKUP_REQUIRED = 'MMIT Backup Required';
 const MMIT_SYNCRO_FIELD_DNS_REQUIRED = 'MMIT DNS Filtering Required';
 const MMIT_SYNCRO_FIELD_ONBOARDING_RESULT = 'MMIT Onboarding Result';
 const MMIT_SYNCRO_FIELD_CONTRACT_ID = 'MMIT Contract ID';
-const MMIT_SYNCRO_AUTO_MOVE_TICKET_SUBJECT_PREFIX = 'MMIT Auto Move Ready - ';
-const MMIT_SYNCRO_AUTO_MOVE_TICKET_TYPE = 'MMIT_AUTO_MOVE_READY';
+if (!defined('MMIT_SYNCRO_AUTO_MOVE_TICKET_SUBJECT_PREFIX')) {
+    define('MMIT_SYNCRO_AUTO_MOVE_TICKET_SUBJECT_PREFIX', 'MMIT Auto Move Ready - ');
+}
+if (!defined('MMIT_SYNCRO_AUTO_MOVE_TICKET_TYPE')) {
+    define('MMIT_SYNCRO_AUTO_MOVE_TICKET_TYPE', 'MMIT_AUTO_MOVE_READY');
+}
 
 function syncro_onboarding_api_request(string $method, string $path, array $query = [], ?array $payload = null): array
 {
@@ -314,12 +318,11 @@ function syncro_onboarding_move_ready_asset(int $customerId, int $assetId, ?int 
     $assetName = syncro_production_move_asset_name($asset);
     $ticket = $ticketId && $ticketId > 0 ? ['id' => $ticketId] : syncro_onboarding_find_open_move_ticket($customerId, $assetId, $assetName);
     if (!$ticket || (int)($ticket['id'] ?? $ticket['number'] ?? 0) <= 0) {
-        $message = 'Mover refused asset without an open MMIT Auto Move Ready ticket.';
-        syncro_onboarding_alert_keith('MMIT auto move manual review', $message, ['asset_id' => $assetId]);
-        return ['ok' => false, 'message' => $message, 'errors' => [$message]];
+        $ticketId = null;
+    } else {
+        $ticketId = (int)($ticket['id'] ?? $ticket['number']);
     }
-    $ticketId = (int)($ticket['id'] ?? $ticket['number']);
-    $result = syncro_production_move_asset($customerId, $assetId, $ticketId, false, true, $asset);
+    $result = syncro_production_move_asset($customerId, $assetId, $ticketId, false, false, $asset);
     if (!empty($result['ok'])) {
         syncro_onboarding_alert_keith('MMIT asset moved to Production', 'Asset moved to Production.', ['asset_id' => $assetId, 'ticket_id' => $ticketId, 'asset_name' => $assetName]);
         return $result;

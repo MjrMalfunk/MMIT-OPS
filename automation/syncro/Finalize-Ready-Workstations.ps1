@@ -12,7 +12,7 @@
 # - Server lane folder IDs are included for parity with onboarding/mover design,
 #   but server moves remain disabled/dry-run-only until a separate task enables
 #   them.
-# - Ticket close/comment handling intentionally remains out of scope.
+# - Successful verified moves add a ticket note, but never resolve or close the onboarding/auto-move ticket.
 
 [CmdletBinding()]
 param(
@@ -264,6 +264,179 @@ function Invoke-SyncroAssetPut {
     return Invoke-RestMethod -Method Put -Uri $Uri -Headers $Headers -Body $Body
 }
 
+
+function Get-AssetCustomerId {
+    param([object]$Asset)
+
+    $Value = Get-ObjectPropertyValue -Object $Asset -Names @("customer_id", "syncro_customer_id", "customerId")
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
+        return $null
+    }
+
+    return [int]$Value
+}
+
+function Invoke-SyncroPost {
+    param(
+        [string]$Path,
+        [hashtable]$Payload
+    )
+
+    $Uri = "$BaseUrl/$Path"
+    $Body = $Payload | ConvertTo-Json -Depth 8
+    return Invoke-RestMethod -Method Post -Uri $Uri -Headers $Headers -Body $Body
+}
+
+function Get-TicketsFromResponse {
+    param([object]$Response)
+
+    foreach ($Name in @("tickets", "records", "items", "results", "data")) {
+        $Tickets = Get-ObjectPropertyValue -Object $Response -Names @($Name)
+        if ($null -eq $Tickets -or $Tickets -is [string]) {
+            continue
+        }
+
+        if ($Tickets -is [System.Collections.IDictionary]) {
+            if ($Tickets.Contains("id") -or $Tickets.Contains("number")) {
+                return @($Tickets)
+            }
+            return Get-TicketsFromResponse -Response $Tickets
+        }
+
+        if ($Tickets -is [System.Array]) {
+            return @($Tickets | Where-Object { $null -ne $_ })
+        }
+
+        if ($Tickets -is [System.Collections.IEnumerable]) {
+            return @($Tickets | Where-Object { $null -ne $_ })
+        }
+    }
+
+    if (Get-ObjectPropertyValue -Object $Response -Names @("id", "number")) {
+        return @($Response)
+    }
+
+    return @()
+}
+
+function Test-OpenAutoMoveTicket {
+    param(
+        [object]$Ticket,
+        [int]$AssetId,
+        [string]$AssetName
+    )
+
+    $Status = ([string](Get-ObjectPropertyValue -Object $Ticket -Names @("status"))).Trim().ToLowerInvariant()
+    if (@("new", "open", "in progress", "pending", "waiting") -notcontains $Status) {
+        return $false
+    }
+
+    $Subject = ([string](Get-ObjectPropertyValue -Object $Ticket -Names @("subject", "title"))).Trim()
+    $Body = [string](Get-ObjectPropertyValue -Object $Ticket -Names @("body", "description", "notes"))
+    $TicketJson = ($Ticket | ConvertTo-Json -Depth 8 -Compress).ToLowerInvariant()
+
+    if (-not $Subject.StartsWith("MMIT Auto Move Ready - ", [System.StringComparison]::OrdinalIgnoreCase) -and -not $TicketJson.Contains("mmit_auto_move_ready")) {
+        return $false
+    }
+
+    if ($Body.Contains("Syncro asset id: $AssetId") -or $TicketJson.Contains('"asset_id":' + $AssetId) -or $TicketJson.Contains('"syncro_asset_id":' + $AssetId)) {
+        return $true
+    }
+
+    return ($Subject -eq "MMIT Auto Move Ready - $AssetName")
+}
+
+function Find-OpenAutoMoveTicket {
+    param(
+        [object]$Asset,
+        [int]$AssetId,
+        [string]$AssetName
+    )
+
+    $CustomerId = Get-AssetCustomerId -Asset $Asset
+    $QueryParts = @("asset_id=$AssetId", "status=open")
+    if ($null -ne $CustomerId) {
+        $QueryParts = @("customer_id=$CustomerId") + $QueryParts
+    }
+
+    try {
+        $Response = Invoke-SyncroGet -Path ("tickets?" + ($QueryParts -join "&"))
+        foreach ($Ticket in (Get-TicketsFromResponse -Response $Response)) {
+            if (Test-OpenAutoMoveTicket -Ticket $Ticket -AssetId $AssetId -AssetName $AssetName) {
+                return $Ticket
+            }
+        }
+    }
+    catch {
+        Write-Log "TICKET NOTE WARNING: unable to search related onboarding/auto-move ticket asset='$AssetName' id=$AssetId error=$($_.Exception.Message)"
+        return $null
+    }
+
+    return $null
+}
+
+function Get-TicketId {
+    param([object]$Ticket)
+
+    $Value = Get-ObjectPropertyValue -Object $Ticket -Names @("id", "number", "ticket_id", "ticket_number")
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
+        return $null
+    }
+
+    return [int]$Value
+}
+
+function New-MoveCompletionNote {
+    param(
+        [string]$AssetName,
+        [int]$AssetId,
+        [int]$SourcePolicyFolderId,
+        [int]$TargetPolicyFolderId,
+        [string]$VerificationResult,
+        [datetime]$CompletedAtUtc
+    )
+
+    return @(
+        "MMIT Auto Move Result",
+        "Asset name: $AssetName",
+        "Asset ID: $AssetId",
+        "Source policy_folder_id: $SourcePolicyFolderId",
+        "Target policy_folder_id: $TargetPolicyFolderId",
+        "Verification result: $VerificationResult",
+        "UTC completion timestamp: $($CompletedAtUtc.ToString('o'))",
+        "Manual technician verification is still required. Leave this onboarding/auto-move ticket open for technician review and manual closure."
+    ) -join "`n"
+}
+
+function Add-MoveCompletionTicketNote {
+    param(
+        [object]$Asset,
+        [int]$AssetId,
+        [string]$AssetName,
+        [int]$SourcePolicyFolderId,
+        [int]$TargetPolicyFolderId,
+        [string]$VerificationResult,
+        [datetime]$CompletedAtUtc
+    )
+
+    $Ticket = Find-OpenAutoMoveTicket -Asset $Asset -AssetId $AssetId -AssetName $AssetName
+    $TicketId = Get-TicketId -Ticket $Ticket
+    if ($null -eq $TicketId) {
+        Write-Log "TICKET NOTE WARNING: related onboarding/auto-move ticket not found asset='$AssetName' id=$AssetId; move remains successful"
+        return
+    }
+
+    $Note = New-MoveCompletionNote -AssetName $AssetName -AssetId $AssetId -SourcePolicyFolderId $SourcePolicyFolderId -TargetPolicyFolderId $TargetPolicyFolderId -VerificationResult $VerificationResult -CompletedAtUtc $CompletedAtUtc
+    Invoke-SyncroPost -Path "tickets/$TicketId/comments" -Payload @{
+        comment = @{
+            body = $Note
+            hidden = $false
+            do_not_email = $true
+        }
+    } | Out-Null
+    Write-Log "TICKET NOTE: added MMIT Auto Move Result completion note ticket_id=$TicketId asset='$AssetName' id=$AssetId; ticket left open for manual technician verification"
+}
+
 function Move-SyncroAsset {
     param(
         [int]$AssetId,
@@ -467,6 +640,7 @@ try {
 
         if ($DryRun) {
             Write-Log "DRY RUN MOVE: would move workstation asset='$AssetName' id=$AssetId from policy_folder_id=$DeployWorkstationsFolderId to policy_folder_id=$ProductionWorkstationsFolderId"
+            Write-Log "DRY RUN TICKET NOTE: would add MMIT Auto Move Result completion note to related onboarding/auto-move ticket asset='$AssetName' id=$AssetId; no ticket note written"
             continue
         }
 
@@ -492,6 +666,14 @@ try {
             }
             catch {
                 Write-Log "WRITE-BACK WARNING: move verified, but Syncro field write-back failed asset='$AssetName' id=$AssetId error=$($_.Exception.Message)"
+            }
+
+            try {
+                $VerificationResult = "PASS - post-move verification confirmed policy_folder_id=$NewFolderId"
+                Add-MoveCompletionTicketNote -Asset $Asset -AssetId $AssetId -AssetName $AssetName -SourcePolicyFolderId $DeployWorkstationsFolderId -TargetPolicyFolderId $ProductionWorkstationsFolderId -VerificationResult $VerificationResult -CompletedAtUtc $MoveCompletedAtUtc
+            }
+            catch {
+                Write-Log "TICKET NOTE WARNING: move verified, but completion note failed asset='$AssetName' id=$AssetId error=$($_.Exception.Message)"
             }
         }
         else {
