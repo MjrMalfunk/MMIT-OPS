@@ -12,7 +12,7 @@ $findResult = null;
 $error = null;
 $customerId = (int)($_POST['customer_id'] ?? $_GET['customer_id'] ?? 35912652);
 $assetId = (int)($_POST['asset_id'] ?? $_GET['asset_id'] ?? 12561086);
-$ticketIdRaw = trim((string)($_POST['ticket_id'] ?? $_GET['ticket_id'] ?? '4211'));
+$ticketIdRaw = trim((string)($_POST['ticket_id'] ?? $_GET['ticket_id'] ?? ''));
 $ticketId = $ticketIdRaw !== '' ? (int)ltrim($ticketIdRaw, '#') : null;
 $dryRun = (string)($_POST['dry_run'] ?? $_GET['dry_run'] ?? '1') === '1';
 
@@ -81,7 +81,7 @@ page_header('Syncro Production Mover', 'admin');
       <input type="hidden" name="action" value="move_asset">
       <label style="display:grid;gap:6px;"><span style="font-size:13px;opacity:.78;">Customer ID</span><input type="number" name="customer_id" value="<?= htmlspecialchars((string)$customerId) ?>" min="1" required style="padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.18);color:#fff;"></label>
       <label style="display:grid;gap:6px;"><span style="font-size:13px;opacity:.78;">Asset ID</span><input type="number" name="asset_id" value="<?= htmlspecialchars((string)$assetId) ?>" min="1" required style="padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.18);color:#fff;"></label>
-      <label style="display:grid;gap:6px;"><span style="font-size:13px;opacity:.78;">Ready ticket ID (optional)</span><input type="text" name="ticket_id" value="<?= htmlspecialchars($ticketIdRaw) ?>" placeholder="#4211" style="padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.18);color:#fff;"></label>
+      <label style="display:grid;gap:6px;"><span style="font-size:13px;opacity:.78;">Ready ticket ID override (optional)</span><input type="text" name="ticket_id" value="<?= htmlspecialchars($ticketIdRaw) ?>" placeholder="Uses asset field first; optional override" style="padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.18);color:#fff;"></label>
       <input type="hidden" name="dry_run" value="0">
       <label style="display:flex;gap:8px;align-items:center;"><input type="checkbox" name="dry_run" value="1" <?= $dryRun ? 'checked' : '' ?>> <span>Dry run / preview only</span></label>
       <div style="font-size:12px;opacity:.72;line-height:1.55;">Successful moves add a completion note to the related onboarding/auto-move ticket, but the ticket remains open for manual technician verification and closure.</div>

@@ -13,6 +13,8 @@ const MMIT_SYNCRO_FIELD_ONBOARDING_STATUS = 'MMIT Onboarding Status';
 const MMIT_SYNCRO_FIELD_READY_TO_MOVE = 'MMIT Ready To Move';
 const MMIT_SYNCRO_FIELD_PRODUCTION_TARGET = 'MMIT Production Folder Target';
 const MMIT_SYNCRO_FIELD_AUTO_MOVE_RESULT = 'MMIT Auto Move Result';
+const MMIT_SYNCRO_FIELD_READY_MOVE_TICKET_ID = 'MMIT Ready Move Ticket ID';
+const MMIT_SYNCRO_FIELD_AUTO_MOVE_TICKET_ID = 'MMIT Auto Move Ticket ID';
 const MMIT_SYNCRO_FIELD_COMPLETED_AT = 'MMIT Onboarding Completed At';
 
 if (!defined('MMIT_SYNCRO_AUTO_MOVE_TICKET_SUBJECT_PREFIX')) {
@@ -408,6 +410,8 @@ function syncro_production_move_mmit_field_names(): array
         MMIT_SYNCRO_FIELD_ONBOARDING_STATUS,
         MMIT_SYNCRO_FIELD_READY_TO_MOVE,
         MMIT_SYNCRO_FIELD_PRODUCTION_TARGET,
+        MMIT_SYNCRO_FIELD_READY_MOVE_TICKET_ID,
+        MMIT_SYNCRO_FIELD_AUTO_MOVE_TICKET_ID,
     ];
 }
 
@@ -1030,6 +1034,30 @@ function syncro_production_move_ticket_is_open_auto_move(array $ticket, int $ass
     return $assetName !== '' && $subject === MMIT_SYNCRO_AUTO_MOVE_TICKET_SUBJECT_PREFIX . $assetName;
 }
 
+function syncro_production_move_ticket_id_from_value(mixed $value): ?int
+{
+    $text = syncro_production_move_normalize_text($value);
+    if ($text === '') {
+        return null;
+    }
+    if (preg_match('/#?(\d+)/', $text, $matches) !== 1) {
+        return null;
+    }
+    $ticketId = (int)$matches[1];
+    return $ticketId > 0 ? $ticketId : null;
+}
+
+function syncro_production_move_stored_ready_ticket_id(array $asset): ?int
+{
+    foreach ([MMIT_SYNCRO_FIELD_READY_MOVE_TICKET_ID, MMIT_SYNCRO_FIELD_AUTO_MOVE_TICKET_ID] as $fieldName) {
+        $ticketId = syncro_production_move_ticket_id_from_value(syncro_production_move_custom_field($asset, $fieldName));
+        if ($ticketId !== null) {
+            return $ticketId;
+        }
+    }
+    return null;
+}
+
 function syncro_production_move_find_open_move_ticket(int $customerId, int $assetId, string $assetName): ?array
 {
     if ($customerId <= 0 || $assetId <= 0) {
@@ -1078,21 +1106,25 @@ function syncro_production_move_add_completion_note(?int $ticketId, string $body
 }
 
 
-function syncro_production_move_resolve_ready_ticket_id(int $customerId, int $assetId, string $assetName, ?int $readyTicketId): array
+function syncro_production_move_resolve_ready_ticket_id(int $customerId, int $assetId, string $assetName, ?int $readyTicketId, array $asset = []): array
 {
+    $storedTicketId = $asset ? syncro_production_move_stored_ready_ticket_id($asset) : null;
+    if ($storedTicketId !== null && $storedTicketId > 0) {
+        return ['ticket_id' => $storedTicketId, 'source' => 'asset_custom_field', 'warnings' => []];
+    }
     if ($readyTicketId !== null && $readyTicketId > 0) {
-        return ['ticket_id' => $readyTicketId, 'warnings' => []];
+        return ['ticket_id' => $readyTicketId, 'source' => 'explicit_parameter', 'warnings' => []];
     }
     $ticket = syncro_production_move_find_open_move_ticket($customerId, $assetId, $assetName);
     if ($ticket && (int)($ticket['id'] ?? $ticket['number'] ?? 0) > 0) {
-        return ['ticket_id' => (int)($ticket['id'] ?? $ticket['number']), 'ticket' => $ticket, 'warnings' => []];
+        return ['ticket_id' => (int)($ticket['id'] ?? $ticket['number']), 'ticket' => $ticket, 'source' => 'ticket_search', 'warnings' => []];
     }
     return ['ticket_id' => null, 'warnings' => ['Related onboarding/auto-move ticket was not found; move will remain successful and no completion note was added.']];
 }
 
-function syncro_production_move_record_completion_note(int $customerId, int $assetId, string $assetName, ?int $readyTicketId, ?int $sourceFolderId, int $targetFolderId, string $verificationResult, string $completedAtUtc): array
+function syncro_production_move_record_completion_note(int $customerId, int $assetId, string $assetName, ?int $readyTicketId, ?int $sourceFolderId, int $targetFolderId, string $verificationResult, string $completedAtUtc, array $asset = []): array
 {
-    $ticketResolution = syncro_production_move_resolve_ready_ticket_id($customerId, $assetId, $assetName, $readyTicketId);
+    $ticketResolution = syncro_production_move_resolve_ready_ticket_id($customerId, $assetId, $assetName, $readyTicketId, $asset);
     $resolvedTicketId = $ticketResolution['ticket_id'] ?? null;
     $noteBody = syncro_production_move_completion_note_body($assetId, $assetName, $sourceFolderId, $targetFolderId, $verificationResult, $completedAtUtc);
     $ticketNote = syncro_production_move_add_completion_note(is_int($resolvedTicketId) ? $resolvedTicketId : null, $noteBody);
@@ -1103,7 +1135,7 @@ function syncro_production_move_record_completion_note(int $customerId, int $ass
     if (empty($ticketNote['ok'])) {
         $warnings[] = implode(' ', (array)($ticketNote['errors'] ?? ['Move succeeded and verified, but ticket completion note failed.']));
     }
-    return ['ticket_id' => $resolvedTicketId, 'ticket_note' => $ticketNote, 'ticket_note_body' => $noteBody, 'warnings' => $warnings];
+    return ['ticket_id' => $resolvedTicketId, 'ticket_id_source' => $ticketResolution['source'] ?? null, 'ticket_note' => $ticketNote, 'ticket_note_body' => $noteBody, 'warnings' => $warnings];
 }
 
 function syncro_production_move_asset_update_payload(int $targetFolderId): array
@@ -1126,6 +1158,15 @@ function syncro_production_move_update_asset_policy_folder(int $assetId, int $ta
 function syncro_production_move_verified_folder_id(array $asset): ?int
 {
     return syncro_production_move_asset_folder_id($asset);
+}
+
+function syncro_production_move_dry_run_ticket_note_preview(array $asset, ?int $readyTicketId): string
+{
+    $ticketId = syncro_production_move_stored_ready_ticket_id($asset) ?? $readyTicketId;
+    if ($ticketId !== null && $ticketId > 0) {
+        return 'DRY RUN TICKET NOTE: would add completion note to ticket_id=' . $ticketId;
+    }
+    return 'DRY RUN TICKET NOTE: would add completion note to stored onboarding/auto-move ticket if available after successful verification; ticket search remains fallback for live moves.';
 }
 
 function syncro_production_move_asset(int $customerId, int $assetId, ?int $readyTicketId = null, bool $dryRun = true, bool $closeTicket = false, ?array $assetOverride = null): array
@@ -1158,14 +1199,14 @@ function syncro_production_move_asset(int $customerId, int $assetId, ?int $ready
         if (!$dryRun) {
             $completedAtUtc = syncro_production_move_now_utc();
             $write = syncro_production_move_write_result($assetId, $message, true, $completedAtUtc);
-            $note = syncro_production_move_record_completion_note($customerId, $assetId, $assetName, $readyTicketId, $preCurrentFolderId, $preTargetFolderId, 'PASS - asset was already in target policy_folder_id #' . $preTargetFolderId . '.', $completedAtUtc);
+            $note = syncro_production_move_record_completion_note($customerId, $assetId, $assetName, $readyTicketId, $preCurrentFolderId, $preTargetFolderId, 'PASS - asset was already in target policy_folder_id #' . $preTargetFolderId . '.', $completedAtUtc, $asset);
             $warnings = (array)($note['warnings'] ?? []);
             if (empty($write['ok'])) {
                 $warnings[] = syncro_production_move_response_errors($write, 'Already-in-target result write-back failed.');
             }
-            return ['ok' => true, 'dry_run' => false, 'noop' => true, 'message' => $message, 'validation' => $preValidation, 'write' => $write, 'ticket' => $note['ticket_note'] ?? [], 'ticket_id' => $note['ticket_id'] ?? null, 'warnings' => $warnings];
+            return ['ok' => true, 'dry_run' => false, 'noop' => true, 'message' => $message, 'validation' => $preValidation, 'write' => $write, 'ticket' => $note['ticket_note'] ?? [], 'ticket_id' => $note['ticket_id'] ?? null, 'ticket_id_source' => $note['ticket_id_source'] ?? null, 'warnings' => $warnings];
         }
-        return ['ok' => true, 'dry_run' => true, 'noop' => true, 'message' => $message, 'validation' => $preValidation, 'ticket_note_preview' => 'Dry run: completion note would be added to the related onboarding/auto-move ticket after successful verification.'];
+        return ['ok' => true, 'dry_run' => true, 'noop' => true, 'message' => $message, 'validation' => $preValidation, 'ticket_note_preview' => syncro_production_move_dry_run_ticket_note_preview($asset, $readyTicketId)];
     }
     $validation = syncro_production_move_validate_asset($asset);
     if (empty($validation['ok'])) {
@@ -1183,14 +1224,14 @@ function syncro_production_move_asset(int $customerId, int $assetId, ?int $ready
         if (!$dryRun) {
             $completedAtUtc = syncro_production_move_now_utc();
             $write = syncro_production_move_write_result($assetId, $message, true, $completedAtUtc);
-            $note = syncro_production_move_record_completion_note($customerId, $assetId, $assetName, $readyTicketId, $currentFolderId, $targetFolderId, 'PASS - asset was already in target policy_folder_id #' . $targetFolderId . '.', $completedAtUtc);
+            $note = syncro_production_move_record_completion_note($customerId, $assetId, $assetName, $readyTicketId, $currentFolderId, $targetFolderId, 'PASS - asset was already in target policy_folder_id #' . $targetFolderId . '.', $completedAtUtc, $asset);
             $warnings = (array)($note['warnings'] ?? []);
             if (empty($write['ok'])) {
                 $warnings[] = syncro_production_move_response_errors($write, 'Already-in-target result write-back failed.');
             }
-            return ['ok' => true, 'dry_run' => false, 'noop' => true, 'message' => $message, 'validation' => $validation, 'write' => $write, 'ticket' => $note['ticket_note'] ?? [], 'ticket_id' => $note['ticket_id'] ?? null, 'warnings' => $warnings];
+            return ['ok' => true, 'dry_run' => false, 'noop' => true, 'message' => $message, 'validation' => $validation, 'write' => $write, 'ticket' => $note['ticket_note'] ?? [], 'ticket_id' => $note['ticket_id'] ?? null, 'ticket_id_source' => $note['ticket_id_source'] ?? null, 'warnings' => $warnings];
         }
-        return ['ok' => true, 'dry_run' => true, 'noop' => true, 'message' => $message, 'validation' => $validation, 'ticket_note_preview' => 'Dry run: completion note would be added to the related onboarding/auto-move ticket after successful verification.'];
+        return ['ok' => true, 'dry_run' => true, 'noop' => true, 'message' => $message, 'validation' => $validation, 'ticket_note_preview' => syncro_production_move_dry_run_ticket_note_preview($asset, $readyTicketId)];
     }
 
     $payload = syncro_production_move_policy_assignment_payload($assetId, $targetFolderId);
@@ -1213,7 +1254,7 @@ function syncro_production_move_asset(int $customerId, int $assetId, ?int $ready
             'asset_update_payload' => $assetUpdatePayload,
             'browser_payload_reference' => $browserPayloadReference,
             'asset' => $asset,
-            'ticket_note_preview' => 'Dry run: completion note would be added to the related onboarding/auto-move ticket after successful verification.',
+            'ticket_note_preview' => syncro_production_move_dry_run_ticket_note_preview($asset, $readyTicketId),
         ];
     }
 
@@ -1301,7 +1342,7 @@ function syncro_production_move_asset(int $customerId, int $assetId, ?int $ready
     $success = 'moved to Production at ' . $completedAtUtc . ' target ' . $targetLabel . '. Manual technician verification is still required.';
     $write = syncro_production_move_write_result($assetId, $success, true, $completedAtUtc);
     $verificationResult = 'PASS - post-move verification confirmed policy_folder_id #' . $verifiedFolderId . '.';
-    $note = syncro_production_move_record_completion_note($customerId, $assetId, $assetName, $readyTicketId, is_int($currentFolderId) ? $currentFolderId : null, $targetFolderId, $verificationResult, $completedAtUtc);
+    $note = syncro_production_move_record_completion_note($customerId, $assetId, $assetName, $readyTicketId, is_int($currentFolderId) ? $currentFolderId : null, $targetFolderId, $verificationResult, $completedAtUtc, $verifiedAsset);
     $warnings = (array)($note['warnings'] ?? []);
     if (empty($write['ok'])) {
         $warnings[] = syncro_production_move_response_errors($write, 'Move succeeded and verified, but result write-back failed.');
@@ -1321,6 +1362,7 @@ function syncro_production_move_asset(int $customerId, int $assetId, ?int $ready
         'write' => $write,
         'ticket' => $note['ticket_note'] ?? [],
         'ticket_id' => $note['ticket_id'] ?? null,
+        'ticket_id_source' => $note['ticket_id_source'] ?? null,
         'ticket_note_body' => $note['ticket_note_body'] ?? '',
         'warnings' => $warnings,
     ];

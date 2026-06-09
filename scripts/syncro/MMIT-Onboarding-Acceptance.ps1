@@ -25,7 +25,8 @@ $script:MMITRequiredCustomFields = @(
     'MMIT Onboarding Status',
     'MMIT Ready To Move',
     'MMIT Onboarding Result',
-    'MMIT Auto Move Result'
+    'MMIT Auto Move Result',
+    'MMIT Ready Move Ticket ID'
 )
 
 function ConvertTo-MMITText {
@@ -636,6 +637,21 @@ function Add-MMITReadyMoveTicketComment {
         -TicketIdOrNumber $TicketIdOrNumber | Out-Null
 }
 
+function Set-MMITReadyMoveTicketAssetField {
+    param(
+        [AllowEmptyString()][string]$TicketId,
+        [Parameter(Mandatory = $true)][string]$Subdomain
+    )
+
+    if ((ConvertTo-MMITText $TicketId) -eq '') {
+        Write-Output 'Ready/move ticket ID was blank; MMIT Ready Move Ticket ID field was not updated.'
+        return
+    }
+
+    Update-MMITSyncroAssetCustomFields -CustomFields @{ 'MMIT Ready Move Ticket ID' = $TicketId } -Subdomain $Subdomain | Out-Null
+    Write-Output ('Syncro field updated: MMIT Ready Move Ticket ID = {0}' -f $TicketId)
+}
+
 function New-MMITReadyMoveTicket {
     param(
         [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Decision,
@@ -724,6 +740,7 @@ function Write-MMITOnboardingAcceptanceResult {
         return
     }
 
+    Set-MMITReadyMoveTicketAssetField -TicketId $ticketId -Subdomain $Subdomain
     Set-MMITReadyTicketMarker -Path $MarkerPath -TicketId $ticketId
     Write-Output ('Ready/move ticket created once. Ticket ID: {0}. Marker: {1}' -f $ticketId, $MarkerPath)
 }
