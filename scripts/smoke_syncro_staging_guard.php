@@ -79,6 +79,11 @@ class SmokeStmt {
         $GLOBALS['smoke_db_execs'][] = ['sql' => $this->sql, 'params' => $params];
         if (stripos($this->sql, 'UPDATE clients SET') !== false) {
             $GLOBALS['smoke_client_marked'][] = $params;
+            if (isset($GLOBALS['smoke_client']) && is_array($GLOBALS['smoke_client'])) {
+                $GLOBALS['smoke_client']['syncro_customer_id'] = $params[0] ?? null;
+                $GLOBALS['smoke_client']['syncro_sync_status'] = $params[1] ?? null;
+                $GLOBALS['smoke_client']['syncro_last_error'] = $params[2] ?? null;
+            }
         }
         if (stripos($this->sql, 'INSERT INTO client_syncro_folder_map') !== false) {
             $GLOBALS['smoke_folder_map_writes'][] = $params;
@@ -214,6 +219,82 @@ if (($delete['status'] ?? null) !== 'STAGING_BLOCKED' || empty($delete['staging_
 if ($failed) { fwrite(STDERR, implode(', ', $failed)); exit(1); }
 PHP_CODE;
 
+
+$staleLinkCode = $syncroSourceLoader . <<<'PHP_CODE'
+define('APP_ENV', 'staging');
+define('BASE_URL', 'https://ops-test.midwestmanagedit.com');
+define('SYNCRO_SUBDOMAIN', 'example');
+define('SYNCRO_API_KEY', 'smoke-test-key-not-secret');
+define('SYNCRO_BASE_URL', 'https://127.0.0.1/never-called/');
+define('SYNCRO_ALLOW_STAGING_WRITES', true);
+define('SYNCRO_POLICY_ASSIGNMENTS', [
+    'manage.standard.root' => 'MMIT-Test-1100',
+    'manage.deploy.workstations' => 'MMIT-Test-1101',
+    'manage.deploy.servers' => 'MMIT-Test-1102',
+    'manage.production.workstations' => 'MMIT-Test-1103',
+    'manage.production.servers' => 'MMIT-Test-1104',
+]);
+$GLOBALS['smoke_contacts'] = [['first_name' => 'Ops', 'last_name' => 'Smoke', 'email' => 'ops@example.test', 'phone' => '555-0100']];
+$GLOBALS['smoke_locations'] = [['address1' => '1 Test Way', 'address2' => '', 'city' => 'St Louis', 'state' => 'MO', 'postal_code' => '63101', 'country' => 'US']];
+$GLOBALS['smoke_folder_map'] = [
+    'client_id' => 77,
+    'syncro_customer_id' => 12345,
+    'deploy_workstations_folder_id' => 5029833,
+    'deploy_servers_folder_id' => 5029834,
+    'production_workstations_folder_id' => 5029835,
+    'production_servers_folder_id' => 5029836,
+    'provision_status' => 'READY',
+];
+$GLOBALS['smoke_api_calls'] = [];
+$GLOBALS['syncro_api_request_mock'] = static function (string $method, string $path, array $query, ?array $payload): array {
+    $GLOBALS['smoke_api_calls'][] = ['method' => $method, 'path' => $path, 'query' => $query, 'payload' => $payload];
+    if ($method === 'GET' && $path === 'customers/12345') {
+        return ['ok' => true, 'status' => 200, 'data' => ['customer' => ['id' => 12345]]];
+    }
+    if ($method === 'PUT' && $path === 'customers/12345') {
+        return ['ok' => true, 'status' => 200, 'data' => ['customer' => ['id' => 12345]]];
+    }
+    if ($method === 'GET' && $path === 'customers/99999') {
+        return ['ok' => false, 'status' => 404, 'errors' => ['Customer not found']];
+    }
+    if ($method === 'GET' && $path === 'customers') {
+        return ['ok' => true, 'status' => 200, 'data' => ['customers' => []]];
+    }
+    if ($method === 'POST' && $path === 'customers') {
+        return ['ok' => true, 'status' => 201, 'data' => ['customer' => ['id' => 77777]]];
+    }
+    if ($method === 'PUT' && str_starts_with($path, 'policy_folders/')) {
+        return ['ok' => true, 'status' => 200, 'data' => ['policy_folder' => ['id' => (int)substr($path, 15)]]];
+    }
+    return ['ok' => false, 'status' => 599, 'errors' => ['Unexpected ' . $method . ' ' . $path]];
+};
+smoke_load_syncro_with_stubs();
+$failed = [];
+$GLOBALS['smoke_client'] = ['client_id' => 77, 'legal_name' => 'Smoke Co LLC', 'dba_name' => '', 'email' => 'ops@example.test', 'phone' => '555-0100', 'syncro_customer_id' => 12345, 'syncro_policy_tier' => 'manage'];
+$result = syncro_sync_client(77);
+if (empty($result['ok']) || ($result['action'] ?? null) !== 'updated' || ($GLOBALS['smoke_client']['syncro_sync_status'] ?? null) !== 'SYNCED') { $failed[] = 'valid existing customer did not update successfully'; }
+$methods = array_map(static fn(array $call): string => $call['method'] . ' ' . $call['path'], $GLOBALS['smoke_api_calls']);
+if (!in_array('GET customers/12345', $methods, true) || !in_array('PUT customers/12345', $methods, true)) { $failed[] = 'existing customer was not validated before update'; }
+$GLOBALS['smoke_api_calls'] = [];
+$GLOBALS['smoke_client_marked'] = [];
+$GLOBALS['smoke_client'] = ['client_id' => 77, 'legal_name' => 'Smoke Co LLC', 'dba_name' => '', 'email' => 'ops@example.test', 'phone' => '555-0100', 'syncro_customer_id' => 99999, 'syncro_policy_tier' => 'manage'];
+$stale = syncro_sync_client(77);
+if (!empty($stale['ok']) || empty($stale['stale_link']) || ($stale['status'] ?? null) !== 'STALE_LINK') { $failed[] = 'stale Syncro customer ID was not reported'; }
+if (($GLOBALS['smoke_client']['syncro_customer_id'] ?? null) !== 99999 || ($GLOBALS['smoke_client']['syncro_sync_status'] ?? null) !== 'STALE_LINK') { $failed[] = 'stale marker did not preserve old ID/status'; }
+if (!str_contains((string)($GLOBALS['smoke_client']['syncro_last_error'] ?? ''), 'Stored Syncro customer ID no longer exists')) { $failed[] = 'stale marker message not clear'; }
+$staleMethods = array_map(static fn(array $call): string => $call['method'] . ' ' . $call['path'], $GLOBALS['smoke_api_calls']);
+if (in_array('POST customers', $staleMethods, true)) { $failed[] = 'stale detection silently created a customer'; }
+$GLOBALS['smoke_api_calls'] = [];
+$GLOBALS['smoke_client']['syncro_sync_status'] = 'STALE_LINK';
+$repair = syncro_repair_stale_customer_link(77);
+if (empty($repair['ok']) || ($repair['action'] ?? null) !== 'created' || (int)($repair['cleared_syncro_customer_id'] ?? 0) !== 99999 || (int)($GLOBALS['smoke_client']['syncro_customer_id'] ?? 0) !== 77777) { $failed[] = 'repair did not clear old ID and recreate'; }
+$repairMethods = array_map(static fn(array $call): string => $call['method'] . ' ' . $call['path'], $GLOBALS['smoke_api_calls']);
+if (!in_array('GET customers', $repairMethods, true) || !in_array('POST customers', $repairMethods, true)) { $failed[] = 'repair did not use recreate path'; }
+$delete = syncro_api_request('DELETE', 'customers/99999');
+if (($delete['status'] ?? null) !== 'STAGING_BLOCKED' || empty($delete['staging_blocked'])) { $failed[] = 'repair test allowed Syncro DELETE'; }
+if ($failed) { fwrite(STDERR, implode(', ', $failed)); exit(1); }
+PHP_CODE;
+
 $productionCode = $syncroSourceLoader . <<<'PHP_CODE'
 define('APP_ENV', 'production');
 define('BASE_URL', 'https://ops.midwestmanagedit.com');
@@ -231,6 +312,7 @@ $checks = [
     'override allows POST/PUT/PATCH and blocks DELETE' => smoke_run_php($overrideCode),
     'customer sync blocks by default in staging' => smoke_run_php($customerDefaultCode),
     'customer sync and provisioning allowed with override' => smoke_run_php($customerOverrideCode),
+    'stale link detection and repair recreate path' => smoke_run_php($staleLinkCode),
     'production writes remain allowed' => smoke_run_php($productionCode),
 ];
 

@@ -42,6 +42,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $_SESSION['flash_error'] = implode(' ', array_map('strval', (array)($result['errors'] ?? ['Unable to retry Syncro sync.'])));
         }
+    } elseif ($action === 'repair_stale_syncro_link') {
+        $result = syncro_repair_stale_customer_link($clientId);
+        if (!empty($result['ok'])) {
+            $_SESSION['flash_msg'] = 'Stale Syncro link cleared. ' . (string)($result['message'] ?? syncro_action_success_message((string)($result['action'] ?? '')));
+        } else {
+            $_SESSION['flash_error'] = implode(' ', array_map('strval', (array)($result['errors'] ?? ['Unable to repair stale Syncro link.'])));
+        }
     } elseif ($action === 'retry_syncro_folder_provisioning') {
         $result = syncro_provision_client_folder_map($clientId, !empty($client['syncro_customer_id']) ? (int)$client['syncro_customer_id'] : null, true);
         if (!empty($result['ok'])) {
@@ -91,6 +98,13 @@ page_header((string)$client['legal_name'], 'clients');
         <input type="hidden" name="action" value="retry_syncro_folder_provisioning">
         <button class="btn btn-secondary" style="width:auto;padding:9px 12px;" type="submit">Retry folder provisioning</button>
       </form>
+      <?php if (strtoupper((string)($client['syncro_sync_status'] ?? '')) === 'STALE_LINK'): ?>
+      <form method="post" style="margin:0;" onsubmit="return confirm('Clear the stored Syncro customer ID in OPS and retry customer creation/update? OPS will not delete anything in Syncro.');">
+        <?= csrf_field() ?>
+        <input type="hidden" name="action" value="repair_stale_syncro_link">
+        <button class="btn btn-danger" style="width:auto;padding:9px 12px;" type="submit">Clear stale link &amp; retry</button>
+      </form>
+      <?php endif; ?>
       <form method="post" style="margin:0;">
         <?= csrf_field() ?>
         <input type="hidden" name="action" value="retry_syncro">
