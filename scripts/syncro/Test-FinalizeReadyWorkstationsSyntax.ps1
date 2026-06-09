@@ -28,7 +28,11 @@ $RequiredText = @(
     '135359',
     'Production/Workstations',
     'MMIT Auto Move Result',
-    'MMIT Onboarding Completed At'
+    'MMIT Onboarding Completed At',
+    'Find-TicketByReference',
+    'Get-TicketInternalId',
+    'internal_id',
+    'ticket_reference'
 )
 
 foreach ($Text in $RequiredText) {

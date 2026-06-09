@@ -392,10 +392,110 @@ function Resolve-TicketIdValue {
     return [int]$Match.Groups[1].Value
 }
 
+function Get-TicketInternalId {
+    param([object]$Ticket)
+
+    return Resolve-TicketIdValue -Value (Get-ObjectPropertyValue -Object $Ticket -Names @("id", "ticket_id", "internal_id"))
+}
+
 function Get-TicketId {
     param([object]$Ticket)
 
-    return Resolve-TicketIdValue -Value (Get-ObjectPropertyValue -Object $Ticket -Names @("id", "number", "ticket_id", "ticket_number"))
+    $InternalId = Get-TicketInternalId -Ticket $Ticket
+    if ($null -ne $InternalId) {
+        return $InternalId
+    }
+
+    return Resolve-TicketIdValue -Value (Get-ObjectPropertyValue -Object $Ticket -Names @("number", "ticket_number", "reference", "ref"))
+}
+
+function Test-TicketReferenceMatch {
+    param(
+        [object]$Ticket,
+        [int]$TicketReference
+    )
+
+    if ($TicketReference -le 0) {
+        return $false
+    }
+
+    foreach ($Name in @("id", "ticket_id", "internal_id", "number", "ticket_number", "reference", "ref")) {
+        $Value = Get-ObjectPropertyValue -Object $Ticket -Names @($Name)
+        if ($null -eq $Value) {
+            continue
+        }
+
+        $Parsed = Resolve-TicketIdValue -Value $Value
+        if ($Parsed -eq $TicketReference) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Test-SyncroNotFoundError {
+    param([object]$ErrorRecord)
+
+    $Response = $ErrorRecord.Exception.Response
+    if ($null -ne $Response) {
+        try {
+            if ([int]$Response.StatusCode -eq 404) {
+                return $true
+            }
+        }
+        catch {
+        }
+    }
+
+    $Message = [string]$ErrorRecord.Exception.Message
+    return ($Message -match "\b404\b" -or $Message -match "Not Found")
+}
+
+function Find-TicketByReference {
+    param(
+        [object]$Asset,
+        [int]$AssetId,
+        [string]$AssetName,
+        [int]$TicketReference
+    )
+
+    if ($TicketReference -le 0) {
+        return $null
+    }
+
+    $CustomerId = Get-AssetCustomerId -Asset $Asset
+    $QueryParts = @("number=$([uri]::EscapeDataString([string]$TicketReference))")
+    if ($null -ne $CustomerId) {
+        $QueryParts = @("customer_id=$CustomerId") + $QueryParts
+    }
+    if ($AssetId -gt 0) {
+        $QueryParts += "asset_id=$AssetId"
+    }
+
+    try {
+        $Response = Invoke-SyncroGet -Path ("tickets?" + ($QueryParts -join "&"))
+        $MatchedByReference = $null
+        foreach ($Ticket in (Get-TicketsFromResponse -Response $Response)) {
+            if (-not (Test-TicketReferenceMatch -Ticket $Ticket -TicketReference $TicketReference)) {
+                continue
+            }
+
+            if (Test-OpenAutoMoveTicket -Ticket $Ticket -AssetId $AssetId -AssetName $AssetName) {
+                return $Ticket
+            }
+
+            if ($null -eq $MatchedByReference) {
+                $MatchedByReference = $Ticket
+            }
+        }
+
+        return $MatchedByReference
+    }
+    catch {
+        Write-Log "TICKET NOTE WARNING: unable to resolve stored ticket reference=$TicketReference asset='$AssetName' id=$AssetId error=$($_.Exception.Message)"
+        return $null
+    }
 }
 
 function Get-StoredReadyMoveTicketId {
@@ -444,9 +544,10 @@ function Add-MoveCompletionTicketNote {
         [datetime]$CompletedAtUtc
     )
 
-    $TicketId = Get-StoredReadyMoveTicketId -Asset $Asset
-    if ($null -ne $TicketId) {
-        Write-Log "TICKET NOTE: using stored ready/move ticket_id=$TicketId asset='$AssetName' id=$AssetId"
+    $StoredTicketReference = Get-StoredReadyMoveTicketId -Asset $Asset
+    $TicketId = $StoredTicketReference
+    if ($null -ne $StoredTicketReference) {
+        Write-Log "TICKET NOTE: using stored ready/move ticket_reference=$StoredTicketReference asset='$AssetName' id=$AssetId"
     }
     else {
         $Ticket = Find-OpenAutoMoveTicket -Asset $Asset -AssetId $AssetId -AssetName $AssetName
@@ -458,14 +559,39 @@ function Add-MoveCompletionTicketNote {
     }
 
     $Note = New-MoveCompletionNote -AssetName $AssetName -AssetId $AssetId -SourcePolicyFolderId $SourcePolicyFolderId -TargetPolicyFolderId $TargetPolicyFolderId -VerificationResult $VerificationResult -CompletedAtUtc $CompletedAtUtc
-    Invoke-SyncroPost -Path "tickets/$TicketId/comments" -Payload @{
+    $CommentPayload = @{
         comment = @{
             body = $Note
             hidden = $false
             do_not_email = $true
         }
-    } | Out-Null
-    Write-Log "TICKET NOTE: added MMIT Auto Move Result completion note ticket_id=$TicketId asset='$AssetName' id=$AssetId; ticket left open for manual technician verification"
+    }
+
+    try {
+        Invoke-SyncroPost -Path "tickets/$TicketId/comments" -Payload $CommentPayload | Out-Null
+        Write-Log "TICKET NOTE: added MMIT Auto Move Result completion note ticket_id=$TicketId asset='$AssetName' id=$AssetId; ticket left open for manual technician verification"
+        return
+    }
+    catch {
+        if ($null -eq $StoredTicketReference -or -not (Test-SyncroNotFoundError -ErrorRecord $_)) {
+            throw
+        }
+
+        Write-Log "TICKET NOTE: stored ready/move ticket reference=$StoredTicketReference returned 404; searching by visible ticket number/reference asset='$AssetName' id=$AssetId"
+        $ResolvedTicket = Find-TicketByReference -Asset $Asset -AssetId $AssetId -AssetName $AssetName -TicketReference $StoredTicketReference
+        $ResolvedTicketId = Get-TicketInternalId -Ticket $ResolvedTicket
+        if ($null -eq $ResolvedTicketId) {
+            Write-Log "TICKET NOTE WARNING: stored ticket reference=$StoredTicketReference could not be resolved to an internal API ticket id asset='$AssetName' id=$AssetId; move remains successful"
+            return
+        }
+
+        if ($ResolvedTicketId -eq $TicketId) {
+            throw
+        }
+
+        Invoke-SyncroPost -Path "tickets/$ResolvedTicketId/comments" -Payload $CommentPayload | Out-Null
+        Write-Log "TICKET NOTE: resolved stored ticket reference=$StoredTicketReference to internal ticket_id=$ResolvedTicketId and added completion note asset='$AssetName' id=$AssetId; ticket left open for manual technician verification"
+    }
 }
 
 function Move-SyncroAsset {
@@ -673,7 +799,7 @@ try {
             Write-Log "DRY RUN MOVE: would move workstation asset='$AssetName' id=$AssetId from policy_folder_id=$DeployWorkstationsFolderId to policy_folder_id=$ProductionWorkstationsFolderId"
             $DryRunTicketId = Get-StoredReadyMoveTicketId -Asset $Asset
             if ($null -ne $DryRunTicketId) {
-                Write-Log "DRY RUN TICKET NOTE: would add completion note to ticket_id=$DryRunTicketId"
+                Write-Log "DRY RUN TICKET NOTE: would add completion note to stored ticket_reference=$DryRunTicketId after resolving to the Syncro internal API ticket id if needed"
             }
             else {
                 Write-Log "DRY RUN TICKET NOTE: would add completion note to stored onboarding/auto-move ticket if available; ticket search remains fallback for live moves asset='$AssetName' id=$AssetId"

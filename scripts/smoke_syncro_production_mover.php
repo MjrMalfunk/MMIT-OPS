@@ -218,6 +218,84 @@ smoke_assert(!$successTicketCloseAttempted, 'successful move does not resolve or
 smoke_assert(!array_filter($successRequests, static fn(array $request): bool => ($request['method'] ?? '') === 'GET' && ($request['path'] ?? '') === 'tickets'), 'successful move skips ticket search when stored ticket id exists', $failed);
 unset($GLOBALS['syncro_production_move_api_request_handler']);
 
+$visibleReferenceRequests = [];
+$visibleReferenceAsset = $readyAsset;
+$visibleReferenceAsset['properties'][MMIT_SYNCRO_FIELD_AUTO_MOVE_TICKET_ID] = '4212';
+$visibleReferenceMovedAsset = $visibleReferenceAsset;
+$GLOBALS['syncro_production_move_api_request_handler'] = static function (string $method, string $path, array $query, ?array $payload) use (&$visibleReferenceRequests, &$visibleReferenceMovedAsset): array {
+    $visibleReferenceRequests[] = compact('method', 'path', 'query', 'payload');
+    if ($method === 'PUT' && $path === 'customer_assets/12561086' && isset($payload['policy_folder_id'])) {
+        $visibleReferenceMovedAsset['policy_folder_id'] = (int)$payload['policy_folder_id'];
+        return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => $visibleReferenceMovedAsset]];
+    }
+    if ($method === 'GET' && $path === 'customer_assets/12561086') {
+        return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => $visibleReferenceMovedAsset]];
+    }
+    if ($method === 'PUT' && $path === 'customer_assets/12561086' && isset($payload['properties'])) {
+        return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => $visibleReferenceMovedAsset]];
+    }
+    if ($method === 'POST' && $path === 'tickets/4212/comments') {
+        return ['ok' => false, 'status' => 404, 'errors' => ['Not Found']];
+    }
+    if ($method === 'GET' && $path === 'tickets' && (int)($query['number'] ?? 0) === 4212) {
+        return ['ok' => true, 'status' => 200, 'data' => ['tickets' => [[
+            'id' => 987654,
+            'number' => 4212,
+            'status' => 'New',
+            'subject' => MMIT_SYNCRO_AUTO_MOVE_TICKET_SUBJECT_PREFIX . 'MANAGE-WS-02',
+            'body' => 'Syncro asset id: 12561086',
+        ]]]];
+    }
+    if ($method === 'POST' && $path === 'tickets/987654/comments') {
+        return ['ok' => true, 'status' => 201, 'data' => ['comment' => ['id' => 89]]];
+    }
+    return ['ok' => false, 'status' => 500, 'errors' => ['unexpected visible-reference request ' . $method . ' ' . $path]];
+};
+$visibleReferenceMove = syncro_production_move_asset(35912652, 12561086, null, false, false, $visibleReferenceAsset);
+smoke_assert(($visibleReferenceMove['ok'] ?? null) === true, 'stored visible ticket number move succeeds', $failed);
+smoke_assert(($visibleReferenceMove['ticket_id'] ?? null) === 987654, 'stored visible ticket number resolves to internal API ticket id', $failed);
+smoke_assert(($visibleReferenceMove['ticket_id_source'] ?? null) === 'asset_custom_field_reference_search', 'stored visible ticket number source records reference search', $failed);
+smoke_assert((bool)array_filter($visibleReferenceRequests, static fn(array $request): bool => ($request['method'] ?? '') === 'POST' && ($request['path'] ?? '') === 'tickets/4212/comments'), 'stored visible ticket number tries direct comment first', $failed);
+smoke_assert((bool)array_filter($visibleReferenceRequests, static fn(array $request): bool => ($request['method'] ?? '') === 'GET' && ($request['path'] ?? '') === 'tickets' && (int)($request['query']['number'] ?? 0) === 4212), 'stored visible ticket number searches by visible number after 404', $failed);
+smoke_assert((bool)array_filter($visibleReferenceRequests, static fn(array $request): bool => ($request['method'] ?? '') === 'POST' && ($request['path'] ?? '') === 'tickets/987654/comments'), 'stored visible ticket number posts note to resolved internal id', $failed);
+smoke_assert(!array_filter($visibleReferenceRequests, static fn(array $request): bool => ($request['method'] ?? '') === 'PUT' && str_starts_with((string)($request['path'] ?? ''), 'tickets/')), 'stored visible ticket number does not resolve or close ticket', $failed);
+unset($GLOBALS['syncro_production_move_api_request_handler']);
+
+$direct404Requests = [];
+$direct404Asset = $readyAsset;
+$direct404Asset['properties'][MMIT_SYNCRO_FIELD_READY_MOVE_TICKET_ID] = '#4212';
+$direct404MovedAsset = $direct404Asset;
+$GLOBALS['syncro_production_move_api_request_handler'] = static function (string $method, string $path, array $query, ?array $payload) use (&$direct404Requests, &$direct404MovedAsset): array {
+    $direct404Requests[] = compact('method', 'path', 'query', 'payload');
+    if ($method === 'PUT' && $path === 'customer_assets/12561086' && isset($payload['policy_folder_id'])) {
+        $direct404MovedAsset['policy_folder_id'] = (int)$payload['policy_folder_id'];
+        return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => $direct404MovedAsset]];
+    }
+    if ($method === 'GET' && $path === 'customer_assets/12561086') {
+        return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => $direct404MovedAsset]];
+    }
+    if ($method === 'PUT' && $path === 'customer_assets/12561086' && isset($payload['properties'])) {
+        return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => $direct404MovedAsset]];
+    }
+    if ($method === 'POST' && $path === 'tickets/4212/comments') {
+        return ['ok' => false, 'status' => 404, 'errors' => ['Not Found']];
+    }
+    if ($method === 'GET' && $path === 'tickets' && (int)($query['number'] ?? 0) === 4212) {
+        return ['ok' => true, 'status' => 200, 'data' => ['tickets' => [['id' => 777777, 'number' => 4212, 'status' => 'Open', 'subject' => MMIT_SYNCRO_AUTO_MOVE_TICKET_SUBJECT_PREFIX . 'MANAGE-WS-02', 'body' => 'Syncro asset id: 12561086']]]];
+    }
+    if ($method === 'POST' && $path === 'tickets/777777/comments') {
+        return ['ok' => true, 'status' => 201, 'data' => ['comment' => ['id' => 90]]];
+    }
+    return ['ok' => false, 'status' => 500, 'errors' => ['unexpected direct-404 request ' . $method . ' ' . $path]];
+};
+$direct404Move = syncro_production_move_asset(35912652, 12561086, null, false, false, $direct404Asset);
+smoke_assert(($direct404Move['ok'] ?? null) === true, 'direct stored ticket id 404 falls back without failing move', $failed);
+smoke_assert(($direct404Move['ticket_id'] ?? null) === 777777, 'direct stored ticket id 404 fallback resolves internal API ticket id', $failed);
+smoke_assert((bool)array_filter($direct404Requests, static fn(array $request): bool => ($request['method'] ?? '') === 'POST' && ($request['path'] ?? '') === 'tickets/4212/comments'), 'direct stored ticket id 404 attempts original id first', $failed);
+smoke_assert((bool)array_filter($direct404Requests, static fn(array $request): bool => ($request['method'] ?? '') === 'GET' && ($request['path'] ?? '') === 'tickets' && (int)($request['query']['number'] ?? 0) === 4212), 'direct stored ticket id 404 searches by ticket number', $failed);
+smoke_assert((bool)array_filter($direct404Requests, static fn(array $request): bool => ($request['method'] ?? '') === 'POST' && ($request['path'] ?? '') === 'tickets/777777/comments'), 'direct stored ticket id 404 posts to fallback internal id', $failed);
+unset($GLOBALS['syncro_production_move_api_request_handler']);
+
 $missingTicketRequests = [];
 $missingTicketMovedAsset = $readyAsset;
 $GLOBALS['syncro_production_move_api_request_handler'] = static function (string $method, string $path, array $query, ?array $payload) use (&$missingTicketRequests, &$missingTicketMovedAsset): array {
