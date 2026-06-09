@@ -7,10 +7,16 @@
 
 Set-StrictMode -Version 2.0
 
-Write-Output "MMIT-Onboarding-Acceptance version: route-aware-full-20260603"
+Write-Output "MMIT-Onboarding-Acceptance version: route-aware-service-tier-optional-20260609"
+
+# MMIT Service Tier stays defined as a Syncro custom field, but it is optional
+# metadata only. OPS package/folder metadata is the source of truth for
+# readiness and movement; this per-asset field is just a manual label.
+$script:MMITOptionalCustomFields = @(
+    'MMIT Service Tier'
+)
 
 $script:MMITRequiredCustomFields = @(
-    'MMIT Service Tier',
     'MMIT Asset Role',
     'MMIT Backup Required',
     'MMIT Lab Asset',
@@ -139,11 +145,9 @@ function Get-MMITOnboardingRoute {
 
     $serviceTierText = ConvertTo-MMITText $serviceTierRaw
     if ($serviceTierText -eq '') {
-        $routeValidationFailures.Add('ServiceTier')
-        $routeValidationLines.Add('Route validation: FAIL - missing ServiceTier')
+        $routeValidationLines.Add('Service Tier missing; manual label recommended; not blocking movement.')
     } elseif (-not $serviceTierValid) {
-        $routeValidationFailures.Add('ServiceTier')
-        $routeValidationLines.Add(("Route validation: FAIL - unrecognized ServiceTier '{0}'" -f $serviceTierText))
+        $routeValidationLines.Add(("Service Tier label warning: unrecognized ServiceTier '{0}'; not blocking movement." -f $serviceTierText))
     }
 
     $assetRoleText = ConvertTo-MMITText $assetRoleRaw
@@ -153,6 +157,29 @@ function Get-MMITOnboardingRoute {
     } elseif (-not $assetRoleValid) {
         $routeValidationFailures.Add('AssetRole')
         $routeValidationLines.Add(("Route validation: FAIL - unrecognized AssetRole '{0}'" -f $assetRoleText))
+    }
+
+    $targetText = ConvertTo-MMITText $targetRaw
+    $targetKey = ConvertTo-MMITRouteKey $targetText
+    $expectedTargetText = ''
+    $expectedTargetKey = ''
+    if ($isWorkstation) {
+        $expectedTargetText = 'Production/Workstations'
+        $expectedTargetKey = 'productionworkstations'
+    } elseif ($isServer) {
+        $expectedTargetText = 'Production/Servers'
+        $expectedTargetKey = 'productionservers'
+    }
+
+    if ($targetText -eq '') {
+        $routeValidationFailures.Add('ProductionFolderTarget')
+        $routeValidationLines.Add('Route validation: FAIL - missing ProductionFolderTarget')
+    } elseif ($expectedTargetKey -ne '' -and $targetKey -ne $expectedTargetKey) {
+        $routeValidationFailures.Add('ProductionFolderTarget')
+        $routeValidationLines.Add(("Route validation: FAIL - ProductionFolderTarget '{0}' must be {1} for AssetRole '{2}'" -f $targetText, $expectedTargetText, $assetRoleText))
+    } elseif ($expectedTargetKey -eq '' -and -not (@('productionworkstations', 'productionservers') -contains $targetKey)) {
+        $routeValidationFailures.Add('ProductionFolderTarget')
+        $routeValidationLines.Add(("Route validation: FAIL - unrecognized ProductionFolderTarget '{0}'" -f $targetText))
     }
 
     if ($routeValidationFailures.Count -eq 0) {
