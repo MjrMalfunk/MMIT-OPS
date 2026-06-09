@@ -46,6 +46,7 @@ $ReadyMoveValue   = 135359 # MMIT Ready To Move = Yes
 $ExpectedWorkstationTarget = "Production/Workstations"
 $ExpectedServerTarget      = "Production/Servers"
 $ServerMovesEnabled        = $false
+$ReadyMoveTicketIdFields   = @("MMIT Ready Move Ticket ID", "MMIT Auto Move Ticket ID")
 
 $LogDir  = "C:\ProgramData\MMIT\Logs"
 $LogFile = Join-Path $LogDir "MMIT-Finalize-Ready-Workstations.log"
@@ -375,15 +376,39 @@ function Find-OpenAutoMoveTicket {
     return $null
 }
 
-function Get-TicketId {
-    param([object]$Ticket)
+function Resolve-TicketIdValue {
+    param([object]$Value)
 
-    $Value = Get-ObjectPropertyValue -Object $Ticket -Names @("id", "number", "ticket_id", "ticket_number")
     if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
         return $null
     }
 
-    return [int]$Value
+    $Text = ([string]$Value).Trim()
+    $Match = [regex]::Match($Text, "#?(\d+)")
+    if (-not $Match.Success) {
+        return $null
+    }
+
+    return [int]$Match.Groups[1].Value
+}
+
+function Get-TicketId {
+    param([object]$Ticket)
+
+    return Resolve-TicketIdValue -Value (Get-ObjectPropertyValue -Object $Ticket -Names @("id", "number", "ticket_id", "ticket_number"))
+}
+
+function Get-StoredReadyMoveTicketId {
+    param([object]$Asset)
+
+    foreach ($FieldName in $ReadyMoveTicketIdFields) {
+        $TicketId = Resolve-TicketIdValue -Value (Get-AssetProperty -Asset $Asset -Name $FieldName)
+        if ($null -ne $TicketId) {
+            return $TicketId
+        }
+    }
+
+    return $null
 }
 
 function New-MoveCompletionNote {
@@ -419,8 +444,14 @@ function Add-MoveCompletionTicketNote {
         [datetime]$CompletedAtUtc
     )
 
-    $Ticket = Find-OpenAutoMoveTicket -Asset $Asset -AssetId $AssetId -AssetName $AssetName
-    $TicketId = Get-TicketId -Ticket $Ticket
+    $TicketId = Get-StoredReadyMoveTicketId -Asset $Asset
+    if ($null -ne $TicketId) {
+        Write-Log "TICKET NOTE: using stored ready/move ticket_id=$TicketId asset='$AssetName' id=$AssetId"
+    }
+    else {
+        $Ticket = Find-OpenAutoMoveTicket -Asset $Asset -AssetId $AssetId -AssetName $AssetName
+        $TicketId = Get-TicketId -Ticket $Ticket
+    }
     if ($null -eq $TicketId) {
         Write-Log "TICKET NOTE WARNING: related onboarding/auto-move ticket not found asset='$AssetName' id=$AssetId; move remains successful"
         return
@@ -640,7 +671,13 @@ try {
 
         if ($DryRun) {
             Write-Log "DRY RUN MOVE: would move workstation asset='$AssetName' id=$AssetId from policy_folder_id=$DeployWorkstationsFolderId to policy_folder_id=$ProductionWorkstationsFolderId"
-            Write-Log "DRY RUN TICKET NOTE: would add MMIT Auto Move Result completion note to related onboarding/auto-move ticket asset='$AssetName' id=$AssetId; no ticket note written"
+            $DryRunTicketId = Get-StoredReadyMoveTicketId -Asset $Asset
+            if ($null -ne $DryRunTicketId) {
+                Write-Log "DRY RUN TICKET NOTE: would add completion note to ticket_id=$DryRunTicketId"
+            }
+            else {
+                Write-Log "DRY RUN TICKET NOTE: would add completion note to stored onboarding/auto-move ticket if available; ticket search remains fallback for live moves asset='$AssetName' id=$AssetId"
+            }
             continue
         }
 
@@ -670,7 +707,7 @@ try {
 
             try {
                 $VerificationResult = "PASS - post-move verification confirmed policy_folder_id=$NewFolderId"
-                Add-MoveCompletionTicketNote -Asset $Asset -AssetId $AssetId -AssetName $AssetName -SourcePolicyFolderId $DeployWorkstationsFolderId -TargetPolicyFolderId $ProductionWorkstationsFolderId -VerificationResult $VerificationResult -CompletedAtUtc $MoveCompletedAtUtc
+                Add-MoveCompletionTicketNote -Asset $VerifiedAsset -AssetId $AssetId -AssetName $AssetName -SourcePolicyFolderId $DeployWorkstationsFolderId -TargetPolicyFolderId $ProductionWorkstationsFolderId -VerificationResult $VerificationResult -CompletedAtUtc $MoveCompletedAtUtc
             }
             catch {
                 Write-Log "TICKET NOTE WARNING: move verified, but completion note failed asset='$AssetName' id=$AssetId error=$($_.Exception.Message)"

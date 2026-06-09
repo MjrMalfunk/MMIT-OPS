@@ -152,17 +152,21 @@ $GLOBALS['syncro_production_move_api_request_handler'] = static function (string
     $dryRunRequests[] = compact('method', 'path', 'query', 'payload');
     return ['ok' => false, 'status' => 500, 'errors' => ['dry run should not write']];
 };
-$dryRun = syncro_production_move_asset(35912652, 12561086, 4211, true, false, $readyAsset);
+$dryRunAsset = $readyAsset;
+$dryRunAsset['properties'][MMIT_SYNCRO_FIELD_READY_MOVE_TICKET_ID] = '#4211';
+$dryRun = syncro_production_move_asset(35912652, 12561086, null, true, false, $dryRunAsset);
 smoke_assert(($dryRun['ok'] ?? null) === true, 'dry-run succeeds without network', $failed);
 smoke_assert(($dryRun['dry_run'] ?? null) === true, 'dry-run marked', $failed);
 smoke_assert(($dryRun['payload']['changes']['update_asset'][0]['change']['policy_folder_id'] ?? null) === 5027864, 'dry-run payload target', $failed);
 smoke_assert(($dryRun['asset_update_payload']['policy_folder_id'] ?? null) === 5027864, 'dry-run shows asset update payload target', $failed);
 smoke_assert($dryRunRequests === [], 'dry-run produces no Syncro write', $failed);
-smoke_assert(str_contains((string)($dryRun['ticket_note_preview'] ?? ''), 'completion note would be added'), 'dry-run logs ticket note preview', $failed);
+smoke_assert(($dryRun['ticket_note_preview'] ?? '') === 'DRY RUN TICKET NOTE: would add completion note to ticket_id=4211', 'dry-run logs stored ticket note preview', $failed);
 unset($GLOBALS['syncro_production_move_api_request_handler']);
 
 $successRequests = [];
-$movedAsset = $readyAsset;
+$successAsset = $readyAsset;
+$successAsset['properties'][MMIT_SYNCRO_FIELD_READY_MOVE_TICKET_ID] = '#4211';
+$movedAsset = $successAsset;
 $GLOBALS['syncro_production_move_api_request_handler'] = static function (string $method, string $path, array $query, ?array $payload) use (&$successRequests, &$movedAsset): array {
     $successRequests[] = compact('method', 'path', 'query', 'payload');
     if ($method === 'PUT' && $path === 'customer_assets/12561086' && isset($payload['policy_folder_id'])) {
@@ -180,14 +184,15 @@ $GLOBALS['syncro_production_move_api_request_handler'] = static function (string
     }
     return ['ok' => false, 'status' => 500, 'errors' => ['unexpected request ' . $method . ' ' . $path]];
 };
-$successfulPut = syncro_production_move_asset(35912652, 12561086, 4211, false, true, $readyAsset);
+$successfulPut = syncro_production_move_asset(35912652, 12561086, null, false, true, $successAsset);
 smoke_assert(($successfulPut['ok'] ?? null) === true, 'successful PUT move succeeds', $failed);
 smoke_assert(($successfulPut['move_diagnostic']['method'] ?? null) === 'PUT', 'successful move diagnostic method', $failed);
 smoke_assert(($successfulPut['move_diagnostic']['path'] ?? null) === '/api/v1/customer_assets/12561086', 'successful move diagnostic path', $failed);
 smoke_assert(($successfulPut['move_diagnostic']['http_status'] ?? null) === 200, 'successful move diagnostic status', $failed);
 smoke_assert(($successfulPut['move_diagnostic']['payload']['policy_folder_id'] ?? null) === 5027864, 'successful move diagnostic payload', $failed);
 smoke_assert(($successfulPut['verified_policy_folder_id'] ?? null) === 5027864, 'successful PUT re-fetch verifies policy folder', $failed);
-smoke_assert(($successfulPut['ticket_id'] ?? null) === 4211, 'successful move records ticket id for note', $failed);
+smoke_assert(($successfulPut['ticket_id'] ?? null) === 4211, 'successful move records stored ticket id for note', $failed);
+smoke_assert(($successfulPut['ticket_id_source'] ?? null) === 'asset_custom_field', 'successful move uses asset custom field ticket id source', $failed);
 smoke_assert(str_contains((string)($successfulPut['ticket_note_body'] ?? ''), 'Asset name: MANAGE-WS-02') && str_contains((string)($successfulPut['ticket_note_body'] ?? ''), 'Source policy_folder_id: 5027867') && str_contains((string)($successfulPut['ticket_note_body'] ?? ''), 'Manual technician verification is still required'), 'successful move note body includes lifecycle details', $failed);
 $successWriteIndex = null;
 $successVerifyIndex = null;
@@ -210,6 +215,7 @@ foreach ($successRequests as $index => $request) {
 smoke_assert($successVerifyIndex !== null && $successWriteIndex !== null && $successVerifyIndex < $successWriteIndex, 'success writes result only after verification fetch', $failed);
 smoke_assert($successVerifyIndex !== null && $successTicketNoteIndex !== null && $successVerifyIndex < $successTicketNoteIndex, 'success adds ticket note only after verification fetch', $failed);
 smoke_assert(!$successTicketCloseAttempted, 'successful move does not resolve or close ticket even when requested', $failed);
+smoke_assert(!array_filter($successRequests, static fn(array $request): bool => ($request['method'] ?? '') === 'GET' && ($request['path'] ?? '') === 'tickets'), 'successful move skips ticket search when stored ticket id exists', $failed);
 unset($GLOBALS['syncro_production_move_api_request_handler']);
 
 $missingTicketRequests = [];
