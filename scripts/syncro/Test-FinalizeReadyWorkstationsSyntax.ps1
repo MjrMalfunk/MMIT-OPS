@@ -29,6 +29,10 @@ $RequiredText = @(
     'Production/Workstations',
     'MMIT Auto Move Result',
     'MMIT Onboarding Completed At',
+    'tickets/$TicketId/comment',
+    'tickets/$ResolvedTicketId/comment',
+    'subject = "MMIT Auto Move Result"',
+    'hidden = $true',
     'Find-TicketByReference',
     'Get-TicketInternalId',
     'internal_id',
@@ -38,6 +42,20 @@ $RequiredText = @(
 foreach ($Text in $RequiredText) {
     if (-not $Content.Contains($Text)) {
         throw "Expected runner text not found: $Text"
+    }
+}
+
+
+$ForbiddenText = @(
+    'tickets/$TicketId/comments',
+    'tickets/$ResolvedTicketId/comments',
+    'comment = @{',
+    'hidden = $false'
+)
+
+foreach ($Text in $ForbiddenText) {
+    if ($Content.Contains($Text)) {
+        throw "Deprecated runner text found: $Text"
     }
 }
 

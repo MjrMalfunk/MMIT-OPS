@@ -560,21 +560,21 @@ function Add-MoveCompletionTicketNote {
 
     $Note = New-MoveCompletionNote -AssetName $AssetName -AssetId $AssetId -SourcePolicyFolderId $SourcePolicyFolderId -TargetPolicyFolderId $TargetPolicyFolderId -VerificationResult $VerificationResult -CompletedAtUtc $CompletedAtUtc
     $CommentPayload = @{
-        comment = @{
-            body = $Note
-            hidden = $false
-            do_not_email = $true
-        }
+        subject = "MMIT Auto Move Result"
+        body = $Note
+        hidden = $true
+        do_not_email = $true
     }
 
     try {
-        Invoke-SyncroPost -Path "tickets/$TicketId/comments" -Payload $CommentPayload | Out-Null
-        Write-Log "TICKET NOTE: added MMIT Auto Move Result completion note ticket_id=$TicketId asset='$AssetName' id=$AssetId; ticket left open for manual technician verification"
+        Invoke-SyncroPost -Path "tickets/$TicketId/comment" -Payload $CommentPayload | Out-Null
+        Write-Log "TICKET NOTE: added private MMIT Auto Move Result completion note ticket_id=$TicketId asset='$AssetName' id=$AssetId; ticket left open for manual technician verification"
         return
     }
     catch {
         if ($null -eq $StoredTicketReference -or -not (Test-SyncroNotFoundError -ErrorRecord $_)) {
-            throw
+            Write-Log "TICKET NOTE WARNING: completion note failed ticket_id=$TicketId asset='$AssetName' id=$AssetId error=$($_.Exception.Message); move remains successful"
+            return
         }
 
         Write-Log "TICKET NOTE: stored ready/move ticket reference=$StoredTicketReference returned 404; searching by visible ticket number/reference asset='$AssetName' id=$AssetId"
@@ -586,11 +586,17 @@ function Add-MoveCompletionTicketNote {
         }
 
         if ($ResolvedTicketId -eq $TicketId) {
-            throw
+            Write-Log "TICKET NOTE WARNING: stored ticket reference=$StoredTicketReference resolved to same ticket_id=$TicketId after note endpoint returned 404 asset='$AssetName' id=$AssetId; move remains successful"
+            return
         }
 
-        Invoke-SyncroPost -Path "tickets/$ResolvedTicketId/comments" -Payload $CommentPayload | Out-Null
-        Write-Log "TICKET NOTE: resolved stored ticket reference=$StoredTicketReference to internal ticket_id=$ResolvedTicketId and added completion note asset='$AssetName' id=$AssetId; ticket left open for manual technician verification"
+        try {
+            Invoke-SyncroPost -Path "tickets/$ResolvedTicketId/comment" -Payload $CommentPayload | Out-Null
+            Write-Log "TICKET NOTE: resolved stored ticket reference=$StoredTicketReference to internal ticket_id=$ResolvedTicketId and added private completion note asset='$AssetName' id=$AssetId; ticket left open for manual technician verification"
+        }
+        catch {
+            Write-Log "TICKET NOTE WARNING: completion note failed resolved_ticket_id=$ResolvedTicketId stored_reference=$StoredTicketReference asset='$AssetName' id=$AssetId error=$($_.Exception.Message); move remains successful"
+        }
     }
 }
 
