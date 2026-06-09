@@ -343,6 +343,9 @@ function Get-SkipReason {
         return "MMIT Ready To Move not Yes current=$(ConvertTo-LogValue $Ready) expected_option=$ReadyMoveValue"
     }
 
+    # Movement trusts OPS package/folder metadata plus acceptance readiness fields.
+    # MMIT Service Tier is intentionally not a gate here; it is only a manual
+    # per-asset label and may be blank while the asset is still READY to move.
     $Target = Get-AssetProperty -Asset $Asset -Name "MMIT Production Folder Target"
     if (-not (Test-TargetValue -Actual $Target -ExpectedTarget $ExpectedTarget)) {
         return "MMIT Production Folder Target mismatch current=$(ConvertTo-LogValue $Target) expected=$ExpectedTarget"

@@ -42,6 +42,7 @@ Assert-Equal $manageDecision.Route.Requirements.CoveAgent.Required $false 'Manag
 $protectFields = @{
     'MMIT Service Tier' = 'Protect IT'
     'MMIT Asset Role' = 'Workstation'
+    'MMIT Production Folder Target' = 'Production/Workstations'
     'MMIT Backup Required' = $false
 }
 $protectDecision = Get-MMITOnboardingDecision -CustomFields $protectFields -CheckResults @{ Defender = 'PASS'; ScoutDNS = 'PASS'; Huntress = 'FAIL'; CoveAgent = 'PASS'; CoveBackupComplete = 'PASS' }
@@ -52,6 +53,7 @@ Assert-Equal $protectDecision.Route.Requirements.CoveAgent.Required $true 'Prote
 $serverFields = @{
     'MMIT Service Tier' = 'Protect IT'
     'MMIT Asset Role' = 'Server'
+    'MMIT Production Folder Target' = 'Production/Servers'
     'MMIT Backup Required' = $false
 }
 $serverDecision = Get-MMITOnboardingDecision -CustomFields $serverFields -CheckResults @{ Defender = 'PASS'; ScoutDNS = 'PASS'; Huntress = 'PASS'; CoveAgent = 'FAIL'; CoveBackupComplete = 'FAIL' }
@@ -62,6 +64,7 @@ Assert-Equal $serverDecision.Route.Requirements.ScoutDNS.Required $true 'Protect
 $manageDnsFields = @{
     'MMIT Service Tier' = 'Manage IT'
     'MMIT Asset Role' = 'Workstation'
+    'MMIT Production Folder Target' = 'Production/Workstations'
     'MMIT Backup Required' = 'false'
     'MMIT DNS Filtering Required' = 'true'
 }
@@ -75,6 +78,7 @@ Assert-Equal ($manageDnsDecision.Failures -contains 'CoveAgent') $false 'Skipped
 $aliasFields = @{
     'MMIT Service Tier' = 'Manage'
     'MMIT Asset Role' = 'Workstations'
+    'MMIT Production Folder Target' = 'Production/Workstations'
     'MMIT Backup Required' = $false
 }
 $aliasDecision = Get-MMITOnboardingDecision -CustomFields $aliasFields -CheckResults @{ Defender = 'PASS'; ScoutDNS = 'FAIL'; Huntress = 'FAIL'; CoveAgent = 'FAIL'; CoveBackupComplete = 'FAIL' }
@@ -85,6 +89,7 @@ Assert-Equal $aliasDecision.Route.Requirements.Huntress.Required $false 'Manage 
 $protectAliasFields = @{
     'MMIT Service Tier' = 'Protect'
     'MMIT Asset Role' = 'Servers'
+    'MMIT Production Folder Target' = 'Production/Servers'
     'MMIT Backup Required' = $true
 }
 $protectAliasDecision = Get-MMITOnboardingDecision -CustomFields $protectAliasFields -CheckResults @{ Defender = 'PASS'; ScoutDNS = 'PASS'; Huntress = 'PASS'; CoveAgent = 'PASS'; CoveBackupComplete = 'PASS' }
@@ -95,6 +100,7 @@ Assert-Equal $protectAliasDecision.Route.Requirements.CoveAgent.Required $true '
 $governAliasFields = @{
     'MMIT Service Tier' = 'Govern'
     'MMIT Asset Role' = 'Server'
+    'MMIT Production Folder Target' = 'Production/Servers'
     'MMIT Backup Required' = $false
 }
 $governAliasDecision = Get-MMITOnboardingDecision -CustomFields $governAliasFields -CheckResults @{ Defender = 'PASS'; ScoutDNS = 'PASS'; Huntress = 'PASS'; CoveAgent = 'FAIL'; CoveBackupComplete = 'FAIL' }
@@ -109,24 +115,30 @@ $missingRouteFields = @{
 $missingRouteDecision = Get-MMITOnboardingDecision -CustomFields $missingRouteFields -CheckResults @{ Defender = 'PASS'; ScoutDNS = 'PASS'; Huntress = 'FAIL'; CoveAgent = 'FAIL'; CoveBackupComplete = 'FAIL' }
 Assert-Equal $missingRouteDecision.Status 'NOT_READY' 'Missing route values status'
 Assert-Equal $missingRouteDecision.ReadyToMove 'No' 'Missing route values ready to move'
-Assert-Equal ($missingRouteDecision.Failures -contains 'ServiceTier') $true 'Missing route ServiceTier failure included'
+Assert-Equal ($missingRouteDecision.Failures -contains 'ServiceTier') $false 'Missing route ServiceTier is optional and excluded from failures'
 Assert-Equal ($missingRouteDecision.Failures -contains 'AssetRole') $true 'Missing route AssetRole failure included'
-Assert-Equal ($missingRouteDecision.Summary -like '*Route validation: FAIL - missing ServiceTier*') $true 'Missing ServiceTier summary line'
+Assert-Equal ($missingRouteDecision.Failures -contains 'ProductionFolderTarget') $true 'Missing route ProductionFolderTarget failure included'
+Assert-Equal ($missingRouteDecision.Summary -like '*Service Tier missing; manual label recommended; not blocking movement.*') $true 'Missing ServiceTier warning line'
 Assert-Equal ($missingRouteDecision.Summary -like '*Route validation: FAIL - missing AssetRole*') $true 'Missing AssetRole summary line'
+Assert-Equal ($missingRouteDecision.Summary -like '*Route validation: FAIL - missing ProductionFolderTarget*') $true 'Missing ProductionFolderTarget summary line'
 
 $invalidRouteFields = @{
     'MMIT Service Tier' = 'Unknown IT'
     'MMIT Asset Role' = 'Kiosk'
+    'MMIT Production Folder Target' = 'Deploy/Workstations'
     'MMIT Backup Required' = $false
 }
 $invalidRouteDecision = Get-MMITOnboardingDecision -CustomFields $invalidRouteFields -CheckResults @{ Defender = 'PASS'; ScoutDNS = 'PASS'; Huntress = 'FAIL'; CoveAgent = 'FAIL'; CoveBackupComplete = 'FAIL' }
 Assert-Equal $invalidRouteDecision.Status 'NOT_READY' 'Invalid route values status'
-Assert-Equal ($invalidRouteDecision.Summary -like "*Route validation: FAIL - unrecognized ServiceTier 'Unknown IT'*") $true 'Invalid ServiceTier summary line'
+Assert-Equal ($invalidRouteDecision.Failures -contains 'ServiceTier') $false 'Invalid ServiceTier label does not block movement'
+Assert-Equal ($invalidRouteDecision.Summary -like "*Service Tier label warning: unrecognized ServiceTier 'Unknown IT'; not blocking movement.*") $true 'Invalid ServiceTier warning line'
 Assert-Equal ($invalidRouteDecision.Summary -like "*Route validation: FAIL - unrecognized AssetRole 'Kiosk'*") $true 'Invalid AssetRole summary line'
+Assert-Equal ($invalidRouteDecision.Summary -like "*Route validation: FAIL - unrecognized ProductionFolderTarget 'Deploy/Workstations'*") $true 'Invalid ProductionFolderTarget summary line'
 
 $manageDnsReadyFields = @{
     'MMIT Service Tier' = 'Manage IT'
     'MMIT Asset Role' = 'Workstation'
+    'MMIT Production Folder Target' = 'Production/Workstations'
     'MMIT Backup Required' = $false
     'MMIT DNS Filtering Required' = $true
 }
@@ -136,6 +148,31 @@ Assert-Equal $manageDnsReadyDecision.Route.Requirements.ScoutDNS.Required $true 
 Assert-Equal $manageDnsReadyDecision.Route.Requirements.Huntress.Required $false 'Manage IT DNS selected Huntress skipped'
 Assert-Equal $manageDnsReadyDecision.Route.Requirements.CoveAgent.Required $false 'Manage IT DNS selected Cove skipped'
 Assert-Equal ($manageDnsReadyDecision.Summary -like '*Route validation: PASS*') $true 'Valid route validation pass line'
+
+
+$blankServiceTierFields = @{
+    'MMIT Service Tier' = ''
+    'MMIT Asset Role' = 'Workstation'
+    'MMIT Production Folder Target' = 'Production/Workstations'
+    'MMIT Backup Required' = $false
+}
+$blankServiceTierDecision = Get-MMITOnboardingDecision -CustomFields $blankServiceTierFields -CheckResults @{ Defender = 'PASS'; ScoutDNS = 'FAIL'; Huntress = 'FAIL'; CoveAgent = 'FAIL'; CoveBackupComplete = 'FAIL' }
+Assert-Equal $blankServiceTierDecision.Status 'READY' 'Blank Service Tier workstation status'
+Assert-Equal $blankServiceTierDecision.ReadyToMove 'Yes' 'Blank Service Tier workstation ready to move'
+Assert-Equal ($blankServiceTierDecision.Failures -contains 'ServiceTier') $false 'Blank Service Tier excluded from failures'
+Assert-Equal ($blankServiceTierDecision.Summary -like '*Service Tier missing; manual label recommended; not blocking movement.*') $true 'Blank Service Tier warning summary line'
+Assert-Equal ($blankServiceTierDecision.Summary -like '*Route validation: PASS*') $true 'Blank Service Tier otherwise valid route pass line'
+
+$mismatchedTargetFields = @{
+    'MMIT Service Tier' = ''
+    'MMIT Asset Role' = 'Workstation'
+    'MMIT Production Folder Target' = 'Production/Servers'
+    'MMIT Backup Required' = $false
+}
+$mismatchedTargetDecision = Get-MMITOnboardingDecision -CustomFields $mismatchedTargetFields -CheckResults @{ Defender = 'PASS'; ScoutDNS = 'PASS'; Huntress = 'FAIL'; CoveAgent = 'FAIL'; CoveBackupComplete = 'FAIL' }
+Assert-Equal $mismatchedTargetDecision.Status 'NOT_READY' 'Mismatched production target status'
+Assert-Equal ($mismatchedTargetDecision.Failures -contains 'ProductionFolderTarget') $true 'Mismatched production target failure included'
+Assert-Equal ($mismatchedTargetDecision.Summary -like "*ProductionFolderTarget 'Production/Servers' must be Production/Workstations for AssetRole 'Workstation'*") $true 'Mismatched production target summary line'
 
 function Get-ItemProperty {
     param(
