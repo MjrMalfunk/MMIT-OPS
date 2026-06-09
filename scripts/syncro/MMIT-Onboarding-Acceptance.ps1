@@ -590,7 +590,7 @@ function Get-MMITTicketIdFromResponse {
         return ''
     }
 
-    foreach ($propertyName in @('id', 'number', 'ticket_id', 'ticket_number')) {
+    foreach ($propertyName in @('id', 'ticket_id', 'internal_id')) {
         if ($null -ne $Response.PSObject.Properties[$propertyName]) {
             $ticketId = ConvertTo-MMITText $Response.$propertyName
             if ($ticketId -ne '') {
@@ -602,6 +602,15 @@ function Get-MMITTicketIdFromResponse {
     foreach ($containerName in @('ticket', 'data')) {
         if ($null -ne $Response.PSObject.Properties[$containerName]) {
             $ticketId = Get-MMITTicketIdFromResponse -Response $Response.$containerName
+            if ($ticketId -ne '') {
+                return $ticketId
+            }
+        }
+    }
+
+    foreach ($propertyName in @('number', 'ticket_number', 'reference')) {
+        if ($null -ne $Response.PSObject.Properties[$propertyName]) {
+            $ticketId = ConvertTo-MMITText $Response.$propertyName
             if ($ticketId -ne '') {
                 return $ticketId
             }

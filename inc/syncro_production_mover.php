@@ -1058,6 +1058,64 @@ function syncro_production_move_stored_ready_ticket_id(array $asset): ?int
     return null;
 }
 
+function syncro_production_move_ticket_internal_id(array $ticket): ?int
+{
+    foreach (['id', 'ticket_id', 'internal_id'] as $key) {
+        $ticketId = (int)($ticket[$key] ?? 0);
+        if ($ticketId > 0) {
+            return $ticketId;
+        }
+    }
+    return null;
+}
+
+function syncro_production_move_ticket_reference_matches(array $ticket, int $reference): bool
+{
+    if ($reference <= 0) {
+        return false;
+    }
+
+    foreach (['id', 'ticket_id', 'internal_id', 'number', 'ticket_number', 'reference', 'ref'] as $key) {
+        if (!array_key_exists($key, $ticket)) {
+            continue;
+        }
+        if (syncro_production_move_ticket_id_from_value($ticket[$key]) === $reference) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function syncro_production_move_find_ticket_by_reference(int $customerId, int $assetId, string $assetName, int $reference): ?array
+{
+    if ($customerId <= 0 || $reference <= 0) {
+        return null;
+    }
+
+    $query = ['customer_id' => $customerId, 'number' => $reference];
+    if ($assetId > 0) {
+        $query['asset_id'] = $assetId;
+    }
+    $response = syncro_production_move_api_request('GET', 'tickets', $query);
+    if (empty($response['ok'])) {
+        return null;
+    }
+
+    $matchedByReference = null;
+    foreach (syncro_production_move_extract_ticket_list($response) as $ticket) {
+        if (!syncro_production_move_ticket_reference_matches($ticket, $reference)) {
+            continue;
+        }
+        if (syncro_production_move_ticket_is_open_auto_move($ticket, $assetId, $assetName)) {
+            return $ticket;
+        }
+        $matchedByReference = $matchedByReference ?? $ticket;
+    }
+
+    return $matchedByReference;
+}
+
 function syncro_production_move_find_open_move_ticket(int $customerId, int $assetId, string $assetName): ?array
 {
     if ($customerId <= 0 || $assetId <= 0) {
@@ -1105,6 +1163,11 @@ function syncro_production_move_add_completion_note(?int $ticketId, string $body
     return !empty($comment['ok']) ? ['ok' => true, 'comment' => $comment] : ['ok' => false, 'errors' => [syncro_production_move_response_errors($comment, 'Move completion ticket note failed.')], 'comment' => $comment];
 }
 
+function syncro_production_move_completion_note_not_found(array $ticketNote): bool
+{
+    return empty($ticketNote['ok']) && (int)($ticketNote['comment']['status'] ?? 0) === 404;
+}
+
 
 function syncro_production_move_resolve_ready_ticket_id(int $customerId, int $assetId, string $assetName, ?int $readyTicketId, array $asset = []): array
 {
@@ -1116,8 +1179,9 @@ function syncro_production_move_resolve_ready_ticket_id(int $customerId, int $as
         return ['ticket_id' => $readyTicketId, 'source' => 'explicit_parameter', 'warnings' => []];
     }
     $ticket = syncro_production_move_find_open_move_ticket($customerId, $assetId, $assetName);
-    if ($ticket && (int)($ticket['id'] ?? $ticket['number'] ?? 0) > 0) {
-        return ['ticket_id' => (int)($ticket['id'] ?? $ticket['number']), 'ticket' => $ticket, 'source' => 'ticket_search', 'warnings' => []];
+    $ticketId = $ticket ? (syncro_production_move_ticket_internal_id($ticket) ?? syncro_production_move_ticket_id_from_value($ticket['number'] ?? $ticket['ticket_number'] ?? null)) : null;
+    if ($ticketId !== null) {
+        return ['ticket_id' => $ticketId, 'ticket' => $ticket, 'source' => 'ticket_search', 'warnings' => []];
     }
     return ['ticket_id' => null, 'warnings' => ['Related onboarding/auto-move ticket was not found; move will remain successful and no completion note was added.']];
 }
@@ -1128,6 +1192,19 @@ function syncro_production_move_record_completion_note(int $customerId, int $ass
     $resolvedTicketId = $ticketResolution['ticket_id'] ?? null;
     $noteBody = syncro_production_move_completion_note_body($assetId, $assetName, $sourceFolderId, $targetFolderId, $verificationResult, $completedAtUtc);
     $ticketNote = syncro_production_move_add_completion_note(is_int($resolvedTicketId) ? $resolvedTicketId : null, $noteBody);
+    if (syncro_production_move_completion_note_not_found($ticketNote) && is_int($resolvedTicketId)) {
+        $ticket = syncro_production_move_find_ticket_by_reference($customerId, $assetId, $assetName, $resolvedTicketId);
+        $fallbackTicketId = $ticket ? syncro_production_move_ticket_internal_id($ticket) : null;
+        if ($fallbackTicketId !== null && $fallbackTicketId !== $resolvedTicketId) {
+            $fallbackNote = syncro_production_move_add_completion_note($fallbackTicketId, $noteBody);
+            if (!empty($fallbackNote['ok'])) {
+                $resolvedTicketId = $fallbackTicketId;
+                $ticketResolution['ticket'] = $ticket;
+                $ticketResolution['source'] = (($ticketResolution['source'] ?? '') === 'asset_custom_field' ? 'asset_custom_field_reference_search' : 'ticket_reference_search');
+                $ticketNote = $fallbackNote;
+            }
+        }
+    }
     $warnings = (array)($ticketResolution['warnings'] ?? []);
     if (!empty($ticketNote['warning'])) {
         $warnings[] = (string)$ticketNote['warning'];
