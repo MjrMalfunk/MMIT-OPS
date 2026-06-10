@@ -7,7 +7,7 @@
 
 Set-StrictMode -Version 2.0
 
-Write-Output "MMIT-Onboarding-Acceptance version: route-aware-full-20260603"
+Write-Output "MMIT-Onboarding-Acceptance version: route-aware-server-scoutdns-skip-ticketid-numeric-20260609"
 
 $script:MMITRequiredCustomFields = @(
     'MMIT Service Tier',
@@ -160,7 +160,7 @@ function Get-MMITOnboardingRoute {
     }
 
     $huntressRequired = ($isProtect -or $isGovern)
-    $scoutDnsRequired = $dnsRequired -or ($isProtect -or $isGovern)
+    $scoutDnsRequired = (-not $isServer) -and ($dnsRequired -or ($isProtect -or $isGovern))
 
     if ($isServer) {
         $coveRequired = $backupRequired
@@ -176,7 +176,9 @@ function Get-MMITOnboardingRoute {
     }
 
     $huntressReason = if ($huntressRequired) { 'required for Protect/Govern IT' } else { "not required for $serviceTierReasonText" }
-    $scoutDnsReason = if ($scoutDnsRequired) {
+    $scoutDnsReason = if ($isServer) {
+        'server ScoutDNS Device Agent not required; use site DNS/firewall/WAN forwarding/Relay/server policy'
+    } elseif ($scoutDnsRequired) {
         if ($dnsRequired) { 'DNS filtering selected' } else { 'required for Protect/Govern IT' }
     } elseif ($dnsFieldPresent) {
         'DNS filtering not selected'
@@ -555,6 +557,13 @@ function Set-MMITReadyTicketMarker {
     ) | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
+function Test-MMITNumericTicketId {
+    param([AllowNull()][object]$Value)
+
+    $text = ConvertTo-MMITText $Value
+    return ($text -match '^\d+$')
+}
+
 function Get-MMITTicketIdFromResponse {
     param([AllowNull()][object]$Response)
 
@@ -562,58 +571,81 @@ function Get-MMITTicketIdFromResponse {
         return ''
     }
 
-    $text = ConvertTo-MMITText $Response
-    if ($text -match '^\d+$') {
-        return $text
+    if (Test-MMITNumericTicketId $Response) {
+        return (ConvertTo-MMITText $Response)
     }
+
+    $ticketIdPropertyNames = @('id', 'number', 'ticket_id', 'ticket_number')
+    $containerPropertyNames = @('ticket', 'data', 'response', 'result')
 
     if ($Response -is [System.Collections.IDictionary]) {
-        foreach ($propertyName in @('id', 'number', 'ticket_id', 'ticket_number')) {
+        foreach ($propertyName in $ticketIdPropertyNames) {
             if ($Response.Contains($propertyName)) {
                 $ticketId = Get-MMITTicketIdFromResponse -Response $Response[$propertyName]
-                if ($ticketId -ne '') {
+                if (Test-MMITNumericTicketId $ticketId) {
                     return $ticketId
                 }
             }
         }
-        foreach ($containerName in @('ticket', 'data', 'record', 'item', 'result')) {
+
+        foreach ($containerName in $containerPropertyNames) {
             if ($Response.Contains($containerName)) {
                 $ticketId = Get-MMITTicketIdFromResponse -Response $Response[$containerName]
-                if ($ticketId -ne '') {
+                if (Test-MMITNumericTicketId $ticketId) {
                     return $ticketId
                 }
             }
         }
+
+        return ''
     }
 
-    foreach ($propertyName in @('id', 'number', 'ticket_id', 'ticket_number')) {
-        if ($null -ne $Response.PSObject.Properties[$propertyName]) {
-            $ticketId = Get-MMITTicketIdFromResponse -Response $Response.$propertyName
-            if ($ticketId -ne '') {
-                return $ticketId
-            }
-        }
-    }
-
-    foreach ($containerName in @('ticket', 'data', 'record', 'item', 'result')) {
-        if ($null -ne $Response.PSObject.Properties[$containerName]) {
-            $ticketId = Get-MMITTicketIdFromResponse -Response $Response.$containerName
-            if ($ticketId -ne '') {
-                return $ticketId
-            }
-        }
-    }
-
-    if ($Response -is [System.Collections.IEnumerable] -and -not ($Response -is [string]) -and -not ($Response -is [System.Collections.IDictionary])) {
+    if ($Response -is [System.Collections.IEnumerable] -and -not ($Response -is [string])) {
         foreach ($item in $Response) {
             $ticketId = Get-MMITTicketIdFromResponse -Response $item
-            if ($ticketId -ne '') {
+            if (Test-MMITNumericTicketId $ticketId) {
+                return $ticketId
+            }
+        }
+
+        return ''
+    }
+
+    foreach ($propertyName in $ticketIdPropertyNames) {
+        if ($null -ne $Response.PSObject.Properties[$propertyName]) {
+            $ticketId = Get-MMITTicketIdFromResponse -Response $Response.PSObject.Properties[$propertyName].Value
+            if (Test-MMITNumericTicketId $ticketId) {
+                return $ticketId
+            }
+        }
+    }
+
+    foreach ($containerName in $containerPropertyNames) {
+        if ($null -ne $Response.PSObject.Properties[$containerName]) {
+            $ticketId = Get-MMITTicketIdFromResponse -Response $Response.PSObject.Properties[$containerName].Value
+            if (Test-MMITNumericTicketId $ticketId) {
                 return $ticketId
             }
         }
     }
 
     return ''
+}
+
+function Set-MMITReadyMoveTicketAssetField {
+    param(
+        [AllowNull()][object]$TicketId,
+        [Parameter(Mandatory = $true)][string]$Subdomain
+    )
+
+    if (-not (Test-MMITNumericTicketId $TicketId)) {
+        Write-Output ('Ready/move ticket ID was blank or non-numeric; MMIT Ready Move Ticket ID custom field was not updated. Extracted value: {0}' -f (ConvertTo-MMITText $TicketId))
+        return $false
+    }
+
+    $ticketIdText = ConvertTo-MMITText $TicketId
+    Update-MMITSyncroAssetCustomFields -CustomFields @{ 'MMIT Ready Move Ticket ID' = $ticketIdText } -Subdomain $Subdomain | Out-Null
+    return $true
 }
 
 function Add-MMITReadyMoveTicketComment {
@@ -667,9 +699,10 @@ function New-MMITReadyMoveTicket {
         -Subject $subject
 
     $ticketId = Get-MMITTicketIdFromResponse -Response $response
-    if ($ticketId -ne '') {
+    if (Test-MMITNumericTicketId $ticketId) {
         Add-MMITReadyMoveTicketComment -TicketIdOrNumber $ticketId -Subject $subject -Body $bodyText -Subdomain $Subdomain
     } else {
+        Write-Output 'Ready/move ticket was created, but no numeric ticket ID was found in the Syncro response; logging activity instead of writing a ticket ID custom field.'
         Log-Activity -EventName 'MMIT Onboarding Acceptance Ready' -Message $bodyText -Subdomain $Subdomain
     }
 
@@ -725,11 +758,7 @@ function Write-MMITOnboardingAcceptanceResult {
         return
     }
 
-    if ($ticketId -match '^\d+$') {
-        Update-MMITSyncroAssetCustomFields -CustomFields @{ 'MMIT Ready Move Ticket ID' = $ticketId } -Subdomain $Subdomain | Out-Null
-    } else {
-        Write-Output 'Ready/move ticket ID was not numeric; MMIT Ready Move Ticket ID custom field was left blank.'
-    }
+    Set-MMITReadyMoveTicketAssetField -TicketId $ticketId -Subdomain $Subdomain | Out-Null
 
     Set-MMITReadyTicketMarker -Path $MarkerPath -TicketId $ticketId
     Write-Output ('Ready/move ticket created once. Ticket ID: {0}. Marker: {1}' -f $ticketId, $MarkerPath)
