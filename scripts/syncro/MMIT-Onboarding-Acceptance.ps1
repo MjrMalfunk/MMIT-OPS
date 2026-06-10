@@ -562,16 +562,40 @@ function Get-MMITTicketIdFromResponse {
         return ''
     }
 
+    $text = ConvertTo-MMITText $Response
+    if ($text -match '^\d+$') {
+        return $text
+    }
+
+    if ($Response -is [System.Collections.IDictionary]) {
+        foreach ($propertyName in @('id', 'number', 'ticket_id', 'ticket_number')) {
+            if ($Response.Contains($propertyName)) {
+                $ticketId = Get-MMITTicketIdFromResponse -Response $Response[$propertyName]
+                if ($ticketId -ne '') {
+                    return $ticketId
+                }
+            }
+        }
+        foreach ($containerName in @('ticket', 'data', 'record', 'item', 'result')) {
+            if ($Response.Contains($containerName)) {
+                $ticketId = Get-MMITTicketIdFromResponse -Response $Response[$containerName]
+                if ($ticketId -ne '') {
+                    return $ticketId
+                }
+            }
+        }
+    }
+
     foreach ($propertyName in @('id', 'number', 'ticket_id', 'ticket_number')) {
         if ($null -ne $Response.PSObject.Properties[$propertyName]) {
-            $ticketId = ConvertTo-MMITText $Response.$propertyName
+            $ticketId = Get-MMITTicketIdFromResponse -Response $Response.$propertyName
             if ($ticketId -ne '') {
                 return $ticketId
             }
         }
     }
 
-    foreach ($containerName in @('ticket', 'data')) {
+    foreach ($containerName in @('ticket', 'data', 'record', 'item', 'result')) {
         if ($null -ne $Response.PSObject.Properties[$containerName]) {
             $ticketId = Get-MMITTicketIdFromResponse -Response $Response.$containerName
             if ($ticketId -ne '') {
@@ -580,9 +604,13 @@ function Get-MMITTicketIdFromResponse {
         }
     }
 
-    $text = ConvertTo-MMITText $Response
-    if ($text -ne '') {
-        return $text
+    if ($Response -is [System.Collections.IEnumerable] -and -not ($Response -is [string]) -and -not ($Response -is [System.Collections.IDictionary])) {
+        foreach ($item in $Response) {
+            $ticketId = Get-MMITTicketIdFromResponse -Response $item
+            if ($ticketId -ne '') {
+                return $ticketId
+            }
+        }
     }
 
     return ''
@@ -695,6 +723,12 @@ function Write-MMITOnboardingAcceptanceResult {
     if ($script:MMITWhatIfSyncro) {
         Write-Output ('WHATIF ready/move ticket would be marked once. Ticket ID: {0}. Marker: {1}' -f $ticketId, $MarkerPath)
         return
+    }
+
+    if ($ticketId -match '^\d+$') {
+        Update-MMITSyncroAssetCustomFields -CustomFields @{ 'MMIT Ready Move Ticket ID' = $ticketId } -Subdomain $Subdomain | Out-Null
+    } else {
+        Write-Output 'Ready/move ticket ID was not numeric; MMIT Ready Move Ticket ID custom field was left blank.'
     }
 
     Set-MMITReadyTicketMarker -Path $MarkerPath -TicketId $ticketId
