@@ -8,6 +8,7 @@ const MMIT_SYNCRO_FIELD_BACKUP_REQUIRED = 'MMIT Backup Required';
 const MMIT_SYNCRO_FIELD_DNS_REQUIRED = 'MMIT DNS Filtering Required';
 const MMIT_SYNCRO_FIELD_ONBOARDING_RESULT = 'MMIT Onboarding Result';
 const MMIT_SYNCRO_FIELD_CONTRACT_ID = 'MMIT Contract ID';
+const MMIT_SYNCRO_FIELD_READY_MOVE_TICKET_ID = 'MMIT Ready Move Ticket ID';
 const MMIT_SYNCRO_AUTO_MOVE_TICKET_SUBJECT_PREFIX = 'MMIT Auto Move Ready - ';
 const MMIT_SYNCRO_AUTO_MOVE_TICKET_TYPE = 'MMIT_AUTO_MOVE_READY';
 
@@ -182,6 +183,66 @@ function syncro_onboarding_open_statuses(): array
     return ['new', 'open', 'in progress', 'pending', 'waiting'];
 }
 
+
+function syncro_extract_ticket_id(mixed $response): int
+{
+    if ($response === null) {
+        return 0;
+    }
+    if (is_int($response)) {
+        return $response > 0 ? $response : 0;
+    }
+    if (is_string($response)) {
+        $text = trim($response);
+        return preg_match('/^\d+$/', $text) === 1 ? (int)$text : 0;
+    }
+    if (is_object($response)) {
+        $response = get_object_vars($response);
+    }
+    if (!is_array($response)) {
+        return 0;
+    }
+
+    foreach (['id', 'number', 'ticket_id', 'ticket_number'] as $key) {
+        if (array_key_exists($key, $response)) {
+            $ticketId = syncro_extract_ticket_id($response[$key]);
+            if ($ticketId > 0) {
+                return $ticketId;
+            }
+        }
+    }
+
+    foreach (['ticket', 'data', 'record', 'item', 'result'] as $key) {
+        if (isset($response[$key])) {
+            $ticketId = syncro_extract_ticket_id($response[$key]);
+            if ($ticketId > 0) {
+                return $ticketId;
+            }
+        }
+    }
+
+    if (array_is_list($response)) {
+        foreach ($response as $item) {
+            $ticketId = syncro_extract_ticket_id($item);
+            if ($ticketId > 0) {
+                return $ticketId;
+            }
+        }
+    }
+
+    return 0;
+}
+
+function syncro_onboarding_write_ready_move_ticket_id(int $assetId, int $ticketId): array
+{
+    if ($assetId <= 0 || $ticketId <= 0) {
+        return ['ok' => true, 'skipped' => true, 'message' => 'No numeric ready move ticket ID available.'];
+    }
+    return syncro_onboarding_api_request('PUT', 'customer_assets/' . $assetId, [], [
+        'properties' => [MMIT_SYNCRO_FIELD_READY_MOVE_TICKET_ID => (string)$ticketId],
+    ]);
+}
+
 function syncro_onboarding_extract_ticket_list(array $response): array
 {
     $data = $response['data'] ?? $response;
@@ -211,18 +272,44 @@ function syncro_onboarding_ticket_is_open_auto_move(array $ticket, int $assetId,
     return $assetName !== '' && $subject === MMIT_SYNCRO_AUTO_MOVE_TICKET_SUBJECT_PREFIX . $assetName;
 }
 
+function syncro_onboarding_ticket_status_rank(array $ticket): int
+{
+    $status = syncro_production_move_normalize_key($ticket['status'] ?? '');
+    return in_array($status, ['new', 'open', 'in progress', 'pending', 'waiting'], true) ? 0 : 1;
+}
+
 function syncro_onboarding_find_open_move_ticket(int $customerId, int $assetId, string $assetName): ?array
 {
     $response = syncro_onboarding_api_request('GET', 'tickets', ['customer_id' => $customerId, 'asset_id' => $assetId, 'status' => 'open']);
-    if (empty($response['ok'])) {
-        return null;
-    }
-    foreach (syncro_onboarding_extract_ticket_list($response) as $ticket) {
-        if (syncro_onboarding_ticket_is_open_auto_move($ticket, $assetId, $assetName)) {
-            return $ticket;
+    if (!empty($response['ok'])) {
+        foreach (syncro_onboarding_extract_ticket_list($response) as $ticket) {
+            if (syncro_onboarding_ticket_is_open_auto_move($ticket, $assetId, $assetName)) {
+                return $ticket;
+            }
         }
     }
-    return null;
+
+    $fallback = syncro_onboarding_api_request('GET', 'tickets', ['customer_id' => $customerId]);
+    if (empty($fallback['ok'])) {
+        return null;
+    }
+    $matches = [];
+    foreach (syncro_onboarding_extract_ticket_list($fallback) as $ticket) {
+        if (syncro_onboarding_ticket_is_open_auto_move($ticket, $assetId, $assetName)) {
+            $matches[] = $ticket;
+        }
+    }
+    if ($matches === []) {
+        return null;
+    }
+    usort($matches, static function (array $left, array $right): int {
+        $rank = syncro_onboarding_ticket_status_rank($left) <=> syncro_onboarding_ticket_status_rank($right);
+        if ($rank !== 0) {
+            return $rank;
+        }
+        return syncro_extract_ticket_id($right) <=> syncro_extract_ticket_id($left);
+    });
+    return $matches[0];
 }
 
 function syncro_onboarding_move_ticket_body(array $asset, array $client, array $contract, array $validation): string
@@ -254,7 +341,8 @@ function syncro_onboarding_create_move_ticket(int $customerId, array $asset, arr
     $assetName = syncro_production_move_asset_name($asset);
     $existing = syncro_onboarding_find_open_move_ticket($customerId, $assetId, $assetName);
     if ($existing) {
-        return ['ok' => true, 'duplicate' => true, 'ticket' => $existing, 'ticket_id' => (int)($existing['id'] ?? $existing['number'] ?? 0)];
+        $ticketId = syncro_extract_ticket_id($existing);
+        return ['ok' => true, 'duplicate' => true, 'ticket' => $existing, 'ticket_id' => $ticketId, 'ticket_id_write' => syncro_onboarding_write_ready_move_ticket_id($assetId, $ticketId)];
     }
     $subject = MMIT_SYNCRO_AUTO_MOVE_TICKET_SUBJECT_PREFIX . $assetName;
     $body = syncro_onboarding_move_ticket_body($asset, $client, $contract, $validation);
@@ -272,7 +360,9 @@ function syncro_onboarding_create_move_ticket(int $customerId, array $asset, arr
         return ['ok' => false, 'errors' => [syncro_production_move_response_errors($response, 'Move ticket creation failed.')], 'response' => $response];
     }
     $data = $response['data']['ticket'] ?? $response['data'] ?? [];
-    return ['ok' => true, 'ticket' => is_array($data) ? $data : [], 'ticket_id' => (int)($data['id'] ?? $data['number'] ?? 0), 'response' => $response];
+    $ticketId = syncro_extract_ticket_id($response);
+    $ticketIdWrite = syncro_onboarding_write_ready_move_ticket_id($assetId, $ticketId);
+    return ['ok' => true, 'ticket' => is_array($data) ? $data : [], 'ticket_id' => $ticketId, 'ticket_id_write' => $ticketIdWrite, 'response' => $response];
 }
 
 function syncro_onboarding_evaluate_asset_completion(int $customerId, array $asset, array $client, array $contract = [], bool $write = true): array
