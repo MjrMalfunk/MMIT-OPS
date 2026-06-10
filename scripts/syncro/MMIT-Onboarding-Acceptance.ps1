@@ -7,10 +7,9 @@
 
 Set-StrictMode -Version 2.0
 
-Write-Output "MMIT-Onboarding-Acceptance version: route-aware-full-20260603"
+Write-Output "MMIT-Onboarding-Acceptance version: route-aware-service-tier-optional-server-scoutdns-skip-ticketid-numeric-20260610"
 
 $script:MMITRequiredCustomFields = @(
-    'MMIT Service Tier',
     'MMIT Asset Role',
     'MMIT Backup Required',
     'MMIT Lab Asset',
@@ -19,7 +18,12 @@ $script:MMITRequiredCustomFields = @(
     'MMIT Onboarding Status',
     'MMIT Ready To Move',
     'MMIT Onboarding Result',
-    'MMIT Auto Move Result'
+    'MMIT Auto Move Result',
+    'MMIT Ready Move Ticket ID'
+)
+
+$script:MMITOptionalCustomFields = @(
+    'MMIT Service Tier'
 )
 
 function ConvertTo-MMITText {
@@ -139,11 +143,9 @@ function Get-MMITOnboardingRoute {
 
     $serviceTierText = ConvertTo-MMITText $serviceTierRaw
     if ($serviceTierText -eq '') {
-        $routeValidationFailures.Add('ServiceTier')
-        $routeValidationLines.Add('Route validation: FAIL - missing ServiceTier')
+        $routeValidationLines.Add('Service Tier missing; manual label recommended; not blocking movement.')
     } elseif (-not $serviceTierValid) {
-        $routeValidationFailures.Add('ServiceTier')
-        $routeValidationLines.Add(("Route validation: FAIL - unrecognized ServiceTier '{0}'" -f $serviceTierText))
+        $routeValidationLines.Add(("Service Tier label warning: unrecognized ServiceTier '{0}'; not blocking movement." -f $serviceTierText))
     }
 
     $assetRoleText = ConvertTo-MMITText $assetRoleRaw
@@ -155,12 +157,34 @@ function Get-MMITOnboardingRoute {
         $routeValidationLines.Add(("Route validation: FAIL - unrecognized AssetRole '{0}'" -f $assetRoleText))
     }
 
+    $targetText = ConvertTo-MMITText $targetRaw
+    $targetKey = ConvertTo-MMITRouteKey $targetRaw
+    $expectedTargetText = ''
+    $expectedTargetKey = ''
+    if ($isWorkstation) {
+        $expectedTargetText = 'Production/Workstations'
+        $expectedTargetKey = ConvertTo-MMITRouteKey $expectedTargetText
+    } elseif ($isServer) {
+        $expectedTargetText = 'Production/Servers'
+        $expectedTargetKey = ConvertTo-MMITRouteKey $expectedTargetText
+    }
+
+    if ($expectedTargetText -ne '') {
+        if ($targetText -eq '') {
+            $routeValidationFailures.Add('ProductionFolderTarget')
+            $routeValidationLines.Add(("Route validation: FAIL - missing ProductionFolderTarget; expected {0}" -f $expectedTargetText))
+        } elseif ($targetKey -ne $expectedTargetKey) {
+            $routeValidationFailures.Add('ProductionFolderTarget')
+            $routeValidationLines.Add(("Route validation: FAIL - ProductionFolderTarget '{0}' does not match expected {1}" -f $targetText, $expectedTargetText))
+        }
+    }
+
     if ($routeValidationFailures.Count -eq 0) {
         $routeValidationLines.Add('Route validation: PASS')
     }
 
     $huntressRequired = ($isProtect -or $isGovern)
-    $scoutDnsRequired = $dnsRequired -or ($isProtect -or $isGovern)
+    $scoutDnsRequired = $isWorkstation -and ($dnsRequired -or ($isProtect -or $isGovern))
 
     if ($isServer) {
         $coveRequired = $backupRequired
@@ -177,7 +201,9 @@ function Get-MMITOnboardingRoute {
 
     $huntressReason = if ($huntressRequired) { 'required for Protect/Govern IT' } else { "not required for $serviceTierReasonText" }
     $scoutDnsReason = if ($scoutDnsRequired) {
-        if ($dnsRequired) { 'DNS filtering selected' } else { 'required for Protect/Govern IT' }
+        if ($dnsRequired) { 'DNS filtering selected' } else { 'required for Protect/Govern IT workstation' }
+    } elseif ($isServer) {
+        'not required for servers'
     } elseif ($dnsFieldPresent) {
         'DNS filtering not selected'
     } else {
@@ -200,7 +226,8 @@ function Get-MMITOnboardingRoute {
         RouteValidationLines = @($routeValidationLines)
         BackupRequired = $backupRequired
         LabAsset = ConvertTo-MMITBoolean $labRaw
-        ProductionFolderTarget = ConvertTo-MMITText $targetRaw
+        ProductionFolderTarget = $targetText
+        ExpectedProductionFolderTarget = $expectedTargetText
         DnsFilteringFieldPresent = $dnsFieldPresent
         DnsFilteringRequired = $dnsRequired
         Requirements = [ordered]@{
