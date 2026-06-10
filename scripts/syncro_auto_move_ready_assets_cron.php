@@ -371,6 +371,80 @@ function syncro_auto_move_asset_supported_windows_lane(array $asset): string
     return (($classification['role'] ?? '') === 'server') ? 'server' : 'workstation';
 }
 
+
+function syncro_auto_move_extract_numeric_ticket_id(mixed $value): int
+{
+    if ($value === null) {
+        return 0;
+    }
+    if (function_exists('syncro_extract_ticket_id')) {
+        $ticketId = syncro_extract_ticket_id($value);
+        if ($ticketId > 0) {
+            return $ticketId;
+        }
+    }
+    if (is_int($value)) {
+        return $value > 0 ? $value : 0;
+    }
+    if (is_string($value)) {
+        $text = trim($value);
+        if ($text === '' || preg_match('/System\.Collections|\bArray\b|\bObject\b|Dictionary/i', $text) === 1) {
+            return 0;
+        }
+        return preg_match('/^\d+$/', $text) === 1 ? (int)$text : 0;
+    }
+    if (is_object($value)) {
+        $value = get_object_vars($value);
+    }
+    if (!is_array($value)) {
+        return 0;
+    }
+    foreach (['id', 'number', 'ticket_id', 'ticket_number'] as $key) {
+        if (array_key_exists($key, $value)) {
+            $ticketId = syncro_auto_move_extract_numeric_ticket_id($value[$key]);
+            if ($ticketId > 0) {
+                return $ticketId;
+            }
+        }
+    }
+    foreach (['ticket', 'data', 'record', 'item', 'result'] as $key) {
+        if (isset($value[$key])) {
+            $ticketId = syncro_auto_move_extract_numeric_ticket_id($value[$key]);
+            if ($ticketId > 0) {
+                return $ticketId;
+            }
+        }
+    }
+    if (array_is_list($value)) {
+        foreach ($value as $item) {
+            $ticketId = syncro_auto_move_extract_numeric_ticket_id($item);
+            if ($ticketId > 0) {
+                return $ticketId;
+            }
+        }
+    }
+    return 0;
+}
+
+function syncro_auto_move_ready_ticket_id_from_asset(array $fields): int
+{
+    return syncro_auto_move_extract_numeric_ticket_id(syncro_auto_move_field($fields, 'MMIT Ready Move Ticket ID'));
+}
+
+function syncro_auto_move_ticket_status_rank(array $ticket): int
+{
+    $status = strtolower(trim((string)($ticket['status'] ?? '')));
+    return match ($status) {
+        'new', 'open', 'in progress', 'in-progress', 'pending', 'waiting' => 0,
+        default => 1,
+    };
+}
+
+function syncro_auto_move_ticket_id(array $ticket): int
+{
+    return syncro_auto_move_extract_numeric_ticket_id($ticket);
+}
+
 function syncro_auto_move_extract_ticket_list(array $response): array
 {
     $data = $response['data'] ?? $response;
@@ -396,23 +470,74 @@ function syncro_auto_move_ticket_matches(array $ticket, int $assetId, string $as
     $json = strtolower(json_encode($ticket, JSON_UNESCAPED_SLASHES) ?: '');
     $hasAutoMoveMarker = str_contains($json, 'mmit_auto_move_ready') || stripos($subject, 'MMIT Auto Move Ready') !== false;
     $hasAsset = str_contains($json, 'asset id: ' . $assetId)
-        || str_contains($json, 'asset_id') && str_contains($json, (string)$assetId)
+        || (str_contains($json, 'asset_id') && str_contains($json, (string)$assetId))
         || ($assetName !== '' && stripos($subject . "\n" . $body, $assetName) !== false);
     return $hasAutoMoveMarker && $hasAsset;
 }
 
-function syncro_auto_move_find_open_ticket(int $customerId, int $assetId, string $assetName): ?array
+function syncro_auto_move_ticket_subject_matches_asset(array $ticket, string $assetName): bool
 {
-    $response = syncro_api_request('GET', 'tickets', ['customer_id' => $customerId, 'asset_id' => $assetId, 'status' => 'open']);
+    if ($assetName === '') {
+        return false;
+    }
+    $status = strtolower(trim((string)($ticket['status'] ?? '')));
+    if (in_array($status, ['resolved', 'closed', 'complete', 'completed', 'deleted'], true)) {
+        return false;
+    }
+    $subject = trim((string)($ticket['subject'] ?? $ticket['title'] ?? ''));
+    return stripos($subject, 'MMIT Auto Move Ready') !== false && stripos($subject, $assetName) !== false;
+}
+
+function syncro_auto_move_get_ticket_by_id(int $ticketId): ?array
+{
+    if ($ticketId <= 0) {
+        return null;
+    }
+    $response = syncro_api_request('GET', 'tickets/' . $ticketId);
     if (empty($response['ok'])) {
         return null;
     }
-    foreach (syncro_auto_move_extract_ticket_list($response) as $ticket) {
-        if (syncro_auto_move_ticket_matches($ticket, $assetId, $assetName)) {
-            return $ticket;
+    $data = $response['data']['ticket'] ?? $response['data'] ?? [];
+    return is_array($data) ? $data : null;
+}
+
+function syncro_auto_move_find_open_ticket(int $customerId, int $assetId, string $assetName, int $readyTicketId = 0): ?array
+{
+    $ticketById = syncro_auto_move_get_ticket_by_id($readyTicketId);
+    if ($ticketById && syncro_auto_move_ticket_matches($ticketById, $assetId, $assetName)) {
+        return $ticketById;
+    }
+
+    $response = syncro_api_request('GET', 'tickets', ['customer_id' => $customerId, 'asset_id' => $assetId, 'status' => 'open']);
+    if (!empty($response['ok'])) {
+        foreach (syncro_auto_move_extract_ticket_list($response) as $ticket) {
+            if (syncro_auto_move_ticket_matches($ticket, $assetId, $assetName)) {
+                return $ticket;
+            }
         }
     }
-    return null;
+
+    $fallbackResponse = syncro_api_request('GET', 'tickets', ['customer_id' => $customerId]);
+    if (empty($fallbackResponse['ok'])) {
+        return null;
+    }
+    $matches = [];
+    foreach (syncro_auto_move_extract_ticket_list($fallbackResponse) as $ticket) {
+        if (syncro_auto_move_ticket_subject_matches_asset($ticket, $assetName)) {
+            $matches[] = $ticket;
+        }
+    }
+    if ($matches === []) {
+        return null;
+    }
+    usort($matches, static function (array $left, array $right): int {
+        $rank = syncro_auto_move_ticket_status_rank($left) <=> syncro_auto_move_ticket_status_rank($right);
+        if ($rank !== 0) {
+            return $rank;
+        }
+        return syncro_auto_move_ticket_id($right) <=> syncro_auto_move_ticket_id($left);
+    });
+    return $matches[0];
 }
 
 function syncro_auto_move_add_ticket_comment(int $ticketId, string $body): array
@@ -508,6 +633,8 @@ function syncro_auto_move_move_workstation(int $syncroCustomerId, array $asset, 
 {
     $assetId = (int)$candidate['asset_id'];
     $assetName = (string)$candidate['asset_name'];
+    $fieldsFromAsset = syncro_extract_asset_custom_fields($asset);
+    $readyTicketId = syncro_auto_move_ready_ticket_id_from_asset($fieldsFromAsset);
     $targetFolderId = (int)$candidate['target_folder_id'];
     $move = syncro_update_customer_asset_policy_folder($assetId, $targetFolderId);
     if (empty($move['ok'])) {
@@ -517,10 +644,10 @@ function syncro_auto_move_move_workstation(int $syncroCustomerId, array $asset, 
     $completedAt = gmdate('Y-m-d\TH:i:s\Z');
     $resultText = 'Moved to Production/Workstations by OPS Syncro auto mover at ' . $completedAt . '.';
     $fields = syncro_auto_move_update_completion_fields($assetId, $resultText, $completedAt);
-    $ticket = syncro_auto_move_find_open_ticket($syncroCustomerId, $assetId, $assetName);
+    $ticket = syncro_auto_move_find_open_ticket($syncroCustomerId, $assetId, $assetName, $readyTicketId);
     $ticketComment = ['ok' => true, 'skipped' => true];
     if ($ticket) {
-        $ticketId = (int)($ticket['id'] ?? $ticket['number'] ?? 0);
+        $ticketId = syncro_auto_move_ticket_id($ticket);
         $ticketComment = syncro_auto_move_add_ticket_comment($ticketId, $resultText . ' Asset #' . $assetId . ' moved to policy_folder_id #' . $targetFolderId . '.');
     }
 
