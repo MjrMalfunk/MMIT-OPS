@@ -440,9 +440,74 @@ function syncro_auto_move_ticket_status_rank(array $ticket): int
     };
 }
 
+function syncro_auto_move_extract_numeric_ticket_value(mixed $value, array $preferredKeys): int
+{
+    if ($value === null) {
+        return 0;
+    }
+    if (is_int($value)) {
+        return $value > 0 ? $value : 0;
+    }
+    if (is_string($value)) {
+        $text = trim($value);
+        if ($text === '' || preg_match('/System\.Collections|\bArray\b|\bObject\b|Dictionary/i', $text) === 1) {
+            return 0;
+        }
+        return preg_match('/^\d+$/', $text) === 1 ? (int)$text : 0;
+    }
+    if (is_object($value)) {
+        $value = get_object_vars($value);
+    }
+    if (!is_array($value)) {
+        return 0;
+    }
+
+    foreach ($preferredKeys as $key) {
+        if (array_key_exists($key, $value)) {
+            $ticketValue = syncro_auto_move_extract_numeric_ticket_value($value[$key], $preferredKeys);
+            if ($ticketValue > 0) {
+                return $ticketValue;
+            }
+        }
+    }
+    foreach (['ticket', 'data', 'record', 'item', 'result'] as $key) {
+        if (isset($value[$key])) {
+            $ticketValue = syncro_auto_move_extract_numeric_ticket_value($value[$key], $preferredKeys);
+            if ($ticketValue > 0) {
+                return $ticketValue;
+            }
+        }
+    }
+    if (array_is_list($value)) {
+        foreach ($value as $item) {
+            $ticketValue = syncro_auto_move_extract_numeric_ticket_value($item, $preferredKeys);
+            if ($ticketValue > 0) {
+                return $ticketValue;
+            }
+        }
+    }
+    return 0;
+}
+
 function syncro_auto_move_ticket_id(array $ticket): int
 {
-    return syncro_auto_move_extract_numeric_ticket_id($ticket);
+    return syncro_auto_move_extract_numeric_ticket_value($ticket, ['id', 'ticket_id']);
+}
+
+function syncro_auto_move_ticket_number(array $ticket): int
+{
+    return syncro_auto_move_extract_numeric_ticket_value($ticket, ['number', 'ticket_number']);
+}
+
+function syncro_auto_move_ticket_identity(array $ticket): array
+{
+    $ticketId = syncro_auto_move_ticket_id($ticket);
+    $ticketNumber = syncro_auto_move_ticket_number($ticket);
+    return [
+        'ticket_id' => $ticketId,
+        'ticket_number' => $ticketNumber,
+        'preferred_ticket_number' => $ticketNumber > 0 ? $ticketNumber : $ticketId,
+    ];
 }
 
 function syncro_auto_move_extract_ticket_list(array $response): array
@@ -540,18 +605,32 @@ function syncro_auto_move_find_open_ticket(int $customerId, int $assetId, string
     return $matches[0];
 }
 
-function syncro_auto_move_add_ticket_comment(int $ticketId, string $body): array
+function syncro_auto_move_add_ticket_comment(int $ticketId, int $ticketNumber, string $body): array
 {
-    if ($ticketId <= 0) {
-        return ['ok' => false, 'skipped' => true, 'message' => 'No numeric ticket ID available.'];
+    $identifier = $ticketNumber > 0 ? $ticketNumber : $ticketId;
+    $identifierType = $ticketNumber > 0 ? 'ticket_number' : 'ticket_id';
+    if ($identifier <= 0) {
+        return ['ok' => false, 'skipped' => true, 'message' => 'No numeric ticket ID or ticket number available.'];
     }
-    return syncro_api_request('POST', 'tickets/' . $ticketId . '/comments', [], ['comment' => ['body' => $body, 'hidden' => false]]);
+
+    $comment = syncro_api_request('POST', 'tickets/' . $identifier . '/comments', [], [
+        'comment' => [
+            'body' => $body,
+            'hidden' => false,
+            'do_not_email' => true,
+        ],
+    ]);
+    return $comment + ['ticket_comment_identifier' => $identifier, 'ticket_comment_identifier_type' => $identifierType];
 }
 
 function syncro_auto_move_log_ticket_comment_result(array $context, array $comment): void
 {
     $eventContext = $context;
     $eventContext['skipped'] = !empty($comment['skipped']);
+    if (isset($comment['ticket_comment_identifier'])) {
+        $eventContext['ticket_comment_identifier'] = (int)$comment['ticket_comment_identifier'];
+        $eventContext['ticket_comment_identifier_type'] = (string)($comment['ticket_comment_identifier_type'] ?? '');
+    }
     if (!empty($comment['ok'])) {
         syncro_auto_move_log('READY_MOVE_TICKET_COMMENT_CREATED', $eventContext);
         return;
@@ -579,16 +658,17 @@ function syncro_auto_move_update_auto_move_result(int $assetId, string $result):
     return syncro_auto_move_update_asset_properties($assetId, ['MMIT Auto Move Result' => $result]);
 }
 
-function syncro_auto_move_backfill_ready_ticket_id(int $clientId, int $syncroCustomerId, int $assetId, string $assetName, int $existingTicketId, int $foundTicketId): array
+function syncro_auto_move_backfill_ready_ticket_id(int $clientId, int $syncroCustomerId, int $assetId, string $assetName, int $existingTicketId, int $foundTicketId, int $foundTicketNumber): array
 {
-    if ($foundTicketId <= 0) {
-        return ['ok' => true, 'skipped' => true, 'reason' => 'no_numeric_found_ticket_id'];
+    $preferredTicketNumber = $foundTicketNumber > 0 ? $foundTicketNumber : $foundTicketId;
+    if ($preferredTicketNumber <= 0) {
+        return ['ok' => true, 'skipped' => true, 'reason' => 'no_numeric_found_ticket_number', 'ticket_id' => $foundTicketId, 'ticket_number' => $foundTicketNumber];
     }
-    if ($existingTicketId > 0) {
-        return ['ok' => true, 'skipped' => true, 'reason' => 'existing_numeric_ticket_id', 'ticket_id' => $existingTicketId];
+    if ($existingTicketId > 0 && $existingTicketId === $preferredTicketNumber) {
+        return ['ok' => true, 'skipped' => true, 'reason' => 'existing_visible_ticket_number', 'ticket_id' => $foundTicketId, 'ticket_number' => $foundTicketNumber];
     }
 
-    $update = syncro_auto_move_update_asset_properties($assetId, ['MMIT Ready Move Ticket ID' => (string)$foundTicketId]);
+    $update = syncro_auto_move_update_asset_properties($assetId, ['MMIT Ready Move Ticket ID' => (string)$preferredTicketNumber]);
     if (!empty($update['ok'])) {
         syncro_auto_move_log('READY_MOVE_TICKET_ID_BACKFILLED', [
             'client_id' => $clientId,
@@ -596,9 +676,12 @@ function syncro_auto_move_backfill_ready_ticket_id(int $clientId, int $syncroCus
             'asset_id' => $assetId,
             'asset_name' => $assetName,
             'ticket_id' => $foundTicketId,
+            'ticket_number' => $foundTicketNumber,
+            'backfilled_ticket_number' => $preferredTicketNumber,
+            'previous_ticket_id_field' => $existingTicketId,
         ]);
     }
-    return $update + ['ticket_id' => $foundTicketId];
+    return $update + ['ticket_id' => $foundTicketId, 'ticket_number' => $foundTicketNumber, 'backfilled_ticket_number' => $preferredTicketNumber];
 }
 
 function syncro_auto_move_workstation_candidate(array $asset, array $folderMap): array
@@ -691,16 +774,20 @@ function syncro_auto_move_move_workstation(int $clientId, int $syncroCustomerId,
     $ticketComment = ['ok' => true, 'skipped' => true];
     $ticketIdBackfill = ['ok' => true, 'skipped' => true, 'reason' => 'ticket_not_found'];
     $ticketId = 0;
+    $ticketNumber = 0;
     if ($ticket) {
-        $ticketId = syncro_auto_move_ticket_id($ticket);
-        $ticketIdBackfill = syncro_auto_move_backfill_ready_ticket_id($clientId, $syncroCustomerId, $assetId, $assetName, $readyTicketId, $ticketId);
-        $ticketComment = syncro_auto_move_add_ticket_comment($ticketId, $resultText . ' Asset #' . $assetId . ' moved to Production/Workstations policy_folder_id #' . $targetFolderId . '.');
+        $ticketIdentity = syncro_auto_move_ticket_identity($ticket);
+        $ticketId = (int)$ticketIdentity['ticket_id'];
+        $ticketNumber = (int)$ticketIdentity['ticket_number'];
+        $ticketIdBackfill = syncro_auto_move_backfill_ready_ticket_id($clientId, $syncroCustomerId, $assetId, $assetName, $readyTicketId, $ticketId, $ticketNumber);
+        $ticketComment = syncro_auto_move_add_ticket_comment($ticketId, $ticketNumber, $resultText . ' Asset #' . $assetId . ' moved to Production/Workstations policy_folder_id #' . $targetFolderId . '.');
         syncro_auto_move_log_ticket_comment_result([
             'client_id' => $clientId,
             'syncro_customer_id' => $syncroCustomerId,
             'asset_id' => $assetId,
             'asset_name' => $assetName,
             'ticket_id' => $ticketId,
+            'ticket_number' => $ticketNumber,
             'action' => 'workstation_moved',
         ], $ticketComment);
     }
@@ -715,6 +802,7 @@ function syncro_auto_move_move_workstation(int $clientId, int $syncroCustomerId,
         'ticket_comment' => $ticketComment,
         'ticket_found' => $ticket !== null,
         'ticket_id' => $ticketId,
+        'ticket_number' => $ticketNumber,
     ];
 }
 
@@ -730,17 +818,21 @@ function syncro_auto_move_handle_server_ready_disabled(int $clientId, int $syncr
     $ticketComment = ['ok' => true, 'skipped' => true];
     $ticketIdBackfill = ['ok' => true, 'skipped' => true, 'reason' => 'ticket_not_found'];
     $ticketId = 0;
+    $ticketNumber = 0;
 
     if ($ticket) {
-        $ticketId = syncro_auto_move_ticket_id($ticket);
-        $ticketIdBackfill = syncro_auto_move_backfill_ready_ticket_id($clientId, $syncroCustomerId, $assetId, $assetName, $readyTicketId, $ticketId);
-        $ticketComment = syncro_auto_move_add_ticket_comment($ticketId, $resultText . ' Asset #' . $assetId . ' remains in Deploy/Servers; manual server move is required.');
+        $ticketIdentity = syncro_auto_move_ticket_identity($ticket);
+        $ticketId = (int)$ticketIdentity['ticket_id'];
+        $ticketNumber = (int)$ticketIdentity['ticket_number'];
+        $ticketIdBackfill = syncro_auto_move_backfill_ready_ticket_id($clientId, $syncroCustomerId, $assetId, $assetName, $readyTicketId, $ticketId, $ticketNumber);
+        $ticketComment = syncro_auto_move_add_ticket_comment($ticketId, $ticketNumber, $resultText . ' Asset #' . $assetId . ' remains in Deploy/Servers; manual server move is required.');
         syncro_auto_move_log_ticket_comment_result([
             'client_id' => $clientId,
             'syncro_customer_id' => $syncroCustomerId,
             'asset_id' => $assetId,
             'asset_name' => $assetName,
             'ticket_id' => $ticketId,
+            'ticket_number' => $ticketNumber,
             'action' => 'server_ready_move_disabled',
         ], $ticketComment);
     }
@@ -754,6 +846,7 @@ function syncro_auto_move_handle_server_ready_disabled(int $clientId, int $syncr
         'ticket_comment' => $ticketComment,
         'ticket_found' => $ticket !== null,
         'ticket_id' => $ticketId,
+        'ticket_number' => $ticketNumber,
     ];
 }
 
@@ -798,7 +891,7 @@ function syncro_auto_move_process_client(array $client, bool $dryRun): array
         if (!empty($serverCandidate['ok'])) {
             $summary['servers_ready_disabled']++;
             $serverResult = $dryRun
-                ? ['ok' => true, 'ticket_found' => false, 'ticket_id' => 0, 'field_update' => ['ok' => true, 'skipped' => true]]
+                ? ['ok' => true, 'ticket_found' => false, 'ticket_id' => 0, 'ticket_number' => 0, 'field_update' => ['ok' => true, 'skipped' => true]]
                 : syncro_auto_move_handle_server_ready_disabled($clientId, $syncroCustomerId, $asset, $serverCandidate);
             if (empty($serverResult['ok'])) {
                 $summary['failures']++;
@@ -812,6 +905,7 @@ function syncro_auto_move_process_client(array $client, bool $dryRun): array
                 'target_folder_id' => $serverCandidate['target_folder_id'],
                 'ticket_found' => !empty($serverResult['ticket_found']),
                 'ticket_id' => (int)($serverResult['ticket_id'] ?? 0),
+                'ticket_number' => (int)($serverResult['ticket_number'] ?? 0),
                 'field_update_ok' => !empty($serverResult['field_update']['ok']),
                 'mode' => $dryRun ? 'dry-run' : 'apply',
             ]);
@@ -848,6 +942,8 @@ function syncro_auto_move_process_client(array $client, bool $dryRun): array
                 'source_folder_id' => $candidate['current_folder_id'],
                 'target_folder_id' => $candidate['target_folder_id'],
                 'ticket_found' => !empty($move['ticket_found']),
+                'ticket_id' => (int)($move['ticket_id'] ?? 0),
+                'ticket_number' => (int)($move['ticket_number'] ?? 0),
             ]);
         } elseif (!empty($move['move']['staging_blocked'])) {
             $summary['skipped']++;

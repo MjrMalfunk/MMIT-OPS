@@ -21,7 +21,8 @@ function syncro_api_request(string $method, string $path, array $query = [], ?ar
         $assetId = (int)($query['asset_id'] ?? 0);
         $assetName = $assetId === 202 ? 'MANAGE-SRV-01' : 'MANAGE-WS-01';
         return ['ok' => true, 'data' => ['tickets' => [[
-            'id' => $assetId === 202 ? 7002 : 7001,
+            'id' => $assetId === 202 ? 112489922 : 112489921,
+            'number' => $assetId === 202 ? 7002 : 7001,
             'status' => 'New',
             'subject' => 'MMIT Auto Move Ready - ' . $assetName,
             'body' => 'mmit_auto_move_ready asset id: ' . $assetId,
@@ -32,8 +33,12 @@ function syncro_api_request(string $method, string $path, array $query = [], ?ar
         return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => ['id' => (int)substr($path, 16)]]];
     }
 
-    if ($method === 'POST' && in_array($path, ['tickets/7001/comments', 'tickets/7002/comments'], true)) {
-        return ['ok' => true, 'status' => 201, 'data' => ['comment' => ['id' => $path === 'tickets/7001/comments' ? 91 : 92]]];
+    if ($method === 'POST' && $path === 'tickets/7001/comments') {
+        return ['ok' => false, 'status' => 404, 'errors' => ['error: Not Found']];
+    }
+
+    if ($method === 'POST' && $path === 'tickets/7002/comments') {
+        return ['ok' => true, 'status' => 201, 'data' => ['comment' => ['id' => 92]]];
     }
 
     return ['ok' => false, 'status' => 500, 'errors' => ['unexpected request ' . $method . ' ' . $path]];
@@ -100,7 +105,8 @@ $workstationCandidate = [
 $workstation = syncro_auto_move_move_workstation(11, 22, $workstationAsset, $workstationCandidate);
 smoke_assert(($workstation['ok'] ?? null) === true, 'workstation move succeeds', $failed);
 smoke_assert(($workstation['ticket_found'] ?? null) === true, 'workstation ticket found', $failed);
-smoke_assert(($workstation['ticket_id'] ?? null) === 7001, 'workstation ticket id extracted', $failed);
+smoke_assert(($workstation['ticket_id'] ?? null) === 112489921, 'workstation internal ticket id extracted', $failed);
+smoke_assert(($workstation['ticket_number'] ?? null) === 7001, 'workstation visible ticket number extracted', $failed);
 
 $readyTicketWrites = array_values(array_filter($GLOBALS['smoke_syncro_auto_move_requests'], static function (array $request): bool {
     return ($request['method'] ?? '') === 'PUT'
@@ -118,7 +124,8 @@ $completionWrites = array_values(array_filter($GLOBALS['smoke_syncro_auto_move_r
 smoke_assert(count($completionWrites) === 1, 'workstation completion fields are stamped', $failed);
 
 $workstationComments = array_values(array_filter($GLOBALS['smoke_syncro_auto_move_requests'], static fn(array $request): bool => ($request['method'] ?? '') === 'POST' && ($request['path'] ?? '') === 'tickets/7001/comments'));
-smoke_assert(count($workstationComments) === 1, 'workstation move comments on found ticket', $failed);
+smoke_assert(count($workstationComments) === 1, 'workstation move comments use visible ticket number', $failed);
+smoke_assert(($workstation['ticket_comment']['ok'] ?? true) === false, 'workstation move remains successful when ticket comment fails', $failed);
 
 $serverAsset = [
     'id' => 202,
@@ -135,7 +142,8 @@ $serverCandidate = [
 $server = syncro_auto_move_handle_server_ready_disabled(11, 22, $serverAsset, $serverCandidate);
 smoke_assert(($server['ok'] ?? null) === true, 'server-disabled handling succeeds', $failed);
 smoke_assert(($server['ticket_found'] ?? null) === true, 'server-disabled ticket found', $failed);
-smoke_assert(($server['ticket_id'] ?? null) === 7002, 'server-disabled ticket id extracted', $failed);
+smoke_assert(($server['ticket_id'] ?? null) === 112489922, 'server-disabled internal ticket id extracted', $failed);
+smoke_assert(($server['ticket_number'] ?? null) === 7002, 'server-disabled visible ticket number extracted', $failed);
 
 $serverResultWrites = array_values(array_filter($GLOBALS['smoke_syncro_auto_move_requests'], static function (array $request): bool {
     return ($request['method'] ?? '') === 'PUT'
@@ -152,7 +160,8 @@ $serverTicketWrites = array_values(array_filter($GLOBALS['smoke_syncro_auto_move
 smoke_assert(count($serverTicketWrites) === 1, 'server-disabled non-numeric ready move ticket id is backfilled', $failed);
 
 $serverComments = array_values(array_filter($GLOBALS['smoke_syncro_auto_move_requests'], static fn(array $request): bool => ($request['method'] ?? '') === 'POST' && ($request['path'] ?? '') === 'tickets/7002/comments'));
-smoke_assert(count($serverComments) === 1, 'server-disabled comments on found ticket', $failed);
+smoke_assert(count($serverComments) === 1, 'server-disabled comments use visible ticket number', $failed);
+smoke_assert(($server['ticket_comment']['ticket_comment_identifier_type'] ?? '') === 'ticket_number', 'ticket comment helper records visible ticket number identifier type', $failed);
 smoke_assert(count($GLOBALS['smoke_syncro_auto_move_folder_move']) === 1, 'server-disabled does not move server folder', $failed);
 
 if ($failed) {
