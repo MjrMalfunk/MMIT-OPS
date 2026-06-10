@@ -543,19 +543,62 @@ function syncro_auto_move_find_open_ticket(int $customerId, int $assetId, string
 function syncro_auto_move_add_ticket_comment(int $ticketId, string $body): array
 {
     if ($ticketId <= 0) {
-        return ['ok' => true, 'skipped' => true, 'message' => 'No ticket ID available.'];
+        return ['ok' => false, 'skipped' => true, 'message' => 'No numeric ticket ID available.'];
     }
     return syncro_api_request('POST', 'tickets/' . $ticketId . '/comments', [], ['comment' => ['body' => $body, 'hidden' => false]]);
 }
 
+function syncro_auto_move_log_ticket_comment_result(array $context, array $comment): void
+{
+    $eventContext = $context;
+    $eventContext['skipped'] = !empty($comment['skipped']);
+    if (!empty($comment['ok'])) {
+        syncro_auto_move_log('READY_MOVE_TICKET_COMMENT_CREATED', $eventContext);
+        return;
+    }
+
+    $eventContext['errors'] = $comment['errors'] ?? [$comment['message'] ?? 'Ticket comment creation failed.'];
+    syncro_auto_move_log('READY_MOVE_TICKET_COMMENT_FAILED', $eventContext);
+}
+
+function syncro_auto_move_update_asset_properties(int $assetId, array $properties): array
+{
+    return syncro_api_request('PUT', 'customer_assets/' . $assetId, [], ['properties' => $properties]);
+}
+
 function syncro_auto_move_update_completion_fields(int $assetId, string $result, string $completedAt): array
 {
-    return syncro_api_request('PUT', 'customer_assets/' . $assetId, [], [
-        'properties' => [
-            'MMIT Auto Move Result' => $result,
-            'MMIT Onboarding Completed At' => $completedAt,
-        ],
+    return syncro_auto_move_update_asset_properties($assetId, [
+        'MMIT Auto Move Result' => $result,
+        'MMIT Onboarding Completed At' => $completedAt,
     ]);
+}
+
+function syncro_auto_move_update_auto_move_result(int $assetId, string $result): array
+{
+    return syncro_auto_move_update_asset_properties($assetId, ['MMIT Auto Move Result' => $result]);
+}
+
+function syncro_auto_move_backfill_ready_ticket_id(int $clientId, int $syncroCustomerId, int $assetId, string $assetName, int $existingTicketId, int $foundTicketId): array
+{
+    if ($foundTicketId <= 0) {
+        return ['ok' => true, 'skipped' => true, 'reason' => 'no_numeric_found_ticket_id'];
+    }
+    if ($existingTicketId > 0) {
+        return ['ok' => true, 'skipped' => true, 'reason' => 'existing_numeric_ticket_id', 'ticket_id' => $existingTicketId];
+    }
+
+    $update = syncro_auto_move_update_asset_properties($assetId, ['MMIT Ready Move Ticket ID' => (string)$foundTicketId]);
+    if (!empty($update['ok'])) {
+        syncro_auto_move_log('READY_MOVE_TICKET_ID_BACKFILLED', [
+            'client_id' => $clientId,
+            'syncro_customer_id' => $syncroCustomerId,
+            'asset_id' => $assetId,
+            'asset_name' => $assetName,
+            'ticket_id' => $foundTicketId,
+        ]);
+    }
+    return $update + ['ticket_id' => $foundTicketId];
 }
 
 function syncro_auto_move_workstation_candidate(array $asset, array $folderMap): array
@@ -629,7 +672,7 @@ function syncro_auto_move_server_candidate(array $asset, array $folderMap): arra
     ];
 }
 
-function syncro_auto_move_move_workstation(int $syncroCustomerId, array $asset, array $candidate): array
+function syncro_auto_move_move_workstation(int $clientId, int $syncroCustomerId, array $asset, array $candidate): array
 {
     $assetId = (int)$candidate['asset_id'];
     $assetName = (string)$candidate['asset_name'];
@@ -646,9 +689,20 @@ function syncro_auto_move_move_workstation(int $syncroCustomerId, array $asset, 
     $fields = syncro_auto_move_update_completion_fields($assetId, $resultText, $completedAt);
     $ticket = syncro_auto_move_find_open_ticket($syncroCustomerId, $assetId, $assetName, $readyTicketId);
     $ticketComment = ['ok' => true, 'skipped' => true];
+    $ticketIdBackfill = ['ok' => true, 'skipped' => true, 'reason' => 'ticket_not_found'];
+    $ticketId = 0;
     if ($ticket) {
         $ticketId = syncro_auto_move_ticket_id($ticket);
-        $ticketComment = syncro_auto_move_add_ticket_comment($ticketId, $resultText . ' Asset #' . $assetId . ' moved to policy_folder_id #' . $targetFolderId . '.');
+        $ticketIdBackfill = syncro_auto_move_backfill_ready_ticket_id($clientId, $syncroCustomerId, $assetId, $assetName, $readyTicketId, $ticketId);
+        $ticketComment = syncro_auto_move_add_ticket_comment($ticketId, $resultText . ' Asset #' . $assetId . ' moved to Production/Workstations policy_folder_id #' . $targetFolderId . '.');
+        syncro_auto_move_log_ticket_comment_result([
+            'client_id' => $clientId,
+            'syncro_customer_id' => $syncroCustomerId,
+            'asset_id' => $assetId,
+            'asset_name' => $assetName,
+            'ticket_id' => $ticketId,
+            'action' => 'workstation_moved',
+        ], $ticketComment);
     }
 
     return [
@@ -657,8 +711,49 @@ function syncro_auto_move_move_workstation(int $syncroCustomerId, array $asset, 
         'message' => $resultText,
         'move' => $move,
         'field_update' => $fields,
+        'ticket_id_backfill' => $ticketIdBackfill,
         'ticket_comment' => $ticketComment,
         'ticket_found' => $ticket !== null,
+        'ticket_id' => $ticketId,
+    ];
+}
+
+function syncro_auto_move_handle_server_ready_disabled(int $clientId, int $syncroCustomerId, array $asset, array $candidate): array
+{
+    $assetId = (int)$candidate['asset_id'];
+    $assetName = (string)$candidate['asset_name'];
+    $fieldsFromAsset = syncro_extract_asset_custom_fields($asset);
+    $readyTicketId = syncro_auto_move_ready_ticket_id_from_asset($fieldsFromAsset);
+    $resultText = 'Server READY but automatic server move is disabled.';
+    $fieldUpdate = syncro_auto_move_update_auto_move_result($assetId, $resultText);
+    $ticket = syncro_auto_move_find_open_ticket($syncroCustomerId, $assetId, $assetName, $readyTicketId);
+    $ticketComment = ['ok' => true, 'skipped' => true];
+    $ticketIdBackfill = ['ok' => true, 'skipped' => true, 'reason' => 'ticket_not_found'];
+    $ticketId = 0;
+
+    if ($ticket) {
+        $ticketId = syncro_auto_move_ticket_id($ticket);
+        $ticketIdBackfill = syncro_auto_move_backfill_ready_ticket_id($clientId, $syncroCustomerId, $assetId, $assetName, $readyTicketId, $ticketId);
+        $ticketComment = syncro_auto_move_add_ticket_comment($ticketId, $resultText . ' Asset #' . $assetId . ' remains in Deploy/Servers; manual server move is required.');
+        syncro_auto_move_log_ticket_comment_result([
+            'client_id' => $clientId,
+            'syncro_customer_id' => $syncroCustomerId,
+            'asset_id' => $assetId,
+            'asset_name' => $assetName,
+            'ticket_id' => $ticketId,
+            'action' => 'server_ready_move_disabled',
+        ], $ticketComment);
+    }
+
+    return [
+        'ok' => !empty($fieldUpdate['ok']),
+        'status' => 'SERVER_READY_MOVE_DISABLED',
+        'message' => $resultText,
+        'field_update' => $fieldUpdate,
+        'ticket_id_backfill' => $ticketIdBackfill,
+        'ticket_comment' => $ticketComment,
+        'ticket_found' => $ticket !== null,
+        'ticket_id' => $ticketId,
     ];
 }
 
@@ -702,6 +797,12 @@ function syncro_auto_move_process_client(array $client, bool $dryRun): array
         $serverCandidate = syncro_auto_move_server_candidate($asset, $folderMap);
         if (!empty($serverCandidate['ok'])) {
             $summary['servers_ready_disabled']++;
+            $serverResult = $dryRun
+                ? ['ok' => true, 'ticket_found' => false, 'ticket_id' => 0, 'field_update' => ['ok' => true, 'skipped' => true]]
+                : syncro_auto_move_handle_server_ready_disabled($clientId, $syncroCustomerId, $asset, $serverCandidate);
+            if (empty($serverResult['ok'])) {
+                $summary['failures']++;
+            }
             syncro_auto_move_log('SERVER_READY_MOVE_DISABLED', [
                 'client_id' => $clientId,
                 'syncro_customer_id' => $syncroCustomerId,
@@ -709,6 +810,10 @@ function syncro_auto_move_process_client(array $client, bool $dryRun): array
                 'asset_name' => $assetName,
                 'source_folder_id' => $currentFolderId,
                 'target_folder_id' => $serverCandidate['target_folder_id'],
+                'ticket_found' => !empty($serverResult['ticket_found']),
+                'ticket_id' => (int)($serverResult['ticket_id'] ?? 0),
+                'field_update_ok' => !empty($serverResult['field_update']['ok']),
+                'mode' => $dryRun ? 'dry-run' : 'apply',
             ]);
             continue;
         }
@@ -732,7 +837,7 @@ function syncro_auto_move_process_client(array $client, bool $dryRun): array
             continue;
         }
 
-        $move = syncro_auto_move_move_workstation($syncroCustomerId, $asset, $candidate);
+        $move = syncro_auto_move_move_workstation($clientId, $syncroCustomerId, $asset, $candidate);
         if (!empty($move['ok'])) {
             $summary['workstation_moved']++;
             syncro_auto_move_log('MOVED', [
