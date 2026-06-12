@@ -607,22 +607,33 @@ function syncro_auto_move_find_open_ticket(int $customerId, int $assetId, string
 
 function syncro_auto_move_add_ticket_comment(int $ticketId, int $ticketNumber, string $body): array
 {
-    $identifier = $ticketNumber > 0 ? $ticketNumber : $ticketId;
-    $identifierType = $ticketNumber > 0 ? 'ticket_number' : 'ticket_id';
+    // Syncro ticket comments require the internal ticket ID in the endpoint.
+    // The visible ticket number stays human-facing only.
+    $identifier = $ticketId;
+    $identifierType = 'ticket_id';
+
     if ($identifier <= 0) {
-        return ['ok' => false, 'skipped' => true, 'message' => 'No numeric ticket ID or ticket number available.'];
+        return [
+            'ok' => false,
+            'skipped' => true,
+            'message' => 'No numeric internal ticket ID available for ticket comment.',
+            'ticket_comment_identifier' => 0,
+            'ticket_comment_identifier_type' => $identifierType,
+        ];
     }
 
-    $comment = syncro_api_request('POST', 'tickets/' . $identifier . '/comments', [], [
-        'comment' => [
-            'body' => $body,
-            'hidden' => false,
-            'do_not_email' => true,
-        ],
+    $comment = syncro_api_request('POST', 'tickets/' . $identifier . '/comment', [], [
+        'subject' => 'MMIT Auto Move Update',
+        'body' => $body,
+        'hidden' => false,
+        'do_not_email' => true,
     ]);
-    return $comment + ['ticket_comment_identifier' => $identifier, 'ticket_comment_identifier_type' => $identifierType];
-}
 
+    return $comment + [
+        'ticket_comment_identifier' => $identifier,
+        'ticket_comment_identifier_type' => $identifierType,
+    ];
+}
 function syncro_auto_move_log_ticket_comment_result(array $context, array $comment): void
 {
     $eventContext = $context;

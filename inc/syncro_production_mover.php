@@ -995,12 +995,11 @@ function syncro_production_move_update_ticket(?int $ticketId, string $message, b
         return ['ok' => true, 'skipped' => true, 'message' => 'No ready ticket ID supplied.'];
     }
 
-    $comment = syncro_production_move_api_request('POST', 'tickets/' . $ticketId . '/comments', [], [
-        'comment' => [
-            'body' => syncro_production_move_mask_secrets($message),
-            'hidden' => false,
-            'do_not_email' => true,
-        ],
+    $comment = syncro_production_move_api_request('POST', 'tickets/' . $ticketId . '/comment', [], [
+        'subject' => 'MMIT Auto Move Update',
+        'body' => syncro_production_move_mask_secrets($message),
+        'hidden' => false,
+        'do_not_email' => true,
     ]);
     if ($closeTicket && !empty($comment['ok'])) {
         $close = syncro_production_move_api_request('PUT', 'tickets/' . $ticketId, [], ['ticket' => ['status' => 'Resolved']]);
