@@ -835,20 +835,80 @@ function syncro_resolve_custom_field_option_id_for_label(string $fieldName, mixe
     ];
 }
 
+
+function syncro_service_tier_api_write_label(mixed $label): string
+{
+    $display = trim((string)$label);
+    if ($display === '') {
+        return '';
+    }
+
+    foreach (syncro_configured_service_tier_option_ids() as $shortLabel => $optionId) {
+        if ((string)$optionId === $display) {
+            $display = (string)$shortLabel;
+            break;
+        }
+    }
+
+    $key = syncro_normalize_match_text($display);
+    $map = [
+        'manage' => 'Manage IT',
+        'manage it' => 'Manage IT',
+        'manageit' => 'Manage IT',
+        'protect' => 'Protect IT',
+        'protect it' => 'Protect IT',
+        'protectit' => 'Protect IT',
+        'govern' => 'Govern IT',
+        'govern it' => 'Govern IT',
+        'governit' => 'Govern IT',
+    ];
+
+    return $map[$key] ?? '';
+}
+
 function syncro_resolve_service_tier_field_value(mixed $label, ?array $optionDefinitions = null): array
 {
     $serviceTierName = syncro_asset_onboarding_field_names()['service_tier'] ?? 'MMIT Service Tier';
-    $resolved = syncro_resolve_custom_field_option_id_for_label($serviceTierName, $label, $optionDefinitions);
-    if (empty($resolved['ok'])) {
-        syncro_debug_log('service_tier_option_id_unresolved', [
-            'field' => $serviceTierName,
-            'requested_label' => (string)$label,
-            'source' => (string)($resolved['source'] ?? 'unresolved_option_id'),
-            'available_option_maps' => $resolved['available_option_maps'] ?? [],
-            'message' => 'MMIT Service Tier is dropdown-based; refusing to send raw label text without a Syncro option ID.',
-        ]);
-        $resolved['error'] = 'Unable to resolve Syncro option ID for MMIT Service Tier "' . trim((string)$label) . '"; refusing to send raw label text to dropdown field.';
+    $display = trim((string)$label);
+    $writeLabel = syncro_service_tier_api_write_label($label);
+
+    if ($writeLabel !== '') {
+        $optionId = '';
+        foreach (syncro_configured_service_tier_option_ids() as $shortLabel => $configuredOptionId) {
+            if (syncro_service_tier_api_write_label($shortLabel) === $writeLabel) {
+                $optionId = (string)$configuredOptionId;
+                break;
+            }
+        }
+
+        return [
+            'ok' => true,
+            'value' => $writeLabel,
+            'display' => $writeLabel,
+            'source' => 'service_tier_write_label',
+            'option_id' => $optionId,
+        ];
     }
+
+    $resolved = [
+        'ok' => false,
+        'value' => null,
+        'display' => $display,
+        'source' => 'unresolved_service_tier_write_label',
+        'field_key' => syncro_normalize_match_text($serviceTierName),
+        'available_option_maps' => syncro_custom_field_option_map_summary(syncro_configured_custom_field_option_definitions()),
+    ];
+
+    syncro_debug_log('service_tier_write_label_unresolved', [
+        'field' => $serviceTierName,
+        'requested_label' => (string)$label,
+        'source' => $resolved['source'],
+        'available_option_maps' => $resolved['available_option_maps'],
+        'message' => 'MMIT Service Tier is dropdown-based; Syncro requires the exact dropdown label on write.',
+    ]);
+
+    $resolved['error'] = 'Unable to resolve writable Syncro label for MMIT Service Tier "' . $display . '". Expected Manage/Manage IT, Protect/Protect IT, or Govern/Govern IT.';
+
     return $resolved;
 }
 
@@ -919,11 +979,27 @@ function syncro_update_customer_asset_onboarding_fields(int $assetId, array $fie
     if ($assetId <= 0) {
         return ['ok' => false, 'errors' => ['Asset ID is required to stamp Syncro onboarding fields.']];
     }
+
     $fields = array_filter($fields, static fn($value): bool => $value !== null);
     if (!$fields) {
         return ['ok' => true, 'skipped' => true];
     }
-    return syncro_api_request('PUT', 'customer_assets/' . $assetId, [], ['properties' => $fields]);
+
+    $prepared = syncro_prepare_asset_onboarding_api_field_payload($fields);
+    $apiFields = array_filter((array)($prepared['fields'] ?? []), static fn($value): bool => $value !== null);
+
+    if (!$apiFields) {
+        return [
+            'ok' => true,
+            'skipped' => true,
+            'value_sources' => $prepared['value_sources'] ?? [],
+        ];
+    }
+
+    $response = syncro_api_request('PUT', 'customer_assets/' . $assetId, [], ['properties' => $apiFields]);
+    $response['value_sources'] = $prepared['value_sources'] ?? [];
+
+    return $response;
 }
 
 function syncro_fetch_customer_asset(int $assetId): array
