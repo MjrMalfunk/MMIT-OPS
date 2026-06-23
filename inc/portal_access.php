@@ -678,19 +678,29 @@ function portal_access_security_snapshot(): array
 
 function portal_access_portal_base_url(): string
 {
+    $configured = '';
+
+    if (defined('CLIENT_PORTAL_BASE_URL')) {
+        $configured = trim((string) CLIENT_PORTAL_BASE_URL);
+    } elseif (defined('PORTAL_BASE_URL')) {
+        $configured = trim((string) PORTAL_BASE_URL);
+    }
+
+    if ($configured !== '') {
+        return rtrim($configured, '/');
+    }
+
     $base = rtrim((string) BASE_URL, '/');
-    $parts = parse_url($base);
-    $scheme = (string) ($parts['scheme'] ?? 'https');
-    $host = strtolower((string) ($parts['host'] ?? ''));
-    if ($host !== '' && str_starts_with($host, 'ops.')) {
-        $host = 'portal.' . substr($host, 4);
-    }
-    if ($host === '') {
-        return $base;
-    }
-    $port = isset($parts['port']) ? (':' . (int) $parts['port']) : '';
-    return $scheme . '://' . $host . $port;
+    $host = strtolower((string) parse_url($base, PHP_URL_HOST));
+    $scheme = (string) (parse_url($base, PHP_URL_SCHEME) ?: 'https');
+
+    return match ($host) {
+        'ops-test.midwestmanagedit.com' => 'https://portal-test.midwestmanagedit.com',
+        'ops.midwestmanagedit.com' => 'https://portal.midwestmanagedit.com',
+        default => $scheme . '://' . preg_replace('/^ops(-test)?\./', 'portal$1.', $host),
+    };
 }
+
 
 function portal_access_safe_next_path(?string $next, string $default = '/client-preview.php'): string
 {
