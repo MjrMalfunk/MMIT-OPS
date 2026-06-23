@@ -2922,6 +2922,53 @@ function syncro_attempt_existing_customer_link(int $clientId, array $payload): a
     return syncro_attach_folder_provisioning_result(['ok' => true, 'syncro_customer_id' => $syncroId, 'action' => 'relinked', 'status' => 'SYNCED', 'message' => $message], $clientId, $syncroId);
 }
 
+
+function syncro_manual_link_existing_customer(int $clientId, int $syncroCustomerId, bool $provisionFolders = true): array
+{
+    if ($clientId <= 0) {
+        return ['ok' => false, 'errors' => ['Invalid OPS client ID.'], 'status' => 'ERROR'];
+    }
+
+    if ($syncroCustomerId <= 0) {
+        return ['ok' => false, 'errors' => ['Enter a valid Syncro customer ID.'], 'status' => 'ERROR'];
+    }
+
+    $validation = syncro_validate_existing_customer_link($syncroCustomerId);
+    if (empty($validation['ok'])) {
+        $errors = (array)($validation['errors'] ?? ['Unable to validate the Syncro customer ID.']);
+        return [
+            'ok' => false,
+            'errors' => $errors,
+            'status' => 'ERROR',
+            'syncro_customer_id' => $syncroCustomerId,
+        ];
+    }
+
+    syncro_mark_client($clientId, $syncroCustomerId, 'SYNCED', '');
+
+    $message = 'Manually linked to existing Syncro customer #' . $syncroCustomerId . '.';
+    $result = [
+        'ok' => true,
+        'syncro_customer_id' => $syncroCustomerId,
+        'action' => 'manual_link',
+        'status' => 'SYNCED',
+        'message' => $message,
+    ];
+
+    if ($provisionFolders) {
+        $provisioned = syncro_attach_folder_provisioning_result($result, $clientId, $syncroCustomerId);
+        if (!empty($provisioned['message'])) {
+            $provisioned['message'] = $message . ' ' . (string)$provisioned['message'];
+        } else {
+            $provisioned['message'] = $message;
+        }
+        return $provisioned;
+    }
+
+    return $result;
+}
+
+
 function syncro_action_success_message(?string $action): string
 {
     return match (strtolower(trim((string)$action))) {

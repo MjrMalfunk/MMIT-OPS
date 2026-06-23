@@ -35,7 +35,15 @@ if (!empty($_SESSION['flash_error'])) {
 }
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = (string)($_POST['action'] ?? '');
-    if ($action === 'retry_syncro') {
+    if ($action === 'manual_syncro_link') {
+        $manualSyncroCustomerId = (int)($_POST['syncro_customer_id'] ?? 0);
+        $result = syncro_manual_link_existing_customer($clientId, $manualSyncroCustomerId, true);
+        if (!empty($result['ok'])) {
+            $_SESSION['flash_msg'] = (string)($result['message'] ?? ('Manually linked to Syncro customer #' . $manualSyncroCustomerId . '.'));
+        } else {
+            $_SESSION['flash_error'] = implode(' ', array_map('strval', (array)($result['errors'] ?? ['Unable to manually link Syncro customer.'])));
+        }
+    } elseif ($action === 'retry_syncro') {
         $result = syncro_sync_client($clientId);
         if (!empty($result['ok'])) {
             $_SESSION['flash_msg'] = (string)($result['message'] ?? syncro_action_success_message((string)($result['action'] ?? '')));
@@ -105,7 +113,22 @@ page_header((string)$client['legal_name'], 'clients');
         <button class="btn btn-danger" style="width:auto;padding:9px 12px;" type="submit">Clear stale link &amp; retry</button>
       </form>
       <?php endif; ?>
-      <form method="post" style="margin:0;">
+      <form method="post" style="margin:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;" onsubmit="return confirm('Validate and manually link this OPS client to the entered Syncro customer ID? OPS will not delete anything in Syncro.');">
+        <?= csrf_field() ?>
+        <input type="hidden" name="action" value="manual_syncro_link">
+        <input
+          type="number"
+          name="syncro_customer_id"
+          min="1"
+          step="1"
+          inputmode="numeric"
+          value="<?= !empty($client['syncro_customer_id']) ? (int)$client['syncro_customer_id'] : '' ?>"
+          placeholder="Syncro customer ID"
+          style="width:190px;max-width:100%;padding:9px 10px;border-radius:10px;border:1px solid rgba(148,163,184,.35);background:rgba(15,23,42,.55);color:inherit;"
+        >
+        <button class="btn btn-secondary" style="width:auto;padding:9px 12px;" type="submit">Validate &amp; link Syncro ID</button>
+      </form>
+      <form method="post" style="margin:0;" onsubmit="return confirm('Retry automatic Syncro matching? If multiple customers match, OPS may return this client to manual review. Use manual link if you already know the correct customer ID.');">
         <?= csrf_field() ?>
         <input type="hidden" name="action" value="retry_syncro">
         <button class="btn btn-primary" style="width:auto;padding:9px 12px;" type="submit">Retry Syncro sync</button>
