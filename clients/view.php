@@ -64,6 +64,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $_SESSION['flash_error'] = implode(' ', array_map('strval', (array)($result['errors'] ?? ['Unable to retry Syncro folder provisioning.'])));
         }
+    } elseif ($action === 'update_portal_backup_visibility') {
+        $mode = strtolower(trim((string)($_POST['portal_backup_visibility_mode'] ?? 'contract')));
+        $allowedModes = ['contract', 'enabled', 'disabled'];
+        $note = trim((string)($_POST['portal_backup_visibility_note'] ?? ''));
+
+        if (!in_array($mode, $allowedModes, true)) {
+            $_SESSION['flash_error'] = 'Invalid portal backup visibility mode.';
+        } else {
+            if (strlen($note) > 255) {
+                $note = substr($note, 0, 255);
+            }
+
+            $stmt = db()->prepare("
+                UPDATE clients
+                SET
+                    portal_backup_visibility_mode = ?,
+                    portal_backup_visibility_note = ?,
+                    portal_backup_visibility_updated_at = NOW(),
+                    updated_at = NOW()
+                WHERE client_id = ?
+                LIMIT 1
+            ");
+            $stmt->execute([$mode, $note !== '' ? $note : null, $clientId]);
+
+            $_SESSION['flash_msg'] = 'Portal backup visibility updated.';
+        }
     } else {
         $_SESSION['flash_error'] = 'Unknown client action.';
     }
@@ -155,6 +181,56 @@ page_header((string)$client['legal_name'], 'clients');
   <?php endif; ?>
   <div style="margin-top:12px;font-size:12px;opacity:.72;line-height:1.45;">Manual verification reference: TEST-Cravin Vapes observed Deploy/Workstations as 5029166 and Production/Workstations as 5029170; the workstation finalizer moved MANAGE-WS-01 and MANAGE-WS-02 when those IDs were configured.</div>
 </div>
+<?php
+$portalBackupVisibilityMode = strtolower((string)($client['portal_backup_visibility_mode'] ?? 'contract'));
+if (!in_array($portalBackupVisibilityMode, ['contract', 'enabled', 'disabled'], true)) {
+    $portalBackupVisibilityMode = 'contract';
+}
+$portalBackupVisibilityNote = (string)($client['portal_backup_visibility_note'] ?? '');
+$portalBackupVisibilityUpdatedAt = (string)($client['portal_backup_visibility_updated_at'] ?? '');
+?>
+<div class="card" style="padding:16px;margin:18px 0;border:1px solid rgba(15,23,42,.12);">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+    <div>
+      <h2 style="margin:0;font-size:20px;">Portal backup visibility</h2>
+      <div style="opacity:.74;line-height:1.45;">Admin-only client portal override. Use this for internal/test accounts or approved one-off backup visibility without creating fake recurring contract revenue.</div>
+      <?php if ($portalBackupVisibilityUpdatedAt !== ''): ?><div style="font-size:12px;opacity:.62;margin-top:6px;">Last updated <?= htmlspecialchars($portalBackupVisibilityUpdatedAt) ?></div><?php endif; ?>
+    </div>
+  </div>
+
+  <form method="post" style="display:grid;grid-template-columns:minmax(180px,240px) minmax(240px,1fr) auto;gap:10px;align-items:end;">
+    <?= csrf_field() ?>
+    <input type="hidden" name="action" value="update_portal_backup_visibility">
+
+    <label style="display:grid;gap:6px;font-weight:700;">
+      <span>Visibility mode</span>
+      <select name="portal_backup_visibility_mode" style="padding:10px;border-radius:10px;border:1px solid rgba(148,163,184,.35);background:rgba(15,23,42,.55);color:inherit;">
+        <option value="contract" <?= $portalBackupVisibilityMode === 'contract' ? 'selected' : '' ?>>Contract controlled</option>
+        <option value="enabled" <?= $portalBackupVisibilityMode === 'enabled' ? 'selected' : '' ?>>Manual enabled</option>
+        <option value="disabled" <?= $portalBackupVisibilityMode === 'disabled' ? 'selected' : '' ?>>Manual disabled</option>
+      </select>
+    </label>
+
+    <label style="display:grid;gap:6px;font-weight:700;">
+      <span>Internal note</span>
+      <input
+        type="text"
+        name="portal_backup_visibility_note"
+        maxlength="255"
+        value="<?= htmlspecialchars($portalBackupVisibilityNote) ?>"
+        placeholder="Example: Internal MMIT/LnK test account"
+        style="padding:10px;border-radius:10px;border:1px solid rgba(148,163,184,.35);background:rgba(15,23,42,.55);color:inherit;"
+      >
+    </label>
+
+    <button class="btn btn-secondary" style="width:auto;padding:10px 14px;" type="submit">Save backup visibility</button>
+  </form>
+
+  <div style="margin-top:10px;font-size:12px;opacity:.72;line-height:1.45;">
+    Contract controlled uses the normal service entitlement rules. Manual enabled allows legitimate mapped backup data to appear in the client portal without creating a fake contract. Manual disabled forces backup visibility off.
+  </div>
+</div>
+
 <hr>
 <div style="display:flex;gap:20px;flex-wrap:wrap;">
   <div style="flex:1;min-width:280px;">
