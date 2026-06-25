@@ -68,8 +68,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $mode = strtolower(trim((string)($_POST['portal_backup_visibility_mode'] ?? 'contract')));
         $allowedModes = ['contract', 'enabled', 'disabled'];
         $note = trim((string)($_POST['portal_backup_visibility_note'] ?? ''));
+        $quotaRaw = trim((string)($_POST['portal_backup_storage_quota_gb'] ?? ''));
+        $quotaGb = null;
 
-        if (!in_array($mode, $allowedModes, true)) {
+        if ($quotaRaw !== '') {
+            $quotaGb = (float)preg_replace('/[^0-9.]/', '', $quotaRaw);
+            if ($quotaGb <= 0) {
+                $_SESSION['flash_error'] = 'Backup storage allotment must be a positive number of GB, or left blank.';
+                $quotaGb = null;
+            }
+        }
+
+        if (!empty($_SESSION['flash_error'])) {
+            // Keep the error and skip the update.
+        } elseif (!in_array($mode, $allowedModes, true)) {
             $_SESSION['flash_error'] = 'Invalid portal backup visibility mode.';
         } else {
             if (strlen($note) > 255) {
@@ -81,12 +93,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 SET
                     portal_backup_visibility_mode = ?,
                     portal_backup_visibility_note = ?,
+                    portal_backup_storage_quota_gb = ?,
                     portal_backup_visibility_updated_at = NOW(),
                     updated_at = NOW()
                 WHERE client_id = ?
                 LIMIT 1
             ");
-            $stmt->execute([$mode, $note !== '' ? $note : null, $clientId]);
+            $stmt->execute([$mode, $note !== '' ? $note : null, $quotaGb, $clientId]);
 
             $_SESSION['flash_msg'] = 'Portal backup visibility updated.';
         }
@@ -187,6 +200,8 @@ if (!in_array($portalBackupVisibilityMode, ['contract', 'enabled', 'disabled'], 
     $portalBackupVisibilityMode = 'contract';
 }
 $portalBackupVisibilityNote = (string)($client['portal_backup_visibility_note'] ?? '');
+$portalBackupStorageQuotaGb = $client['portal_backup_storage_quota_gb'] ?? null;
+$portalBackupStorageQuotaValue = $portalBackupStorageQuotaGb !== null && $portalBackupStorageQuotaGb !== '' ? rtrim(rtrim(number_format((float)$portalBackupStorageQuotaGb, 2, '.', ''), '0'), '.') : '';
 $portalBackupVisibilityUpdatedAt = (string)($client['portal_backup_visibility_updated_at'] ?? '');
 ?>
 <div class="card" style="padding:16px;margin:18px 0;border:1px solid rgba(15,23,42,.12);">
@@ -198,7 +213,7 @@ $portalBackupVisibilityUpdatedAt = (string)($client['portal_backup_visibility_up
     </div>
   </div>
 
-  <form method="post" style="display:grid;grid-template-columns:minmax(180px,240px) minmax(240px,1fr) auto;gap:10px;align-items:end;">
+  <form method="post" style="display:grid;grid-template-columns:minmax(180px,240px) minmax(180px,240px) minmax(240px,1fr) auto;gap:10px;align-items:end;">
     <?= csrf_field() ?>
     <input type="hidden" name="action" value="update_portal_backup_visibility">
 
@@ -209,6 +224,20 @@ $portalBackupVisibilityUpdatedAt = (string)($client['portal_backup_visibility_up
         <option value="enabled" <?= $portalBackupVisibilityMode === 'enabled' ? 'selected' : '' ?>>Manual enabled</option>
         <option value="disabled" <?= $portalBackupVisibilityMode === 'disabled' ? 'selected' : '' ?>>Manual disabled</option>
       </select>
+    </label>
+
+    <label style="display:grid;gap:6px;font-weight:700;">
+      <span>Storage allotment GB</span>
+      <input
+        type="number"
+        name="portal_backup_storage_quota_gb"
+        min="0"
+        step="0.01"
+        inputmode="decimal"
+        value="<?= htmlspecialchars($portalBackupStorageQuotaValue) ?>"
+        placeholder="250"
+        style="padding:10px;border-radius:10px;border:1px solid rgba(148,163,184,.35);background:rgba(15,23,42,.55);color:inherit;"
+      >
     </label>
 
     <label style="display:grid;gap:6px;font-weight:700;">
@@ -227,7 +256,7 @@ $portalBackupVisibilityUpdatedAt = (string)($client['portal_backup_visibility_up
   </form>
 
   <div style="margin-top:10px;font-size:12px;opacity:.72;line-height:1.45;">
-    Contract controlled uses the normal service entitlement rules. Manual enabled allows legitimate mapped backup data to appear in the client portal without creating a fake contract. Manual disabled forces backup visibility off.
+    Contract controlled uses the normal service entitlement rules. Manual enabled allows legitimate mapped backup data to appear in the client portal without creating a fake contract. Storage allotment is optional and powers the client-facing usage meter. Manual disabled forces backup visibility off.
   </div>
 </div>
 
