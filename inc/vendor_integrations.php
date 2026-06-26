@@ -287,3 +287,180 @@ function vendor_device_status_for_client(int $clientId, ?string $vendorCode = nu
 
     return $st->fetchAll(PDO::FETCH_ASSOC);
 }
+
+function vendor_telemetry_bytes_label(int|string|null $bytes): string
+{
+    $value = max(0, (float) ($bytes ?? 0));
+    if ($value <= 0) {
+        return '0 B';
+    }
+
+    $units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    $power = min((int) floor(log($value, 1024)), count($units) - 1);
+    $scaled = $value / (1024 ** $power);
+    $precision = $scaled >= 100 || $power === 0 ? 0 : ($scaled >= 10 ? 1 : 2);
+
+    return number_format($scaled, $precision) . ' ' . $units[$power];
+}
+
+function vendor_telemetry_list_integrations(): array
+{
+    $stmt = db()->query("
+        SELECT
+            vi.*,
+            COALESCE(link_counts.link_count, 0) AS linked_clients,
+            COALESCE(device_counts.device_count, 0) AS cached_devices,
+            latest_run.started_at AS latest_run_started_at,
+            latest_run.finished_at AS latest_run_finished_at,
+            latest_run.status AS latest_run_status,
+            latest_run.message AS latest_run_message
+        FROM vendor_integrations vi
+        LEFT JOIN (
+            SELECT vendor_code, COUNT(*) AS link_count
+            FROM vendor_client_links
+            GROUP BY vendor_code
+        ) link_counts ON link_counts.vendor_code = vi.vendor_code
+        LEFT JOIN (
+            SELECT vendor_code, COUNT(*) AS device_count
+            FROM vendor_device_status
+            GROUP BY vendor_code
+        ) device_counts ON device_counts.vendor_code = vi.vendor_code
+        LEFT JOIN vendor_sync_runs latest_run
+            ON latest_run.run_id = (
+                SELECT vsr.run_id
+                FROM vendor_sync_runs vsr
+                WHERE vsr.vendor_code = vi.vendor_code
+                ORDER BY vsr.started_at DESC, vsr.run_id DESC
+                LIMIT 1
+            )
+        ORDER BY vi.display_name, vi.vendor_code
+    ");
+
+    return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+}
+
+function vendor_telemetry_list_client_links(int $limit = 100): array
+{
+    $limit = max(1, min(500, $limit));
+
+    $stmt = db()->prepare("
+        SELECT
+            vcl.*,
+            c.legal_name,
+            c.dba_name,
+            c.client_code,
+            c.status AS client_status,
+            COALESCE(device_counts.device_count, 0) AS cached_devices,
+            device_counts.latest_success_at,
+            device_counts.latest_synced_at,
+            device_counts.storage_used_bytes
+        FROM vendor_client_links vcl
+        INNER JOIN clients c ON c.client_id = vcl.client_id
+        LEFT JOIN (
+            SELECT
+                client_id,
+                vendor_code,
+                COUNT(*) AS device_count,
+                MAX(last_success_at) AS latest_success_at,
+                MAX(synced_at) AS latest_synced_at,
+                SUM(COALESCE(storage_used_bytes, 0)) AS storage_used_bytes
+            FROM vendor_device_status
+            GROUP BY client_id, vendor_code
+        ) device_counts
+            ON device_counts.client_id = vcl.client_id
+            AND device_counts.vendor_code = vcl.vendor_code
+        ORDER BY vcl.vendor_code, c.legal_name, vcl.vendor_org_name
+        LIMIT {$limit}
+    ");
+    $stmt->execute();
+
+    return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+}
+
+function vendor_telemetry_list_device_statuses(int $limit = 200): array
+{
+    $limit = max(1, min(1000, $limit));
+
+    $stmt = db()->prepare("
+        SELECT
+            vds.*,
+            c.legal_name,
+            c.dba_name,
+            c.client_code,
+            vcl.vendor_org_name,
+            vcl.link_status,
+            vi.display_name AS vendor_display_name
+        FROM vendor_device_status vds
+        INNER JOIN clients c ON c.client_id = vds.client_id
+        LEFT JOIN vendor_client_links vcl
+            ON vcl.client_id = vds.client_id
+            AND vcl.vendor_code = vds.vendor_code
+        LEFT JOIN vendor_integrations vi
+            ON vi.vendor_code = vds.vendor_code
+        ORDER BY vds.synced_at DESC, vds.vendor_code, c.legal_name, vds.device_name
+        LIMIT {$limit}
+    ");
+    $stmt->execute();
+
+    return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+}
+
+function vendor_telemetry_list_sync_runs(int $limit = 50): array
+{
+    $limit = max(1, min(250, $limit));
+
+    $stmt = db()->prepare("
+        SELECT
+            vsr.*,
+            vi.display_name AS vendor_display_name
+        FROM vendor_sync_runs vsr
+        LEFT JOIN vendor_integrations vi
+            ON vi.vendor_code = vsr.vendor_code
+        ORDER BY vsr.started_at DESC, vsr.run_id DESC
+        LIMIT {$limit}
+    ");
+    $stmt->execute();
+
+    return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+}
+
+function vendor_telemetry_dashboard_snapshot(): array
+{
+    $integrations = vendor_telemetry_list_integrations();
+    $clientLinks = vendor_telemetry_list_client_links();
+    $deviceStatuses = vendor_telemetry_list_device_statuses();
+    $syncRuns = vendor_telemetry_list_sync_runs();
+
+    $healthyDevices = 0;
+    $attentionDevices = 0;
+    $storageBytes = 0;
+
+    foreach ($deviceStatuses as $row) {
+        $status = strtoupper(trim((string) ($row['status'] ?? $row['status_label'] ?? '')));
+        if (in_array($status, ['COMPLETED', 'SUCCESS', 'OK', 'REPORTED'], true)) {
+            $healthyDevices++;
+        } else {
+            $attentionDevices++;
+        }
+
+        $storageBytes += max(0, (int) ($row['storage_used_bytes'] ?? 0));
+    }
+
+    return [
+        'integrations' => $integrations,
+        'client_links' => $clientLinks,
+        'device_statuses' => $deviceStatuses,
+        'sync_runs' => $syncRuns,
+        'summary' => [
+            'integrations' => count($integrations),
+            'enabled_integrations' => count(array_filter($integrations, static fn(array $row): bool => (int) ($row['enabled'] ?? 0) === 1)),
+            'client_links' => count($clientLinks),
+            'cached_devices' => count($deviceStatuses),
+            'healthy_devices' => $healthyDevices,
+            'attention_devices' => $attentionDevices,
+            'storage_used_bytes' => $storageBytes,
+            'storage_used_label' => vendor_telemetry_bytes_label($storageBytes),
+        ],
+    ];
+}
+

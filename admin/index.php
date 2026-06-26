@@ -49,6 +49,16 @@ page_header('Admin', 'admin');
     </section>
 
     <section class="card admin-card">
+      <div style="opacity:.72;text-transform:uppercase;letter-spacing:.08em;font-size:12px;">Vendor telemetry</div>
+      <h2 style="margin:10px 0 10px;">Integration cockpit</h2>
+      <p class="admin-card-copy">Read-only view of vendor integrations, client mappings, sync runs, and cached device status currently safe for portal visibility.</p>
+      <div class="admin-card-actions">
+        <a class="btn btn-secondary btn-inline" style="text-decoration:none;" href="<?= htmlspecialchars(BASE_URL) ?>/admin/vendor_telemetry.php">Open vendor telemetry</a>
+      </div>
+    </section>
+
+
+    <section class="card admin-card">
       <div style="opacity:.72;text-transform:uppercase;letter-spacing:.08em;font-size:12px;">Go-live</div>
       <h2 style="margin:10px 0 10px;">Controlled maintenance</h2>
       <p class="admin-card-copy">High-impact cleanup still lives behind a recent MFA step-up, exactly where the sharp knives belong.</p>
