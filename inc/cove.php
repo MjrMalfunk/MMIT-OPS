@@ -181,14 +181,24 @@ function cove_enumerate_account_statistics(string $visa, int $partnerId, int $st
     }
 
     $columns = $columns ?: [
-        'I0',  // Device ID
-        'I1',  // Device name
-        'I8',  // Customer
-        'I14', // Used storage bytes
-        'I16', // OS version
-        'I18', // Computer name
-        'I32', // OS type: 1 workstation, 2 server
-        'I78', // Active data sources
+        'I0',     // Device ID
+        'I1',     // Device name
+        'I8',     // Customer
+        'I10',    // Product
+        'I14',    // Used storage bytes
+        'I16',    // OS version
+        'I17',    // Client version
+        'I18',    // Computer name
+        'I32',    // OS type: 1 workstation, 2 server
+        'I36',    // Storage status
+        'I78',    // Active data sources
+        'D09F06', // Error count
+        'D09F09', // Last successful timestamp
+        'D09F12', // Duration minutes
+        'D09F15', // Last completed timestamp fallback
+        'D09F16', // Last successful status
+        'D09F17', // Last completed status
+        'D09F18', // Last completed timestamp
     ];
 
     return cove_jsonrpc_request('EnumerateAccountStatistics', [
