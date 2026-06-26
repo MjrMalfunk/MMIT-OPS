@@ -185,3 +185,13 @@ define('COVE_PARTNER_NAME', '');
 define('COVE_USERNAME', '');
 define('COVE_PASSWORD', '');
 define('COVE_DEFAULT_PARTNER_ID', 0);
+
+/*
+|--------------------------------------------------------------------------
+| Huntress REST API
+|--------------------------------------------------------------------------
+| Store real API credentials only in private config/vault.
+*/
+define('HUNTRESS_API_BASE_URL', 'https://api.huntress.io/v1');
+define('HUNTRESS_API_KEY', '');
+define('HUNTRESS_API_SECRET', '');
