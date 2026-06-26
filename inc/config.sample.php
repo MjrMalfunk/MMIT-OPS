@@ -172,3 +172,16 @@ define('MAIL_SMTP_NOREPLY_USERNAME', 'noreply@midwestmanagedit.com');
 define('MAIL_SMTP_NOREPLY_PASSWORD', '');
 define('MAIL_SMTP_USERNAME', '');
 define('MAIL_SMTP_PASSWORD', '');
+
+/*
+|--------------------------------------------------------------------------
+| N-able Cove Data Protection JSON-RPC API
+|--------------------------------------------------------------------------
+| Store real values only in /home/mjrmstlj/private/ops/secrets*.php.
+| Do not commit live credentials.
+*/
+define('COVE_JSONRPC_URL', '');
+define('COVE_PARTNER_NAME', '');
+define('COVE_USERNAME', '');
+define('COVE_PASSWORD', '');
+define('COVE_DEFAULT_PARTNER_ID', 0);
