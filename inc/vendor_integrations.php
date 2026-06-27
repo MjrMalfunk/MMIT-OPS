@@ -437,7 +437,7 @@ function vendor_telemetry_dashboard_snapshot(): array
 
     foreach ($deviceStatuses as $row) {
         $status = strtoupper(trim((string) ($row['status'] ?? $row['status_label'] ?? '')));
-        if (in_array($status, ['COMPLETED', 'SUCCESS', 'OK', 'REPORTED'], true)) {
+        if (in_array($status, ['ACTIVE', 'COMPLETED', 'COMPLETE', 'SUCCESS', 'OK', 'HEALTHY', 'PROTECTED', 'REPORTED', 'SYNCED'], true)) {
             $healthyDevices++;
         } else {
             $attentionDevices++;
