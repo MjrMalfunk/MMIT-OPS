@@ -101,9 +101,12 @@ function huntress_sync_normalize_agent(array $agent, array $orgNamesById): array
         'status_detail' => huntress_sync_status_detail($agent),
         'last_seen_at' => $lastSeen,
         'last_success_at' => $lastSeen,
-        'raw' => [
-            'agent' => $agent,
+        'raw_summary' => [
+            'source' => 'huntress_agents',
+            'organization_id' => $orgId,
             'organization_name' => $orgName,
+            'platform' => $agent['platform'] ?? null,
+            'has_defender_status' => trim((string)($agent['defender_status'] ?? '')) !== '',
         ],
     ];
 }

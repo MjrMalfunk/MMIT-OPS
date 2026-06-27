@@ -211,25 +211,30 @@ function vendor_device_status_upsert(int $clientId, string $vendorCode, array $d
 
     $st = db()->prepare(
         'INSERT INTO vendor_device_status
-            (client_id, vendor_code, vendor_org_id, vendor_device_id, syncro_asset_id, device_name,
-             normalized_device_key, device_role, status, status_label, status_detail, last_seen_at,
-             last_success_at, storage_used_bytes, storage_quota_bytes, raw_json, synced_at)
+            (client_id, vendor_code, vendor_org_id, vendor_device_id, syncro_customer_id, syncro_asset_id, device_name,
+             username, os_name, normalized_device_key, device_role, status, status_label, status_detail,
+             protection_enabled, last_seen_at, last_success_at, storage_used_bytes, storage_quota_bytes, raw_summary_json, raw_json, synced_at)
          VALUES
-            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
             client_id = VALUES(client_id),
             vendor_org_id = VALUES(vendor_org_id),
+            syncro_customer_id = VALUES(syncro_customer_id),
             syncro_asset_id = VALUES(syncro_asset_id),
             device_name = VALUES(device_name),
+            username = VALUES(username),
+            os_name = VALUES(os_name),
             normalized_device_key = VALUES(normalized_device_key),
             device_role = VALUES(device_role),
             status = VALUES(status),
             status_label = VALUES(status_label),
             status_detail = VALUES(status_detail),
+            protection_enabled = VALUES(protection_enabled),
             last_seen_at = VALUES(last_seen_at),
             last_success_at = VALUES(last_success_at),
             storage_used_bytes = VALUES(storage_used_bytes),
             storage_quota_bytes = VALUES(storage_quota_bytes),
+            raw_summary_json = VALUES(raw_summary_json),
             raw_json = VALUES(raw_json),
             synced_at = VALUES(synced_at),
             updated_at = CURRENT_TIMESTAMP'
@@ -240,17 +245,22 @@ function vendor_device_status_upsert(int $clientId, string $vendorCode, array $d
         $vendor,
         vendor_telemetry_truncate((string)($data['vendor_org_id'] ?? ''), 120),
         vendor_telemetry_truncate($vendorDeviceId, 160),
+        isset($data['syncro_customer_id']) && (int)$data['syncro_customer_id'] > 0 ? (int)$data['syncro_customer_id'] : null,
         isset($data['syncro_asset_id']) && (int)$data['syncro_asset_id'] > 0 ? (int)$data['syncro_asset_id'] : null,
         vendor_telemetry_truncate($deviceName, 200) ?? $deviceName,
+        vendor_telemetry_truncate((string)($data['username'] ?? ''), 160),
+        vendor_telemetry_truncate((string)($data['os_name'] ?? ''), 200),
         vendor_telemetry_truncate($normalizedKey, 220) ?? $normalizedKey,
         vendor_telemetry_truncate((string)($data['device_role'] ?? ''), 40),
         vendor_telemetry_truncate((string)($data['status'] ?? 'UNKNOWN'), 40) ?? 'UNKNOWN',
         vendor_telemetry_truncate((string)($data['status_label'] ?? ''), 120),
         vendor_telemetry_truncate((string)($data['status_detail'] ?? '')),
+        array_key_exists('protection_enabled', $data) ? ($data['protection_enabled'] === null ? null : ((bool)$data['protection_enabled'] ? 1 : 0)) : null,
         $data['last_seen_at'] ?? null,
         $data['last_success_at'] ?? null,
         isset($data['storage_used_bytes']) ? max(0, (int)$data['storage_used_bytes']) : null,
         isset($data['storage_quota_bytes']) ? max(0, (int)$data['storage_quota_bytes']) : null,
+        vendor_telemetry_json($data['raw_summary'] ?? ($data['raw'] ?? null)),
         vendor_telemetry_json($data['raw'] ?? null),
         $data['synced_at'] ?? vendor_telemetry_now(),
     ]);
