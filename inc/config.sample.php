@@ -202,5 +202,5 @@ define('HUNTRESS_API_SECRET', '');
 |--------------------------------------------------------------------------
 | Store real API tokens only in private config/vault.
 */
-define('SCOUTDNS_API_BASE_URL', 'https://api.scoutdns.com/v1');
+define('SCOUTDNS_API_BASE_URL', 'https://api.scoutdns.com/app/');
 define('SCOUTDNS_API_TOKEN', '');
