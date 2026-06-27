@@ -204,3 +204,18 @@ define('HUNTRESS_API_SECRET', '');
 */
 define('SCOUTDNS_API_BASE_URL', 'https://api.scoutdns.com/v1');
 define('SCOUTDNS_API_TOKEN', '');
+
+/*
+|--------------------------------------------------------------------------
+| Field Nation REST API (read-only discovery)
+|--------------------------------------------------------------------------
+| Store real tokens only in private config/vault. Phase 0 uses bearer auth
+| for read-only GET discovery only; OAuth placeholders are intentionally blank.
+*/
+define('FIELDNATION_API_BASE_URL', 'https://api.fieldnation.com/api/rest/v2');
+define('FIELDNATION_AUTH_MODE', 'bearer');
+define('FIELDNATION_API_TOKEN', '');
+define('FIELDNATION_ACCESS_TOKEN', '');
+define('FIELDNATION_REFRESH_TOKEN', '');
+define('FIELDNATION_CLIENT_ID', '');
+define('FIELDNATION_CLIENT_SECRET', '');
