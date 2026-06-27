@@ -1,0 +1,8 @@
+<?php
+declare(strict_types=1);
+require_once __DIR__ . '/inc/bootstrap.php';
+require_once __DIR__ . '/inc/client_portal.php';
+$client = client_portal_require_client();
+$rows = client_portal_vendor_rows((int)$client['client_id'], 'cove');
+?>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Backup Protection | <?= client_portal_h(APP_NAME) ?></title><link rel="stylesheet" href="<?= client_portal_h(BASE_URL) ?>/css/portal_shell.css?v=7"><style>.wrap{max-width:980px;margin:auto;padding:18px}.card{padding:18px;margin-bottom:14px}.list{display:grid;gap:12px}.item{padding:14px;border:1px solid var(--glass-border);border-radius:14px}.meta{color:var(--muted)}.status{font-weight:800}</style></head><body><main class="wrap"><section class="glass card"><p><a href="<?= client_portal_h(BASE_URL) ?>/client-assets.php?client_id=<?= (int)$client['client_id'] ?>">&larr; Assets</a></p><h1>Backup Protection</h1><p class="meta">Cove status from normalized OPS cache only.</p></section><section class="glass card list" aria-label="Backup protected devices"><?php foreach ($rows as $row): ?><article class="item"><h2><?= client_portal_h((string)($row['device_name'] ?: 'Backup device')) ?></h2><div class="status"><?= client_portal_h(client_portal_public_status($row)) ?></div><p class="meta">Last successful backup: <?= client_portal_h((string)($row['last_success_at'] ?: 'Unknown')) ?></p></article><?php endforeach; ?><?php if (!$rows): ?><article class="item"><h2>No cached Cove devices</h2><p class="meta">Backup status will appear after the cache sync reports protected devices.</p></article><?php endif; ?></section></main></body></html>
