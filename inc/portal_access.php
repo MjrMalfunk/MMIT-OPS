@@ -714,8 +714,6 @@ function portal_access_safe_next_path(?string $next, string $default = '/client-
         '/',
         '/client-preview.php',
         '/client-assets.php',
-        '/client-asset.php',
-        '/client-backups.php',
         '/client-billing.php',
         '/client-support.php',
         '/client-auth-plan.php',
