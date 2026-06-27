@@ -1,7 +1,6 @@
 <?php
 declare(strict_types=1);
-require_once __DIR__ . '/inc/bootstrap.php';
-require_once __DIR__ . '/inc/client_portal.php';
+require_once __DIR__ . '/client-inc.php';
 $client = client_portal_require_client();
 $rows = client_portal_vendor_rows((int)$client['client_id'], 'cove');
 ?>
