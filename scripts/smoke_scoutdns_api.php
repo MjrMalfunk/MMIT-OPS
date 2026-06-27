@@ -10,7 +10,42 @@ require_once __DIR__ . '/../inc/scoutdns.php';
 
 $callApi = in_array('--api', $argv, true);
 
-echo "ScoutDNS connector smoke\n";
+function scoutdns_smoke_bool_label(mixed $value): string
+{
+    if (is_bool($value)) {
+        return $value ? 'true' : 'false';
+    }
+
+    if (is_scalar($value)) {
+        $text = strtolower(trim((string)$value));
+        if (in_array($text, ['1', 'true', 'yes', 'success'], true)) {
+            return 'true';
+        }
+
+        if (in_array($text, ['0', 'false', 'no', 'failed', 'failure'], true)) {
+            return 'false';
+        }
+    }
+
+    return 'unknown';
+}
+
+function scoutdns_smoke_safe_text(mixed $value): string
+{
+    if (!is_scalar($value)) {
+        return '';
+    }
+
+    $text = trim((string)$value);
+    if ($text === '') {
+        return '';
+    }
+
+    $text = preg_replace('/[\r\n\t]+/', ' ', $text) ?? '';
+    return mb_substr($text, 0, 120, 'UTF-8');
+}
+
+echo "ScoutDNS getClients smoke\n";
 echo "DB: " . db()->query('SELECT DATABASE()')->fetchColumn() . "\n";
 echo "Configured: " . (scoutdns_is_configured() ? "yes" : "no") . "\n";
 
@@ -29,25 +64,31 @@ if ($missing) {
 }
 
 try {
-    echo "Calling ScoutDNS sites endpoint...\n";
-    $response = scoutdns_list_sites();
-    $items = scoutdns_response_items($response, ['sites']);
+    $response = scoutdns_list_clients();
+    $body = $response['body'] ?? [];
+    $items = scoutdns_response_items($response, ['clients', 'clientList', 'data']);
+    $success = is_array($body) ? ($body['success'] ?? $body['SUCCESS'] ?? $response['ok'] ?? null) : ($response['ok'] ?? null);
+    $count = is_array($body) && isset($body['count']) && is_numeric($body['count']) ? (int)$body['count'] : count($items);
 
-    echo "HTTP: " . (int)($response['http_status'] ?? 0) . "\n";
-    echo "Sites returned: " . count($items) . "\n";
+    echo "HTTP_STATUS=" . (int)($response['http_status'] ?? 0) . "\n";
+    echo "SUCCESS=" . scoutdns_smoke_bool_label($success) . "\n";
+    echo "COUNT=" . $count . "\n";
 
-    foreach (array_slice($items, 0, 5) as $item) {
+    foreach ($items as $item) {
         if (!is_array($item)) {
             continue;
         }
 
-        echo "- "
-            . (string)($item['name'] ?? $item['site_name'] ?? $item['id'] ?? 'unknown')
-            . " | id="
-            . (string)($item['id'] ?? $item['site_id'] ?? 'unknown')
+        $clientName = scoutdns_smoke_safe_text($item['clientName'] ?? $item['client_name'] ?? $item['name'] ?? '');
+        $username = scoutdns_smoke_safe_text($item['username'] ?? $item['userName'] ?? $item['user'] ?? '');
+        $osName = scoutdns_smoke_safe_text($item['osName'] ?? $item['os_name'] ?? $item['os'] ?? '');
+
+        echo "- clientName=" . ($clientName !== '' ? $clientName : 'unknown')
+            . " | username=" . ($username !== '' ? $username : 'unknown')
+            . " | osName=" . ($osName !== '' ? $osName : 'unknown')
             . "\n";
     }
 } catch (Throwable $e) {
-    fwrite(STDERR, "ScoutDNS smoke failed: " . scoutdns_mask_sensitive($e->getMessage()) . "\n");
+    fwrite(STDERR, "ScoutDNS getClients smoke failed. Check credentials and server logs.\n");
     exit(1);
 }

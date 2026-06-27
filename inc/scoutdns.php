@@ -23,7 +23,7 @@ function scoutdns_config_string(string $name, string $default = ''): string
 
 function scoutdns_api_base_url(): string
 {
-    $baseUrl = scoutdns_config_string('SCOUTDNS_API_BASE_URL', 'https://api.scoutdns.com/v1');
+    $baseUrl = scoutdns_config_string('SCOUTDNS_API_BASE_URL', 'https://api.scoutdns.com/app/');
     $baseUrl = rtrim($baseUrl, '/');
 
     if ($baseUrl === '') {
@@ -102,7 +102,7 @@ function scoutdns_api_request(string $method, string $path, array $query = [], ?
 
     $headers = [
         'Accept: application/json',
-        'Authorization: Bearer ' . scoutdns_config_string('SCOUTDNS_API_TOKEN'),
+        'X-API-ACCESS-KEY: ' . scoutdns_config_string('SCOUTDNS_API_TOKEN'),
     ];
 
     $payload = null;
@@ -185,4 +185,9 @@ function scoutdns_response_items(array $response, array $preferredKeys = []): ar
 function scoutdns_list_sites(array $query = []): array
 {
     return scoutdns_api_get('/sites', $query);
+}
+
+function scoutdns_list_clients(array $query = []): array
+{
+    return scoutdns_api_get('/getClients', $query);
 }
