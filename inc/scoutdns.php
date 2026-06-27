@@ -133,8 +133,12 @@ function scoutdns_api_request(string $method, string $path, array $query = [], ?
     $httpStatus = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
     curl_close($ch);
 
-    if ($responseBody === false || $responseBody === '') {
-        throw new RuntimeException(scoutdns_mask_sensitive('ScoutDNS API request failed: ' . ($curlError ?: 'empty response')));
+    if ($responseBody === false) {
+        throw new RuntimeException(scoutdns_mask_sensitive('ScoutDNS API request failed: ' . ($curlError ?: 'empty response') . '. HTTP ' . $httpStatus));
+    }
+
+    if ($responseBody === '') {
+        throw new RuntimeException('ScoutDNS API HTTP ' . $httpStatus . ' returned an empty response body.');
     }
 
     $decoded = json_decode((string)$responseBody, true);
