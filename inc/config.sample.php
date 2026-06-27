@@ -195,3 +195,12 @@ define('COVE_DEFAULT_PARTNER_ID', 0);
 define('HUNTRESS_API_BASE_URL', 'https://api.huntress.io/v1');
 define('HUNTRESS_API_KEY', '');
 define('HUNTRESS_API_SECRET', '');
+
+/*
+|--------------------------------------------------------------------------
+| ScoutDNS Operator API
+|--------------------------------------------------------------------------
+| Store real API tokens only in private config/vault.
+*/
+define('SCOUTDNS_API_BASE_URL', 'https://api.scoutdns.com/v1');
+define('SCOUTDNS_API_TOKEN', '');
