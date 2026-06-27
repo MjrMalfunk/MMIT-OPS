@@ -52,6 +52,7 @@ echo "Configured: " . (scoutdns_is_configured() ? "yes" : "no") . "\n";
 $missing = scoutdns_missing_config();
 echo "Missing: " . ($missing ? implode(', ', $missing) : 'none') . "\n";
 echo "Base URL: " . scoutdns_api_base_url() . "\n";
+echo "Expected shape: top-level ok,http_status,body; client rows in body.data; safe row fields clientName,username,osName; sync output includes unmapped_reason and mapping_strategy.\n";
 
 if (!$callApi) {
     echo "API call skipped. Pass --api to test live ScoutDNS credentials.\n";
@@ -73,6 +74,8 @@ try {
     echo "HTTP_STATUS=" . (int)($response['http_status'] ?? 0) . "\n";
     echo "SUCCESS=" . scoutdns_smoke_bool_label($success) . "\n";
     echo "COUNT=" . $count . "\n";
+
+    echo "ROWS_PATH=body.data\n";
 
     foreach ($items as $item) {
         if (!is_array($item)) {
