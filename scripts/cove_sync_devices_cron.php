@@ -150,9 +150,12 @@ try {
                 'last_seen_at' => vendor_telemetry_now(),
                 'last_success_at' => vendor_telemetry_now(),
                 'storage_used_bytes' => $usedBytes,
-                'raw' => [
-                    'row' => $row,
-                    'settings' => $settings,
+                'raw_summary' => [
+                    'source' => 'cove_account_statistics',
+                    'partner_id' => $partnerId,
+                    'account_id_present' => trim((string)($row['AccountId'] ?? '')) !== '',
+                    'os_type' => $settings['I32'] ?? null,
+                    'storage_used_bytes' => $usedBytes,
                 ],
             ];
 
