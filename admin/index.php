@@ -15,6 +15,14 @@ page_header('Admin', 'admin');
 
   <div class="admin-card-grid">
     <section class="card admin-card">
+      <h2>QR Campaigns</h2>
+      <p class="admin-card-copy">Create QR campaign links, publish active campaign maps, generate SVG assets, and review scan activity.</p>
+      <div class="admin-card-actions">
+        <a class="btn btn-secondary btn-inline" style="text-decoration:none;" href="<?= htmlspecialchars(BASE_URL) ?>/admin/qr_campaigns.php">Open QR campaigns</a>
+      </div>
+    </section>
+
+    <section class="card admin-card">
       <div style="opacity:.72;text-transform:uppercase;letter-spacing:.08em;font-size:12px;">Portal access</div>
       <h2 style="margin:10px 0 10px;">Invites + secure links</h2>
       <p class="admin-card-copy">Invite the client contacts who should have portal access and choose exactly what each login can see.</p>
