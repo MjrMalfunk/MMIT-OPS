@@ -224,6 +224,7 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
       <p style="margin:0;">Track FieldNation-style work orders, field inventory, job costs, and real net income.</p>
     </div>
     <div class="actions">
+      <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_opportunities.php">FN opportunities</a>
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/index.php">Back to admin</a>
     </div>
   </div>

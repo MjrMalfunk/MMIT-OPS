@@ -1666,3 +1666,984 @@ function field_ops_summary(): array
         'low_stock_count' => $inventoryLow,
     ];
 }
+
+
+/**
+ * Field Ops Opportunity Board
+ *
+ * Purpose:
+ * - Email events are raw FN notifications.
+ * - Opportunities are possible jobs worth rating.
+ * - Work orders are real tracked work/money.
+ */
+
+function field_ops_ensure_opportunity_schema(): void
+{
+    field_ops_ensure_schema();
+
+    $pdo = db();
+
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS field_email_events (
+            email_event_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            source_system VARCHAR(60) NOT NULL DEFAULT 'FieldNation',
+            email_message_id VARCHAR(190) NULL,
+            sender_name VARCHAR(190) NULL,
+            sender_email VARCHAR(190) NULL,
+            subject VARCHAR(255) NOT NULL,
+            received_at DATETIME NULL,
+            body_text MEDIUMTEXT NULL,
+            parsed_status VARCHAR(40) NULL,
+            parsed_event_type VARCHAR(60) NULL,
+            parsed_work_order_number VARCHAR(120) NULL,
+            parsed_buyer_name VARCHAR(190) NULL,
+            parsed_title VARCHAR(255) NULL,
+            parsed_city VARCHAR(120) NULL,
+            parsed_state VARCHAR(40) NULL,
+            parsed_zip VARCHAR(20) NULL,
+            parsed_distance_miles DECIMAL(10,2) NULL,
+            parsed_schedule_start_at DATETIME NULL,
+            parsed_schedule_end_at DATETIME NULL,
+            parsed_pay_rate DECIMAL(12,2) NULL,
+            parsed_max_hours DECIMAL(12,2) NULL,
+            parsed_estimated_gross DECIMAL(12,2) NULL,
+            parsed_url VARCHAR(500) NULL,
+            parsed_payload_json MEDIUMTEXT NULL,
+            confidence TINYINT UNSIGNED NOT NULL DEFAULT 0,
+            matched_opportunity_id INT UNSIGNED NULL,
+            matched_work_order_id INT UNSIGNED NULL,
+            applied_at DATETIME NULL,
+            ignored_at DATETIME NULL,
+            processing_error TEXT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_field_email_events_status (parsed_status),
+            INDEX idx_field_email_events_wo_number (parsed_work_order_number),
+            INDEX idx_field_email_events_opportunity (matched_opportunity_id),
+            INDEX idx_field_email_events_received (received_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS field_opportunities (
+            opportunity_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            platform VARCHAR(60) NOT NULL DEFAULT 'FieldNation',
+            external_work_order_number VARCHAR(120) NULL,
+            buyer_id INT UNSIGNED NULL,
+            buyer_name_snapshot VARCHAR(190) NULL,
+            title VARCHAR(255) NOT NULL,
+            work_type VARCHAR(120) NULL,
+            city VARCHAR(120) NULL,
+            state VARCHAR(40) NULL,
+            zip VARCHAR(20) NULL,
+            distance_miles DECIMAL(10,2) NULL,
+            scheduled_start_at DATETIME NULL,
+            scheduled_end_at DATETIME NULL,
+            pay_rate DECIMAL(12,2) NULL,
+            max_hours DECIMAL(12,2) NULL,
+            estimated_gross DECIMAL(12,2) NOT NULL DEFAULT 0,
+            status VARCHAR(40) NOT NULL DEFAULT 'AVAILABLE',
+            score TINYINT UNSIGNED NOT NULL DEFAULT 0,
+            recommendation VARCHAR(80) NOT NULL DEFAULT 'Review',
+            score_breakdown_json MEDIUMTEXT NULL,
+            source_email_event_id INT UNSIGNED NULL,
+            source_url VARCHAR(500) NULL,
+            promoted_work_order_id INT UNSIGNED NULL,
+            notes MEDIUMTEXT NULL,
+            ignored_at DATETIME NULL,
+            requested_at DATETIME NULL,
+            declined_at DATETIME NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_field_opportunity_platform_wo (platform, external_work_order_number),
+            INDEX idx_field_opportunities_status (status),
+            INDEX idx_field_opportunities_score (score),
+            INDEX idx_field_opportunities_schedule (scheduled_start_at),
+            INDEX idx_field_opportunities_promoted (promoted_work_order_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+}
+
+function field_ops_fn_h($value): string
+{
+    return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+}
+
+function field_ops_fn_datetime_or_null($value): ?string
+{
+    $value = trim((string)$value);
+
+    if ($value === '') {
+        return null;
+    }
+
+    try {
+        return (new DateTimeImmutable($value))->format('Y-m-d H:i:s');
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function field_ops_fn_clean_text(string $text): string
+{
+    $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $text = preg_replace('/\r\n|\r/', "\n", $text) ?? $text;
+    $text = preg_replace('/[ \t]+/', ' ', $text) ?? $text;
+    $text = preg_replace("/\n{3,}/", "\n\n", $text) ?? $text;
+
+    return trim($text);
+}
+
+function field_ops_fn_sender_email(string $sender): string
+{
+    if (preg_match('/<([^>]+)>/', $sender, $m)) {
+        return trim($m[1]);
+    }
+
+    if (preg_match('/[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}/i', $sender, $m)) {
+        return trim($m[0]);
+    }
+
+    return '';
+}
+
+function field_ops_fn_sender_name(string $sender): string
+{
+    $sender = trim($sender);
+
+    if (preg_match('/^(.+?)\s*<[^>]+>/', $sender, $m)) {
+        return trim(str_replace('"', '', $m[1]));
+    }
+
+    return $sender;
+}
+
+function field_ops_fn_month_number(string $month): int
+{
+    return [
+        'jan' => 1,
+        'feb' => 2,
+        'mar' => 3,
+        'apr' => 4,
+        'may' => 5,
+        'jun' => 6,
+        'jul' => 7,
+        'aug' => 8,
+        'sep' => 9,
+        'oct' => 10,
+        'nov' => 11,
+        'dec' => 12,
+    ][strtolower(substr(trim($month), 0, 3))] ?? 0;
+}
+
+function field_ops_fn_parse_12h_time(string $value): ?array
+{
+    $value = strtolower(trim($value));
+
+    if (!preg_match('/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/i', $value, $m)) {
+        return null;
+    }
+
+    $hour = (int)$m[1];
+    $minute = isset($m[2]) && $m[2] !== '' ? (int)$m[2] : 0;
+    $ampm = strtolower($m[3]);
+
+    if ($ampm === 'pm' && $hour < 12) {
+        $hour += 12;
+    }
+
+    if ($ampm === 'am' && $hour === 12) {
+        $hour = 0;
+    }
+
+    return [$hour, $minute];
+}
+
+function field_ops_fn_build_datetime(int $year, string $month, int $day, string $time): ?string
+{
+    $monthNum = field_ops_fn_month_number($month);
+    $timeParts = field_ops_fn_parse_12h_time($time);
+
+    if ($monthNum <= 0 || !$timeParts) {
+        return null;
+    }
+
+    [$hour, $minute] = $timeParts;
+
+    return sprintf('%04d-%02d-%02d %02d:%02d:00', $year, $monthNum, $day, $hour, $minute);
+}
+
+function field_ops_fn_event_year(?string $receivedAt): int
+{
+    if ($receivedAt) {
+        try {
+            return (int)(new DateTimeImmutable($receivedAt))->format('Y');
+        } catch (Throwable $e) {
+            return (int)date('Y');
+        }
+    }
+
+    return (int)date('Y');
+}
+
+function field_ops_parse_fieldnation_email(string $subject, string $bodyText, string $sender = '', ?string $receivedAt = null): array
+{
+    $subject = trim($subject);
+    $body = field_ops_fn_clean_text($bodyText);
+    $haystack = $subject . "\n" . $body;
+    $year = field_ops_fn_event_year($receivedAt);
+
+    $parsed = [
+        'status' => 'MESSAGE',
+        'event_type' => 'unknown',
+        'work_order_number' => null,
+        'buyer_name' => null,
+        'title' => null,
+        'city' => null,
+        'state' => null,
+        'zip' => null,
+        'distance_miles' => null,
+        'schedule_start_at' => null,
+        'schedule_end_at' => null,
+        'pay_rate' => null,
+        'max_hours' => null,
+        'estimated_gross' => null,
+        'url' => null,
+        'confidence' => 20,
+        'notes' => [],
+    ];
+
+    if (preg_match('/assigned\s+to\s+someone\s+else/i', $haystack)) {
+        $parsed['status'] = 'DECLINED';
+        $parsed['event_type'] = 'assignment_result';
+        $parsed['confidence'] += 35;
+    } elseif (preg_match('/assigned\s+to\s+you/i', $haystack)) {
+        $parsed['status'] = 'ASSIGNED';
+        $parsed['event_type'] = 'assignment';
+        $parsed['confidence'] += 35;
+    } elseif (preg_match('/\bRouted WO\b|routed\s+work\s+order|dispatch\s+request/i', $haystack)) {
+        $parsed['status'] = 'ROUTED';
+        $parsed['event_type'] = 'routed';
+        $parsed['confidence'] += 32;
+    } elseif (preg_match('/\bNew Work\b|\[Available Work Order\]|\bAvailable Work Order\b/i', $haystack)) {
+        $parsed['status'] = 'AVAILABLE';
+        $parsed['event_type'] = preg_match('/new message/i', $haystack) ? 'available_message' : 'available';
+        $parsed['confidence'] += 30;
+    } elseif (preg_match('/new message/i', $haystack)) {
+        $parsed['status'] = 'MESSAGE';
+        $parsed['event_type'] = 'message';
+        $parsed['confidence'] += 18;
+    }
+
+    if (preg_match('/Work Order\s+ID\s*:\s*#?\s*(\d+)/i', $haystack, $m)
+        || preg_match('/Work Order\s+#?\s*(\d+)/i', $subject, $m)
+        || preg_match('/WO\s*#\s*(\d+)/i', $haystack, $m)) {
+        $parsed['work_order_number'] = $m[1];
+        $parsed['confidence'] += 18;
+    }
+
+    if (preg_match('/https?:\/\/[^\s"\']*fieldnation[^\s"\']*/i', $haystack, $m)) {
+        $parsed['url'] = $m[0];
+        $parsed['confidence'] += 6;
+    }
+
+    if (preg_match('/^(.+?)\s+Routed WO:/i', $subject, $m)) {
+        $buyer = trim($m[1]);
+        if (!preg_match('/^Field Nation$/i', $buyer)) {
+            $parsed['buyer_name'] = $buyer;
+        }
+    }
+
+    if (!$parsed['buyer_name'] && preg_match('/^(.+?)\s+\(Field Nation\)/i', $sender, $m)) {
+        $parsed['buyer_name'] = trim($m[1]);
+    }
+
+    if (!$parsed['buyer_name'] && preg_match('/\n([A-Za-z0-9 &.,\'\-]+)\s*\/\s*\d+(?:\.\d+)?\b/', "\n" . $body, $m)) {
+        $parsed['buyer_name'] = trim($m[1]);
+    }
+
+    if (!$parsed['buyer_name']) {
+        $parsed['buyer_name'] = 'FieldNation';
+    }
+
+    if (preg_match('/Service Title\s*:\s*(.+)/i', $body, $m)) {
+        $parsed['title'] = trim($m[1]);
+    } elseif (preg_match('/^\s*New Message:\s*WO\s*#?\d+\s*\n+(.+)/i', $body, $m)) {
+        $parsed['title'] = trim($m[1]);
+    } elseif (preg_match('/^\s*(DISPATCH REQUEST\s*-\s*[^\n]+)/mi', $body, $m)) {
+        $parsed['title'] = trim($m[1]);
+    } else {
+        $lines = preg_split('/\n+/', $body) ?: [];
+        foreach ($lines as $line) {
+            $line = trim($line);
+
+            if ($line === '') {
+                continue;
+            }
+
+            if (preg_match('/^(Pay|Schedule|Status|Location|View Work Order|View Message|Service Details|Work Order ID)\b/i', $line)) {
+                continue;
+            }
+
+            if (preg_match('/^[A-Za-z .\'-]+,\s*[A-Z]{2}\s*\d{5}\b/i', $line)) {
+                continue;
+            }
+
+            if (preg_match('/^[A-Za-z0-9 &.,\'-]+\s*\/\s*\d+(?:\.\d+)?$/', $line)) {
+                continue;
+            }
+
+            if (preg_match('/Hourly Rate|\$\d+|\d+\s+hours?\s+max/i', $line)) {
+                continue;
+            }
+
+            $parsed['title'] = $line;
+            break;
+        }
+    }
+
+    if (!$parsed['title'] && preg_match('/^(?:New Work|Routed WO):\s*(.+)$/i', $subject, $m)) {
+        $parsed['title'] = trim($m[1]);
+    }
+
+    if ($parsed['title']) {
+        $parsed['title'] = preg_replace('/\s+/', ' ', $parsed['title']) ?? $parsed['title'];
+        $parsed['confidence'] += 12;
+    }
+
+    if (preg_match('/Service Location\s*:\s*([A-Za-z .\'-]+),\s*([A-Z]{2})\s*(\d{5})/i', $body, $m)
+        || preg_match('/\b([A-Za-z .\'-]+),\s*([A-Z]{2})\s*(\d{5})\s*\(/i', $haystack, $m)
+        || preg_match('/\b([A-Za-z .\'-]+),\s*([A-Z]{2})\s*(\d{5})\b/i', $subject, $m)) {
+        $parsed['city'] = trim($m[1]);
+        $parsed['state'] = trim($m[2]);
+        $parsed['zip'] = trim($m[3]);
+        $parsed['confidence'] += 10;
+    }
+
+    if (preg_match('/\(([\d.]+)\s*(?:mi|miles)(?:\s+away)?\)/i', $haystack, $m)) {
+        $parsed['distance_miles'] = round((float)$m[1], 2);
+        $parsed['confidence'] += 6;
+    }
+
+    if (preg_match('/Hourly Rate:\s*\$?([\d.]+)\s*\/\s*hour\s*\(([\d.]+)\s+hours?\s+max\)/i', $haystack, $m)) {
+        $parsed['pay_rate'] = round((float)$m[1], 2);
+        $parsed['max_hours'] = round((float)$m[2], 2);
+        $parsed['estimated_gross'] = round($parsed['pay_rate'] * $parsed['max_hours'], 2);
+        $parsed['confidence'] += 14;
+    } elseif (preg_match('/\$\s*([\d,.]+)\b/', $haystack, $m)) {
+        $parsed['estimated_gross'] = round((float)str_replace(',', '', $m[1]), 2);
+        $parsed['confidence'] += 6;
+    }
+
+    if (preg_match('/([A-Za-z]+),\s*([A-Za-z]{3,9})\s+(\d{1,2}),?\s*(\d{1,2}(?::\d{2})?\s*(?:AM|PM))\s*-\s*([A-Za-z]+),\s*([A-Za-z]{3,9})\s+(\d{1,2}),?\s*(\d{1,2}(?::\d{2})?\s*(?:AM|PM))/i', $haystack, $m)) {
+        $parsed['schedule_start_at'] = field_ops_fn_build_datetime($year, $m[2], (int)$m[3], $m[4]);
+        $parsed['schedule_end_at'] = field_ops_fn_build_datetime($year, $m[6], (int)$m[7], $m[8]);
+        $parsed['confidence'] += 12;
+    } elseif (preg_match('/([A-Za-z]+),\s*([A-Za-z]{3,9})\s+(\d{1,2})\s*@\s*(\d{1,2}(?::\d{2})?\s*(?:AM|PM))/i', $haystack, $m)) {
+        $parsed['schedule_start_at'] = field_ops_fn_build_datetime($year, $m[2], (int)$m[3], $m[4]);
+        $parsed['confidence'] += 10;
+    } elseif (preg_match('/([A-Za-z]{3,9})\s+(\d{1,2})\s+(\d{1,2}:\d{2}\s*(?:am|pm))/i', $subject, $m)) {
+        $parsed['schedule_start_at'] = field_ops_fn_build_datetime($year, $m[1], (int)$m[2], $m[3]);
+        $parsed['confidence'] += 8;
+    }
+
+    $parsed['confidence'] = max(0, min(100, (int)$parsed['confidence']));
+
+    return $parsed;
+}
+
+function field_ops_find_or_create_buyer(string $platform, string $buyerName): int
+{
+    field_ops_ensure_schema();
+
+    $platform = trim($platform) ?: 'FieldNation';
+    $buyerName = trim($buyerName) ?: 'FieldNation';
+
+    $st = db()->prepare("
+        SELECT buyer_id
+        FROM field_buyers
+        WHERE platform = ?
+          AND buyer_name = ?
+        LIMIT 1
+    ");
+    $st->execute([$platform, $buyerName]);
+
+    $id = (int)($st->fetchColumn() ?: 0);
+
+    if ($id > 0) {
+        return $id;
+    }
+
+    db()->prepare("
+        INSERT INTO field_buyers
+          (platform, buyer_name, paperwork_burden, materials_policy, rating_internal, is_preferred, active, notes)
+        VALUES
+          (?, ?, 'UNKNOWN', 'VARIES_BY_WORK_ORDER', NULL, 0, 1, 'Created automatically from FieldNation opportunity ingest.')
+    ")->execute([$platform, $buyerName]);
+
+    return (int)db()->lastInsertId();
+}
+
+function field_ops_rate_opportunity(array $data): array
+{
+    $score = 0;
+    $breakdown = [];
+
+    $payRate = (float)($data['pay_rate'] ?? 0);
+    $estimatedGross = (float)($data['estimated_gross'] ?? 0);
+    $distance = isset($data['distance_miles']) ? (float)$data['distance_miles'] : null;
+    $status = strtoupper((string)($data['status'] ?? 'AVAILABLE'));
+    $title = strtolower((string)($data['title'] ?? ''));
+
+    if ($payRate >= 90) {
+        $score += 30;
+        $breakdown['pay'] = '+30 strong hourly pay';
+    } elseif ($payRate >= 65) {
+        $score += 23;
+        $breakdown['pay'] = '+23 good hourly pay';
+    } elseif ($estimatedGross >= 300) {
+        $score += 18;
+        $breakdown['pay'] = '+18 solid estimated gross';
+    } elseif ($payRate > 0 || $estimatedGross > 0) {
+        $score += 10;
+        $breakdown['pay'] = '+10 visible pay, but not great';
+    } else {
+        $score -= 8;
+        $breakdown['pay'] = '-8 pay not visible';
+    }
+
+    if ($distance !== null) {
+        if ($distance <= 15) {
+            $score += 20;
+            $breakdown['distance'] = '+20 close drive';
+        } elseif ($distance <= 45) {
+            $score += 12;
+            $breakdown['distance'] = '+12 workable drive';
+        } elseif ($distance <= 80) {
+            $score -= 4;
+            $breakdown['distance'] = '-4 long drive';
+        } else {
+            $score -= 12;
+            $breakdown['distance'] = '-12 very long drive';
+        }
+    } else {
+        $score -= 3;
+        $breakdown['distance'] = '-3 distance unknown';
+    }
+
+    if ($status === 'ROUTED') {
+        $score += 8;
+        $breakdown['routed'] = '+8 buyer routed it directly';
+    } elseif ($status === 'AVAILABLE') {
+        $score += 0;
+        $breakdown['routed'] = '+0 public available work';
+    }
+
+    if (preg_match('/pos|cabling|cable|hme|menu|switch|tv|mount|kiosk|pinpad|drive/i', $title)) {
+        $score += 10;
+        $breakdown['work_type'] = '+10 preferred field work type';
+    } elseif ($title !== '') {
+        $score += 3;
+        $breakdown['work_type'] = '+3 known scope';
+    } else {
+        $score -= 5;
+        $breakdown['work_type'] = '-5 unclear scope';
+    }
+
+    if (!empty($data['scheduled_start_at'])) {
+        try {
+            $start = new DateTimeImmutable((string)$data['scheduled_start_at']);
+            $now = new DateTimeImmutable('now');
+
+            if ($start < $now) {
+                $score -= 25;
+                $breakdown['schedule'] = '-25 stale/past schedule';
+            } else {
+                $score += 10;
+                $breakdown['schedule'] = '+10 future schedule present';
+            }
+        } catch (Throwable $e) {
+            $score -= 3;
+            $breakdown['schedule'] = '-3 schedule parse issue';
+        }
+    } else {
+        $score -= 4;
+        $breakdown['schedule'] = '-4 schedule unknown';
+    }
+
+    $buyerId = (int)($data['buyer_id'] ?? 0);
+
+    if ($buyerId > 0) {
+        try {
+            $st = db()->prepare("SELECT is_preferred, rating_internal FROM field_buyers WHERE buyer_id = ? LIMIT 1");
+            $st->execute([$buyerId]);
+            $buyer = $st->fetch(PDO::FETCH_ASSOC) ?: [];
+
+            if (!empty($buyer['is_preferred'])) {
+                $score += 10;
+                $breakdown['buyer'] = '+10 preferred buyer';
+            } elseif ((float)($buyer['rating_internal'] ?? 0) >= 4) {
+                $score += 6;
+                $breakdown['buyer'] = '+6 good internal buyer rating';
+            } else {
+                $breakdown['buyer'] = '+0 neutral buyer';
+            }
+        } catch (Throwable $e) {
+            $breakdown['buyer'] = '+0 buyer lookup skipped';
+        }
+    }
+
+    $score = max(0, min(100, (int)$score));
+
+    if ($score >= 80) {
+        $recommendation = 'Request this';
+    } elseif ($score >= 65) {
+        $recommendation = 'Worth reviewing';
+    } elseif ($score >= 45) {
+        $recommendation = 'Maybe if schedule is open';
+    } else {
+        $recommendation = 'Skip';
+    }
+
+    return [
+        'score' => $score,
+        'recommendation' => $recommendation,
+        'breakdown' => $breakdown,
+    ];
+}
+
+function field_ops_save_fn_email_event(array $input): array
+{
+    field_ops_ensure_opportunity_schema();
+
+    $subject = trim((string)($input['subject'] ?? ''));
+    $body = field_ops_fn_clean_text((string)($input['body_text'] ?? ''));
+    $sender = trim((string)($input['sender'] ?? ''));
+    $receivedAt = field_ops_fn_datetime_or_null($input['received_at'] ?? '') ?: date('Y-m-d H:i:s');
+
+    if ($subject === '') {
+        return ['ok' => false, 'errors' => ['Email subject is required.']];
+    }
+
+    $parsed = field_ops_parse_fieldnation_email($subject, $body, $sender, $receivedAt);
+
+    db()->prepare("
+        INSERT INTO field_email_events
+          (source_system, email_message_id, sender_name, sender_email, subject, received_at, body_text,
+           parsed_status, parsed_event_type, parsed_work_order_number, parsed_buyer_name, parsed_title,
+           parsed_city, parsed_state, parsed_zip, parsed_distance_miles, parsed_schedule_start_at,
+           parsed_schedule_end_at, parsed_pay_rate, parsed_max_hours, parsed_estimated_gross,
+           parsed_url, parsed_payload_json, confidence)
+        VALUES
+          ('FieldNation', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ")->execute([
+        trim((string)($input['email_message_id'] ?? '')) ?: null,
+        field_ops_fn_sender_name($sender) ?: null,
+        field_ops_fn_sender_email($sender) ?: null,
+        $subject,
+        $receivedAt,
+        $body,
+        $parsed['status'],
+        $parsed['event_type'],
+        $parsed['work_order_number'],
+        $parsed['buyer_name'],
+        $parsed['title'],
+        $parsed['city'],
+        $parsed['state'],
+        $parsed['zip'],
+        $parsed['distance_miles'],
+        $parsed['schedule_start_at'],
+        $parsed['schedule_end_at'],
+        $parsed['pay_rate'],
+        $parsed['max_hours'],
+        $parsed['estimated_gross'],
+        $parsed['url'],
+        json_encode($parsed, JSON_UNESCAPED_SLASHES),
+        $parsed['confidence'],
+    ]);
+
+    return [
+        'ok' => true,
+        'email_event_id' => (int)db()->lastInsertId(),
+        'parsed' => $parsed,
+    ];
+}
+
+function field_ops_find_email_event(int $eventId): ?array
+{
+    field_ops_ensure_opportunity_schema();
+
+    $st = db()->prepare("SELECT * FROM field_email_events WHERE email_event_id = ? LIMIT 1");
+    $st->execute([$eventId]);
+
+    $row = $st->fetch(PDO::FETCH_ASSOC);
+
+    return is_array($row) ? $row : null;
+}
+
+function field_ops_email_events(int $limit = 100): array
+{
+    field_ops_ensure_opportunity_schema();
+
+    $limit = max(1, min(500, $limit));
+
+    return db()->query("
+        SELECT e.*, o.opportunity_id, o.score, o.recommendation, o.promoted_work_order_id
+        FROM field_email_events e
+        LEFT JOIN field_opportunities o ON o.opportunity_id = e.matched_opportunity_id
+        ORDER BY COALESCE(e.received_at, e.created_at) DESC, e.email_event_id DESC
+        LIMIT {$limit}
+    ")->fetchAll(PDO::FETCH_ASSOC) ?: [];
+}
+
+function field_ops_find_opportunity_by_external_number(string $number): ?array
+{
+    field_ops_ensure_opportunity_schema();
+
+    $number = trim($number);
+
+    if ($number === '') {
+        return null;
+    }
+
+    $st = db()->prepare("
+        SELECT *
+        FROM field_opportunities
+        WHERE platform = 'FieldNation'
+          AND external_work_order_number = ?
+        LIMIT 1
+    ");
+    $st->execute([$number]);
+
+    $row = $st->fetch(PDO::FETCH_ASSOC);
+
+    return is_array($row) ? $row : null;
+}
+
+function field_ops_apply_email_event_to_opportunity(int $eventId): array
+{
+    field_ops_ensure_opportunity_schema();
+
+    $event = field_ops_find_email_event($eventId);
+
+    if (!$event) {
+        return ['ok' => false, 'errors' => ['Email event not found.']];
+    }
+
+    if (!empty($event['ignored_at'])) {
+        return ['ok' => false, 'errors' => ['Email event is ignored.']];
+    }
+
+    $status = strtoupper((string)($event['parsed_status'] ?? 'MESSAGE'));
+    $woNumber = trim((string)($event['parsed_work_order_number'] ?? ''));
+
+    if ($status === 'ASSIGNED') {
+        return ['ok' => false, 'errors' => ['Assigned emails belong to the W/O bridge, not the opportunity board.']];
+    }
+
+    if ($status === 'DECLINED') {
+        $existing = $woNumber !== '' ? field_ops_find_opportunity_by_external_number($woNumber) : null;
+
+        if ($existing) {
+            db()->prepare("
+                UPDATE field_opportunities
+                SET status = 'DECLINED',
+                    declined_at = NOW(),
+                    source_email_event_id = ?,
+                    updated_at = NOW()
+                WHERE opportunity_id = ?
+                LIMIT 1
+            ")->execute([$eventId, (int)$existing['opportunity_id']]);
+
+            db()->prepare("
+                UPDATE field_email_events
+                SET matched_opportunity_id = ?,
+                    applied_at = NOW()
+                WHERE email_event_id = ?
+                LIMIT 1
+            ")->execute([(int)$existing['opportunity_id'], $eventId]);
+
+            return ['ok' => true, 'opportunity_id' => (int)$existing['opportunity_id']];
+        }
+
+        return ['ok' => false, 'errors' => ['Declined email has no matching opportunity to update.']];
+    }
+
+    if (!in_array($status, ['AVAILABLE', 'ROUTED', 'MESSAGE'], true)) {
+        return ['ok' => false, 'errors' => ['This email status is not an opportunity candidate.']];
+    }
+
+    $buyerName = trim((string)($event['parsed_buyer_name'] ?? 'FieldNation')) ?: 'FieldNation';
+    $buyerId = field_ops_find_or_create_buyer('FieldNation', $buyerName);
+
+    $title = trim((string)($event['parsed_title'] ?? '')) ?: ('FieldNation opportunity ' . ($woNumber !== '' ? $woNumber : '#' . $eventId));
+
+    $data = [
+        'buyer_id' => $buyerId,
+        'title' => $title,
+        'status' => $status === 'MESSAGE' ? 'AVAILABLE' : $status,
+        'distance_miles' => $event['parsed_distance_miles'],
+        'scheduled_start_at' => $event['parsed_schedule_start_at'],
+        'pay_rate' => $event['parsed_pay_rate'],
+        'estimated_gross' => $event['parsed_estimated_gross'],
+    ];
+
+    $rating = field_ops_rate_opportunity($data);
+
+    $notes = 'Created/updated from FN email event #' . $eventId . '. Parsed status: ' . $status . '.';
+
+    if (!empty($event['body_text'])) {
+        $notes .= "\n\n--- Email body snapshot ---\n" . substr((string)$event['body_text'], 0, 1800);
+    }
+
+    $existing = $woNumber !== '' ? field_ops_find_opportunity_by_external_number($woNumber) : null;
+
+    if ($existing) {
+        $opportunityId = (int)$existing['opportunity_id'];
+
+        db()->prepare("
+            UPDATE field_opportunities
+            SET buyer_id = ?,
+                buyer_name_snapshot = ?,
+                title = ?,
+                city = ?,
+                state = ?,
+                zip = ?,
+                distance_miles = ?,
+                scheduled_start_at = ?,
+                scheduled_end_at = ?,
+                pay_rate = ?,
+                max_hours = ?,
+                estimated_gross = ?,
+                status = CASE
+                    WHEN status IN ('REQUESTED', 'IGNORED', 'DECLINED') THEN status
+                    ELSE ?
+                END,
+                score = ?,
+                recommendation = ?,
+                score_breakdown_json = ?,
+                source_email_event_id = ?,
+                source_url = ?,
+                notes = CONCAT(COALESCE(notes, ''), ?),
+                updated_at = NOW()
+            WHERE opportunity_id = ?
+            LIMIT 1
+        ")->execute([
+            $buyerId,
+            $buyerName,
+            $title,
+            $event['parsed_city'] ?: null,
+            $event['parsed_state'] ?: null,
+            $event['parsed_zip'] ?: null,
+            $event['parsed_distance_miles'] ?: null,
+            $event['parsed_schedule_start_at'] ?: null,
+            $event['parsed_schedule_end_at'] ?: null,
+            $event['parsed_pay_rate'] ?: null,
+            $event['parsed_max_hours'] ?: null,
+            $event['parsed_estimated_gross'] ?: 0,
+            $data['status'],
+            $rating['score'],
+            $rating['recommendation'],
+            json_encode($rating['breakdown'], JSON_UNESCAPED_SLASHES),
+            $eventId,
+            $event['parsed_url'] ?: null,
+            "\n\n" . $notes,
+            $opportunityId,
+        ]);
+    } else {
+        db()->prepare("
+            INSERT INTO field_opportunities
+              (platform, external_work_order_number, buyer_id, buyer_name_snapshot, title, work_type, city, state, zip,
+               distance_miles, scheduled_start_at, scheduled_end_at, pay_rate, max_hours, estimated_gross,
+               status, score, recommendation, score_breakdown_json, source_email_event_id, source_url, notes)
+            VALUES
+              ('FieldNation', ?, ?, ?, ?, 'Field service', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ")->execute([
+            $woNumber !== '' ? $woNumber : null,
+            $buyerId,
+            $buyerName,
+            $title,
+            $event['parsed_city'] ?: null,
+            $event['parsed_state'] ?: null,
+            $event['parsed_zip'] ?: null,
+            $event['parsed_distance_miles'] ?: null,
+            $event['parsed_schedule_start_at'] ?: null,
+            $event['parsed_schedule_end_at'] ?: null,
+            $event['parsed_pay_rate'] ?: null,
+            $event['parsed_max_hours'] ?: null,
+            $event['parsed_estimated_gross'] ?: 0,
+            $data['status'],
+            $rating['score'],
+            $rating['recommendation'],
+            json_encode($rating['breakdown'], JSON_UNESCAPED_SLASHES),
+            $eventId,
+            $event['parsed_url'] ?: null,
+            $notes,
+        ]);
+
+        $opportunityId = (int)db()->lastInsertId();
+    }
+
+    db()->prepare("
+        UPDATE field_email_events
+        SET matched_opportunity_id = ?,
+            applied_at = NOW(),
+            updated_at = NOW()
+        WHERE email_event_id = ?
+        LIMIT 1
+    ")->execute([$opportunityId, $eventId]);
+
+    return ['ok' => true, 'opportunity_id' => $opportunityId];
+}
+
+function field_ops_opportunities(int $limit = 200): array
+{
+    field_ops_ensure_opportunity_schema();
+
+    $limit = max(1, min(500, $limit));
+
+    return db()->query("
+        SELECT o.*, wo.title AS promoted_work_order_title
+        FROM field_opportunities o
+        LEFT JOIN field_work_orders wo ON wo.work_order_id = o.promoted_work_order_id
+        WHERE o.ignored_at IS NULL
+          AND o.promoted_work_order_id IS NULL
+          AND o.status IN ('AVAILABLE', 'ROUTED', 'WATCHING')
+        ORDER BY
+          CASE WHEN o.status = 'ROUTED' THEN 0 ELSE 1 END,
+          o.score DESC,
+          COALESCE(o.scheduled_start_at, o.created_at) ASC
+        LIMIT {$limit}
+    ")->fetchAll(PDO::FETCH_ASSOC) ?: [];
+}
+
+function field_ops_find_opportunity(int $opportunityId): ?array
+{
+    field_ops_ensure_opportunity_schema();
+
+    $st = db()->prepare("SELECT * FROM field_opportunities WHERE opportunity_id = ? LIMIT 1");
+    $st->execute([$opportunityId]);
+
+    $row = $st->fetch(PDO::FETCH_ASSOC);
+
+    return is_array($row) ? $row : null;
+}
+
+function field_ops_ignore_opportunity(int $opportunityId): array
+{
+    field_ops_ensure_opportunity_schema();
+
+    if (!field_ops_find_opportunity($opportunityId)) {
+        return ['ok' => false, 'errors' => ['Opportunity not found.']];
+    }
+
+    db()->prepare("
+        UPDATE field_opportunities
+        SET status = 'IGNORED',
+            ignored_at = NOW(),
+            updated_at = NOW()
+        WHERE opportunity_id = ?
+        LIMIT 1
+    ")->execute([$opportunityId]);
+
+    return ['ok' => true];
+}
+
+function field_ops_promote_opportunity_to_work_order(int $opportunityId): array
+{
+    field_ops_ensure_opportunity_schema();
+
+    $op = field_ops_find_opportunity($opportunityId);
+
+    if (!$op) {
+        return ['ok' => false, 'errors' => ['Opportunity not found.']];
+    }
+
+    if (!empty($op['promoted_work_order_id'])) {
+        return ['ok' => true, 'work_order_id' => (int)$op['promoted_work_order_id'], 'message' => 'Already promoted.'];
+    }
+
+    $table = 'field_work_orders';
+
+    $candidate = [
+        'platform' => 'FieldNation',
+        'external_work_order_number' => $op['external_work_order_number'],
+        'buyer_id' => $op['buyer_id'],
+        'title' => $op['title'],
+        'work_type' => $op['work_type'] ?: 'Field service',
+        'city' => $op['city'],
+        'state' => $op['state'],
+        'scheduled_start_at' => $op['scheduled_start_at'],
+        'scheduled_end_at' => $op['scheduled_end_at'],
+        'status' => 'REQUESTED',
+        'payment_status' => 'UNPAID',
+        'gross_pay' => $op['estimated_gross'],
+        'notes' => "Promoted from Field Ops opportunity #{$opportunityId}.\nRecommendation: {$op['recommendation']}.\nScore: {$op['score']}.\n\n" . (string)($op['notes'] ?? ''),
+    ];
+
+    $cols = [];
+    $marks = [];
+    $params = [];
+
+    foreach ($candidate as $column => $value) {
+        if (function_exists('db_column_exists') && !db_column_exists($table, $column)) {
+            continue;
+        }
+
+        $cols[] = $column;
+        $marks[] = '?';
+        $params[] = $value !== '' ? $value : null;
+    }
+
+    if (!$cols) {
+        return ['ok' => false, 'errors' => ['No compatible W/O columns found.']];
+    }
+
+    db()->prepare("
+        INSERT INTO {$table}
+          (" . implode(', ', $cols) . ")
+        VALUES
+          (" . implode(', ', $marks) . ")
+    ")->execute($params);
+
+    $workOrderId = (int)db()->lastInsertId();
+
+    db()->prepare("
+        UPDATE field_opportunities
+        SET status = 'REQUESTED',
+            requested_at = NOW(),
+            promoted_work_order_id = ?,
+            updated_at = NOW()
+        WHERE opportunity_id = ?
+        LIMIT 1
+    ")->execute([$workOrderId, $opportunityId]);
+
+    return ['ok' => true, 'work_order_id' => $workOrderId];
+}
+
+function field_ops_opportunity_summary(): array
+{
+    field_ops_ensure_opportunity_schema();
+
+    $row = db()->query("
+        SELECT
+          COUNT(*) AS total,
+          SUM(CASE WHEN status = 'ROUTED' THEN 1 ELSE 0 END) AS routed,
+          SUM(CASE WHEN status = 'AVAILABLE' THEN 1 ELSE 0 END) AS available,
+          SUM(CASE WHEN recommendation = 'Request this' THEN 1 ELSE 0 END) AS request_this,
+          AVG(score) AS avg_score
+        FROM field_opportunities
+        WHERE ignored_at IS NULL
+          AND promoted_work_order_id IS NULL
+          AND status IN ('AVAILABLE', 'ROUTED', 'WATCHING')
+    ")->fetch(PDO::FETCH_ASSOC) ?: [];
+
+    return [
+        'total' => (int)($row['total'] ?? 0),
+        'routed' => (int)($row['routed'] ?? 0),
+        'available' => (int)($row['available'] ?? 0),
+        'request_this' => (int)($row['request_this'] ?? 0),
+        'avg_score' => round((float)($row['avg_score'] ?? 0), 1),
+    ];
+}
+
