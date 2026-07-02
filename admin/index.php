@@ -15,6 +15,14 @@ page_header('Admin', 'admin');
 
   <div class="admin-card-grid">
     <section class="card admin-card">
+      <h2>Field Ops</h2>
+      <p class="admin-card-copy">Track FieldNation-style work orders, buyers, inventory, job costs, and field income.</p>
+      <div class="admin-card-actions">
+        <a class="btn btn-secondary btn-inline" style="text-decoration:none;" href="<?= htmlspecialchars(BASE_URL) ?>/admin/field_ops.php">Open Field Ops</a>
+      </div>
+    </section>
+
+    <section class="card admin-card">
       <h2>QR Campaigns</h2>
       <p class="admin-card-copy">Create QR campaign links, publish active campaign maps, generate SVG assets, and review scan activity.</p>
       <div class="admin-card-actions">
