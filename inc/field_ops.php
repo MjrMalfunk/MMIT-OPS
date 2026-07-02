@@ -2816,3 +2816,127 @@ function field_ops_apply_assigned_email_event_to_work_order(int $eventId): array
     }
 }
 
+
+
+function field_ops_apply_declined_email_event(int $eventId): array
+{
+    field_ops_ensure_opportunity_schema();
+
+    $event = field_ops_find_email_event($eventId);
+
+    if (!$event) {
+        return ['ok' => false, 'errors' => ['Email event not found.']];
+    }
+
+    $status = strtoupper((string)($event['parsed_status'] ?? ''));
+
+    if ($status !== 'DECLINED') {
+        return ['ok' => false, 'errors' => ['Only DECLINED email events can use this action.']];
+    }
+
+    $woNumber = trim((string)($event['parsed_work_order_number'] ?? ''));
+
+    if ($woNumber === '') {
+        return ['ok' => false, 'errors' => ['Declined email did not include a W/O number.']];
+    }
+
+    $opportunity = field_ops_find_opportunity_by_external_number($woNumber);
+    $workOrder = field_ops_find_work_order_by_external_number_safe($woNumber);
+
+    $opportunityId = $opportunity ? (int)$opportunity['opportunity_id'] : null;
+    $workOrderId = $workOrder ? (int)$workOrder['work_order_id'] : null;
+
+    $notes = 'FieldNation declined/not-selected email event #' . $eventId . ' processed.';
+
+    $pdo = db();
+    $pdo->beginTransaction();
+
+    try {
+        if ($opportunityId) {
+            $pdo->prepare("
+                UPDATE field_opportunities
+                SET status = 'DECLINED',
+                    declined_at = NOW(),
+                    source_email_event_id = ?,
+                    notes = CONCAT(COALESCE(notes, ''), ?),
+                    updated_at = NOW()
+                WHERE opportunity_id = ?
+                LIMIT 1
+            ")->execute([
+                $eventId,
+                "\n\n" . $notes,
+                $opportunityId,
+            ]);
+        }
+
+        $workOrderUpdated = false;
+        $protectedWorkOrder = false;
+
+        if ($workOrderId) {
+            $currentStatus = strtoupper((string)($workOrder['status'] ?? ''));
+
+            if (in_array($currentStatus, ['AVAILABLE', 'ROUTED', 'REQUESTED'], true)) {
+                $pdo->prepare("
+                    UPDATE field_work_orders
+                    SET status = 'DECLINED',
+                        notes = CONCAT(COALESCE(notes, ''), ?),
+                        updated_at = NOW()
+                    WHERE work_order_id = ?
+                    LIMIT 1
+                ")->execute([
+                    "\n\n" . $notes,
+                    $workOrderId,
+                ]);
+
+                $workOrderUpdated = true;
+            } else {
+                $protectedWorkOrder = true;
+            }
+        }
+
+        $payload = json_decode((string)($event['parsed_payload_json'] ?? ''), true);
+
+        if (!is_array($payload)) {
+            $payload = [];
+        }
+
+        $payload['decline_result'] = [
+            'decline_processed' => true,
+            'opportunity_id' => $opportunityId,
+            'work_order_id' => $workOrderId,
+            'work_order_updated' => $workOrderUpdated,
+            'protected_work_order_left_unchanged' => $protectedWorkOrder,
+        ];
+
+        $pdo->prepare("
+            UPDATE field_email_events
+            SET matched_opportunity_id = ?,
+                matched_work_order_id = ?,
+                applied_at = NOW(),
+                parsed_payload_json = ?,
+                updated_at = NOW()
+            WHERE email_event_id = ?
+            LIMIT 1
+        ")->execute([
+            $opportunityId,
+            $workOrderId,
+            json_encode($payload, JSON_UNESCAPED_SLASHES),
+            $eventId,
+        ]);
+
+        $pdo->commit();
+
+        return [
+            'ok' => true,
+            'opportunity_id' => $opportunityId,
+            'work_order_id' => $workOrderId,
+            'work_order_updated' => $workOrderUpdated,
+            'protected_work_order_left_unchanged' => $protectedWorkOrder,
+        ];
+    } catch (Throwable $e) {
+        $pdo->rollBack();
+
+        return ['ok' => false, 'errors' => ['Declined email handler failed: ' . $e->getMessage()]];
+    }
+}
+

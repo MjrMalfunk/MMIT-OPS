@@ -26,6 +26,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $result = field_ops_promote_opportunity_to_work_order((int)($_POST['opportunity_id'] ?? 0));
     } elseif ($action === 'apply_assigned_email_event') {
         $result = field_ops_apply_assigned_email_event_to_work_order((int)($_POST['email_event_id'] ?? 0));
+    } elseif ($action === 'apply_declined_email_event') {
+        $result = field_ops_apply_declined_email_event((int)($_POST['email_event_id'] ?? 0));
     } elseif ($action === 'ignore_opportunity') {
         $result = field_ops_ignore_opportunity((int)($_POST['opportunity_id'] ?? 0));
     }
@@ -36,6 +38,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'apply_email_event' => 'FN email applied to opportunity board.',
             'promote_opportunity' => 'Opportunity promoted to REQUESTED W/O.',
             'apply_assigned_email_event' => 'Assigned FN email applied to W/O.',
+            'apply_declined_email_event' => 'Declined FN email processed.',
             'ignore_opportunity' => 'Opportunity ignored.',
             default => 'Saved.',
         };
@@ -319,12 +322,19 @@ $now = date('Y-m-d H:i');
             </td>
             <td>
               <div class="actions">
-                <?php if (empty($event['applied_at']) && in_array($status, ['AVAILABLE', 'ROUTED', 'MESSAGE', 'DECLINED'], true)): ?>
+                <?php if (empty($event['applied_at']) && in_array($status, ['AVAILABLE', 'ROUTED', 'MESSAGE'], true)): ?>
                   <form method="post" style="margin:0;">
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="apply_email_event">
                     <input type="hidden" name="email_event_id" value="<?= (int)$event['email_event_id'] ?>">
                     <button class="btn btn-primary" type="submit">Apply to board</button>
+                  </form>
+                <?php elseif ($status === 'DECLINED' && empty($event['applied_at'])): ?>
+                  <form method="post" style="margin:0;">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="action" value="apply_declined_email_event">
+                    <input type="hidden" name="email_event_id" value="<?= (int)$event['email_event_id'] ?>">
+                    <button class="btn btn-danger" type="submit">Process decline</button>
                   </form>
                 <?php elseif ($status === 'ASSIGNED' && empty($event['applied_at'])): ?>
                   <form method="post" style="margin:0;">
