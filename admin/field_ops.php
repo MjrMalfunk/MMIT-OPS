@@ -187,6 +187,32 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
       .stats { grid-template-columns: 1fr; }
       .topbar { align-items: flex-start; flex-direction: column; }
     }
+  
+    /* Final native dropdown readability override */
+    body select,
+    body select:focus {
+      background-color: #0b1626 !important;
+      color: #eef6ff !important;
+      color-scheme: light !important;
+      font-weight: 900 !important;
+    }
+
+    body select option,
+    body select optgroup {
+      background-color: #f8fafc !important;
+      color: #0f172a !important;
+      font-size: 15px !important;
+      font-weight: 900 !important;
+      line-height: 1.8 !important;
+      text-shadow: none !important;
+    }
+
+    body select option:checked {
+      background-color: #60a5fa !important;
+      color: #06101f !important;
+      font-weight: 950 !important;
+    }
+
   </style>
 </head>
 <body>

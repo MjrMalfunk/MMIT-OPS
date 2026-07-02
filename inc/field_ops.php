@@ -330,6 +330,7 @@ function field_ops_sources(): array
 function field_ops_work_statuses(): array
 {
     return [
+        'ROUTED',
         'REQUESTED',
         'ASSIGNED',
         'SCHEDULED',
@@ -572,7 +573,7 @@ function field_ops_discard_work_order(int $workOrderId, string $reason = ''): ar
         SET deleted_at = NOW(),
             delete_reason = ?,
             status = CASE
-                WHEN status IN ('REQUESTED', 'ASSIGNED', 'SCHEDULED') THEN 'DECLINED'
+                WHEN status IN ('ROUTED', 'REQUESTED', 'ASSIGNED', 'SCHEDULED') THEN 'DECLINED'
                 ELSE status
             END,
             updated_at = NOW()
@@ -1618,7 +1619,7 @@ function field_ops_summary(): array
     $wo = db()->query("
         SELECT
           COUNT(*) AS total_work_orders,
-          SUM(CASE WHEN status IN ('REQUESTED', 'ASSIGNED', 'SCHEDULED', 'CHECKED_IN', 'IN_PROGRESS') THEN 1 ELSE 0 END) AS active_work_orders,
+          SUM(CASE WHEN status IN ('ROUTED', 'REQUESTED', 'ASSIGNED', 'SCHEDULED', 'CHECKED_IN', 'IN_PROGRESS') THEN 1 ELSE 0 END) AS active_work_orders,
           SUM(CASE WHEN payment_status <> 'PAID' THEN 1 ELSE 0 END) AS unpaid_work_orders,
           COALESCE(SUM(gross_pay + bonus_pay + reimbursement_amount), 0) AS gross_total,
           COALESCE(SUM(platform_fee), 0) AS platform_fee_total,

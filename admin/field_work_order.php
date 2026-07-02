@@ -157,6 +157,32 @@ $defaultRevenueAccountId = field_ops_default_revenue_account_id();
     .field-hint { color:var(--muted); font-size:11px; margin-top:-4px; }
     .actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
     @media (max-width:1000px) { .stats,.two,.form-grid { grid-template-columns:1fr; } .full { grid-column:auto; } }
+  
+    /* Final native dropdown readability override */
+    body select,
+    body select:focus {
+      background-color: #0b1626 !important;
+      color: #eef6ff !important;
+      color-scheme: light !important;
+      font-weight: 900 !important;
+    }
+
+    body select option,
+    body select optgroup {
+      background-color: #f8fafc !important;
+      color: #0f172a !important;
+      font-size: 15px !important;
+      font-weight: 900 !important;
+      line-height: 1.8 !important;
+      text-shadow: none !important;
+    }
+
+    body select option:checked {
+      background-color: #60a5fa !important;
+      color: #06101f !important;
+      font-weight: 950 !important;
+    }
+
   </style>
 </head>
 <body>
