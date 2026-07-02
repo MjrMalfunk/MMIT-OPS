@@ -154,6 +154,40 @@ function field_ops_ensure_schema(): void
     }
 
     $pdo->exec("
+        CREATE TABLE IF NOT EXISTS field_work_order_attachments (
+            attachment_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            work_order_id INT UNSIGNED NOT NULL,
+            attachment_type VARCHAR(60) NOT NULL DEFAULT 'document',
+            original_filename VARCHAR(255) NOT NULL,
+            stored_filename VARCHAR(255) NOT NULL,
+            storage_path VARCHAR(500) NOT NULL,
+            mime_type VARCHAR(120) NULL,
+            file_size_bytes BIGINT UNSIGNED NOT NULL DEFAULT 0,
+            description VARCHAR(255) NULL,
+            onedrive_item_id VARCHAR(190) NULL,
+            onedrive_web_url VARCHAR(500) NULL,
+            uploaded_by INT UNSIGNED NULL,
+            uploaded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            deleted_at DATETIME NULL,
+            INDEX idx_field_attachments_work_order (work_order_id),
+            INDEX idx_field_attachments_type (attachment_type)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+
+    foreach ([
+        'onedrive_item_id' => "VARCHAR(190) NULL",
+        'onedrive_web_url' => "VARCHAR(500) NULL"
+    ] as $column => $definition) {
+        if (function_exists('db_column_exists') && db_table_exists('field_work_order_attachments') && !db_column_exists('field_work_order_attachments', $column)) {
+            try {
+                $pdo->exec("ALTER TABLE field_work_order_attachments ADD COLUMN {$column} {$definition}");
+            } catch (Throwable $e) {
+                error_log('Unable to add field_work_order_attachments.' . $column . ': ' . $e->getMessage());
+            }
+        }
+    }
+
+    $pdo->exec("
         CREATE TABLE IF NOT EXISTS field_work_order_time_entries (
             time_entry_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
             work_order_id INT UNSIGNED NOT NULL,
@@ -1167,6 +1201,415 @@ function field_ops_create_draft_invoice_from_work_order(array $input, int $userI
         'message' => 'Draft invoice created from Field Ops work order.',
     ];
 }
+
+
+function field_ops_account_home(): string
+{
+    $dir = __DIR__;
+
+    if (preg_match('#^(/home/[^/]+)#', $dir, $m)) {
+        return $m[1];
+    }
+
+    $home = getenv('HOME');
+
+    if (is_string($home) && $home !== '') {
+        return rtrim($home, '/');
+    }
+
+    return dirname(__DIR__);
+}
+
+function field_ops_storage_dir(): string
+{
+    return field_ops_account_home() . '/private/mmit-field-ops';
+}
+
+function field_ops_attachment_dir(int $workOrderId): string
+{
+    return field_ops_storage_dir() . '/attachments/work-order-' . $workOrderId;
+}
+
+function field_ops_attachment_types(): array
+{
+    return [
+        'receipt' => 'Receipt',
+        'photo' => 'Photo',
+        'tester_export' => 'Cable tester export',
+        'signed_work_order' => 'Signed work order',
+        'customer_signoff' => 'Customer / lead sign-off',
+        'document' => 'Document',
+        'other' => 'Other',
+    ];
+}
+
+function field_ops_clean_attachment_type(string $type): string
+{
+    $type = strtolower(trim($type));
+    $allowed = array_keys(field_ops_attachment_types());
+
+    return in_array($type, $allowed, true) ? $type : 'document';
+}
+
+function field_ops_safe_filename(string $filename): string
+{
+    $filename = trim($filename);
+    $filename = basename($filename);
+    $filename = preg_replace('/[^A-Za-z0-9._-]+/', '_', $filename) ?? 'attachment';
+    $filename = trim($filename, '._-');
+
+    return $filename !== '' ? substr($filename, 0, 180) : 'attachment';
+}
+
+function field_ops_work_order_attachments(int $workOrderId): array
+{
+    field_ops_ensure_schema();
+
+    $st = db()->prepare("
+        SELECT *
+        FROM field_work_order_attachments
+        WHERE work_order_id = ?
+          AND deleted_at IS NULL
+        ORDER BY uploaded_at DESC, attachment_id DESC
+    ");
+    $st->execute([$workOrderId]);
+
+    return $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
+}
+
+function field_ops_find_attachment(int $attachmentId): ?array
+{
+    field_ops_ensure_schema();
+
+    $st = db()->prepare("
+        SELECT a.*, wo.title AS work_order_title
+        FROM field_work_order_attachments a
+        INNER JOIN field_work_orders wo ON wo.work_order_id = a.work_order_id
+        WHERE a.attachment_id = ?
+          AND a.deleted_at IS NULL
+          AND wo.deleted_at IS NULL
+        LIMIT 1
+    ");
+    $st->execute([$attachmentId]);
+
+    $row = $st->fetch(PDO::FETCH_ASSOC);
+
+    return is_array($row) ? $row : null;
+}
+
+function field_ops_upload_work_order_attachment(array $input, array $file, int $userId = 0): array
+{
+    field_ops_ensure_schema();
+
+    $workOrderId = (int)($input['work_order_id'] ?? 0);
+
+    if ($workOrderId <= 0 || !field_ops_find_work_order($workOrderId)) {
+        return ['ok' => false, 'errors' => ['Valid work order is required.']];
+    }
+
+    if (($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+        return ['ok' => false, 'errors' => ['Upload failed or no file was selected.']];
+    }
+
+    $size = (int)($file['size'] ?? 0);
+
+    if ($size <= 0) {
+        return ['ok' => false, 'errors' => ['Uploaded file is empty.']];
+    }
+
+    if ($size > 25 * 1024 * 1024) {
+        return ['ok' => false, 'errors' => ['Attachment is too large. Max size is 25 MB.']];
+    }
+
+    $tmp = (string)($file['tmp_name'] ?? '');
+
+    if ($tmp === '' || !is_uploaded_file($tmp)) {
+        return ['ok' => false, 'errors' => ['Upload temporary file is invalid.']];
+    }
+
+    $original = field_ops_safe_filename((string)($file['name'] ?? 'attachment'));
+    $extension = strtolower(pathinfo($original, PATHINFO_EXTENSION));
+
+    $allowedExtensions = ['pdf', 'jpg', 'jpeg', 'png', 'webp', 'txt', 'csv', 'log', 'doc', 'docx', 'xls', 'xlsx'];
+
+    if ($extension !== '' && !in_array($extension, $allowedExtensions, true)) {
+        return ['ok' => false, 'errors' => ['File type is not allowed for W/O attachments.']];
+    }
+
+    $dir = field_ops_attachment_dir($workOrderId);
+
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0750, true);
+    }
+
+    $stored = date('Ymd-His') . '-' . bin2hex(random_bytes(6)) . '-' . $original;
+    $path = $dir . '/' . $stored;
+
+    if (!@move_uploaded_file($tmp, $path)) {
+        return ['ok' => false, 'errors' => ['Could not store uploaded attachment.']];
+    }
+
+    @chmod($path, 0640);
+
+    $mime = null;
+
+    if (function_exists('finfo_open')) {
+        $finfo = finfo_open(FILEINFO_MIME_TYPE);
+        if ($finfo) {
+            $mime = finfo_file($finfo, $path) ?: null;
+            finfo_close($finfo);
+        }
+    }
+
+    db()->prepare("
+        INSERT INTO field_work_order_attachments
+          (work_order_id, attachment_type, original_filename, stored_filename, storage_path, mime_type, file_size_bytes, description, uploaded_by)
+        VALUES
+          (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ")->execute([
+        $workOrderId,
+        field_ops_clean_attachment_type((string)($input['attachment_type'] ?? 'document')),
+        $original,
+        $stored,
+        $path,
+        $mime,
+        filesize($path) ?: $size,
+        trim((string)($input['description'] ?? '')) ?: null,
+        $userId > 0 ? $userId : null,
+    ]);
+
+    return ['ok' => true, 'attachment_id' => (int)db()->lastInsertId()];
+}
+
+function field_ops_delete_attachment(int $attachmentId): array
+{
+    field_ops_ensure_schema();
+
+    if ($attachmentId <= 0 || !field_ops_find_attachment($attachmentId)) {
+        return ['ok' => false, 'errors' => ['Attachment not found.']];
+    }
+
+    db()->prepare("
+        UPDATE field_work_order_attachments
+        SET deleted_at = NOW()
+        WHERE attachment_id = ?
+        LIMIT 1
+    ")->execute([$attachmentId]);
+
+    return ['ok' => true];
+}
+
+
+
+function field_ops_onedrive_root(): string
+{
+    return defined('ONEDRIVE_FIELD_OPS_ROOT')
+        ? trim((string)ONEDRIVE_FIELD_OPS_ROOT)
+        : 'MMIT Field Ops';
+}
+
+function field_ops_onedrive_attachment_folder(array $attachment): string
+{
+    require_once __DIR__ . '/onedrive.php';
+
+    $workOrderId = (int)($attachment['work_order_id'] ?? 0);
+    $title = onedrive_sanitize_segment((string)($attachment['work_order_title'] ?? ('Work Order ' . $workOrderId)));
+    $type = field_ops_clean_attachment_type((string)($attachment['attachment_type'] ?? 'document'));
+
+    $typeFolderMap = [
+        'receipt' => 'receipts',
+        'photo' => 'photos',
+        'tester_export' => 'tester-exports',
+        'signed_work_order' => 'signed-work-orders',
+        'customer_signoff' => 'signoff',
+        'document' => 'documents',
+        'other' => 'other',
+    ];
+
+    $uploadedAt = trim((string)($attachment['uploaded_at'] ?? ''));
+    $year = date('Y');
+
+    if ($uploadedAt !== '') {
+        try {
+            $year = (new DateTimeImmutable($uploadedAt))->format('Y');
+        } catch (Throwable $e) {
+            $year = date('Y');
+        }
+    }
+
+    $woFolder = onedrive_sanitize_segment(sprintf('WO-%06d - %s', $workOrderId, $title));
+    $typeFolder = $typeFolderMap[$type] ?? 'documents';
+
+    return onedrive_sanitize_segment(field_ops_onedrive_root())
+        . '/' . $year
+        . '/Work Orders'
+        . '/' . $woFolder
+        . '/' . $typeFolder;
+}
+
+function field_ops_onedrive_remote_name(array $attachment): string
+{
+    require_once __DIR__ . '/onedrive.php';
+
+    $name = field_ops_safe_filename((string)($attachment['original_filename'] ?? 'attachment'));
+    $type = field_ops_clean_attachment_type((string)($attachment['attachment_type'] ?? 'document'));
+    $id = (int)($attachment['attachment_id'] ?? 0);
+
+    $prefix = $type . '-' . str_pad((string)$id, 6, '0', STR_PAD_LEFT);
+
+    return onedrive_sanitize_segment($prefix . '-' . $name);
+}
+
+function field_ops_onedrive_unique_name(string $accessToken, string $folderPath, string $remoteName): string
+{
+    require_once __DIR__ . '/onedrive.php';
+
+    $remoteName = onedrive_sanitize_segment($remoteName);
+    $candidate = $remoteName;
+    $ext = pathinfo($remoteName, PATHINFO_EXTENSION);
+    $base = $ext !== '' ? substr($remoteName, 0, -(strlen($ext) + 1)) : $remoteName;
+
+    for ($i = 0; $i < 50; $i++) {
+        $testPath = $folderPath . '/' . $candidate;
+
+        if (!onedrive_item_exists($accessToken, $testPath)) {
+            return $candidate;
+        }
+
+        $suffix = '-' . ($i + 1);
+        $candidate = $ext !== '' ? ($base . $suffix . '.' . $ext) : ($base . $suffix);
+    }
+
+    return uniqid($base . '-', true) . ($ext !== '' ? '.' . $ext : '');
+}
+
+function field_ops_sync_attachment_to_onedrive(int $attachmentId): array
+{
+    field_ops_ensure_schema();
+
+    require_once __DIR__ . '/onedrive.php';
+
+    $attachment = field_ops_find_attachment($attachmentId);
+
+    if (!$attachment) {
+        return ['ok' => false, 'errors' => ['Attachment not found.']];
+    }
+
+    if (!empty($attachment['onedrive_item_id']) && !empty($attachment['onedrive_web_url'])) {
+        return [
+            'ok' => true,
+            'attachment_id' => $attachmentId,
+            'message' => 'Attachment already synced to OneDrive.',
+            'web_url' => (string)$attachment['onedrive_web_url'],
+        ];
+    }
+
+    $path = (string)($attachment['storage_path'] ?? '');
+
+    if ($path === '' || !is_file($path)) {
+        return ['ok' => false, 'errors' => ['Local attachment file is missing.']];
+    }
+
+    if (!onedrive_is_configured()) {
+        return ['ok' => false, 'errors' => ['OneDrive is not configured yet.']];
+    }
+
+    $token = onedrive_get_valid_access_token();
+
+    if (empty($token['ok']) || empty($token['access_token'])) {
+        return ['ok' => false, 'errors' => [(string)($token['error'] ?? 'OneDrive is not connected.')]];
+    }
+
+    $accessToken = (string)$token['access_token'];
+    $folderPath = field_ops_onedrive_attachment_folder($attachment);
+
+    if (!onedrive_ensure_folder_path($accessToken, $folderPath)) {
+        return ['ok' => false, 'errors' => ['Unable to prepare the OneDrive Field Ops folder.']];
+    }
+
+    $remoteName = field_ops_onedrive_unique_name($accessToken, $folderPath, field_ops_onedrive_remote_name($attachment));
+    $encodedPath = onedrive_encode_path($folderPath . '/' . $remoteName);
+    $bytes = @file_get_contents($path);
+
+    if ($bytes === false || $bytes === '') {
+        return ['ok' => false, 'errors' => ['Unable to read local attachment for OneDrive sync.']];
+    }
+
+    $mime = trim((string)($attachment['mime_type'] ?? '')) ?: 'application/octet-stream';
+
+    $upload = onedrive_http_request(
+        'PUT',
+        'https://graph.microsoft.com/v1.0/me/drive/root:/' . $encodedPath . ':/content',
+        [
+            'Authorization: Bearer ' . $accessToken,
+            'Content-Type: ' . $mime,
+        ],
+        $bytes,
+        true
+    );
+
+    if (empty($upload['ok']) || !is_array($upload['json'] ?? null)) {
+        return ['ok' => false, 'errors' => [(string)($upload['error'] ?? 'OneDrive upload failed.')]];
+    }
+
+    $item = $upload['json'];
+    $itemId = (string)($item['id'] ?? '');
+    $webUrl = (string)($item['webUrl'] ?? '');
+
+    db()->prepare("
+        UPDATE field_work_order_attachments
+        SET onedrive_item_id = ?,
+            onedrive_web_url = ?
+        WHERE attachment_id = ?
+        LIMIT 1
+    ")->execute([
+        $itemId !== '' ? $itemId : null,
+        $webUrl !== '' ? $webUrl : null,
+        $attachmentId,
+    ]);
+
+    return [
+        'ok' => true,
+        'attachment_id' => $attachmentId,
+        'folder_path' => $folderPath,
+        'remote_name' => $remoteName,
+        'onedrive_item_id' => $itemId,
+        'web_url' => $webUrl,
+    ];
+}
+
+function field_ops_sync_work_order_attachments_to_onedrive(int $workOrderId): array
+{
+    field_ops_ensure_schema();
+
+    $attachments = field_ops_work_order_attachments($workOrderId);
+    $synced = 0;
+    $skipped = 0;
+    $errors = [];
+
+    foreach ($attachments as $attachment) {
+        if (!empty($attachment['onedrive_item_id']) && !empty($attachment['onedrive_web_url'])) {
+            $skipped++;
+            continue;
+        }
+
+        $result = field_ops_sync_attachment_to_onedrive((int)$attachment['attachment_id']);
+
+        if (!empty($result['ok'])) {
+            $synced++;
+        } else {
+            $errors[] = (string)($attachment['original_filename'] ?? 'Attachment') . ': ' . implode(' ', (array)($result['errors'] ?? ['Sync failed.']));
+        }
+    }
+
+    return [
+        'ok' => $errors === [],
+        'synced' => $synced,
+        'skipped' => $skipped,
+        'errors' => $errors,
+    ];
+}
+
 
 function field_ops_summary(): array
 {

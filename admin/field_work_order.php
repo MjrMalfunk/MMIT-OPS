@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../inc/bootstrap.php';
 require_once __DIR__ . '/../inc/field_ops.php';
+require_once __DIR__ . '/../inc/onedrive.php';
 
 require_login();
 
@@ -43,6 +44,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $result = field_ops_update_work_order_state($_POST);
     } elseif ($action === 'create_invoice') {
         $result = field_ops_create_draft_invoice_from_work_order($_POST, (int)((current_user()['user_id'] ?? 0)));
+    } elseif ($action === 'upload_attachment') {
+        $result = field_ops_upload_work_order_attachment($_POST, $_FILES['attachment_file'] ?? [], (int)((current_user()['user_id'] ?? 0)));
+    } elseif ($action === 'delete_attachment') {
+        $result = field_ops_delete_attachment((int)($_POST['attachment_id'] ?? 0));
+    } elseif ($action === 'sync_attachment_onedrive') {
+        $result = field_ops_sync_attachment_to_onedrive((int)($_POST['attachment_id'] ?? 0));
+    } elseif ($action === 'sync_all_attachments_onedrive') {
+        $result = field_ops_sync_work_order_attachments_to_onedrive($workOrderId);
     } elseif ($action === 'discard_work_order') {
         $result = field_ops_discard_work_order($workOrderId, (string)($_POST['delete_reason'] ?? 'Discarded from detail page.'));
     }
@@ -54,6 +63,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'add_time' => 'Time entry added.',
             'update_state' => 'Work order updated.',
             'create_invoice' => 'Draft invoice created from W/O.',
+            'upload_attachment' => 'Attachment uploaded.',
+            'delete_attachment' => 'Attachment removed.',
+            'sync_attachment_onedrive' => 'Attachment synced to OneDrive.',
+            'sync_all_attachments_onedrive' => 'W/O attachments synced to OneDrive.',
             'discard_work_order' => 'Work order discarded.',
             default => 'Saved.',
         };
@@ -76,8 +89,10 @@ $expenses = field_ops_work_order_expenses($workOrderId);
 $timeEntries = field_ops_work_order_time_entries($workOrderId);
 $items = field_ops_inventory_items();
 $totals = field_ops_work_order_totals($workOrderId);
+$attachments = field_ops_work_order_attachments($workOrderId);
 $clients = field_ops_clients_for_invoice();
 $linkedInvoice = field_ops_existing_invoice_for_work_order($workOrderId);
+$onedriveStatus = onedrive_connection_status();
 $canCreateInvoice = field_ops_can_invoice_work_order($wo);
 $defaultRevenueAccountId = field_ops_default_revenue_account_id();
 
@@ -346,6 +361,118 @@ $defaultRevenueAccountId = field_ops_default_revenue_account_id();
     </article>
   </section>
 
+
+
+  <section class="card" style="margin-top:16px;">
+    <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap;">
+      <div>
+        <h2>Attachments</h2>
+        <p style="margin-top:0;">Upload receipts, job photos, cable tester exports, signed paperwork, and lead/customer sign-off files. Files are stored privately and can also sync to OneDrive.</p>
+      </div>
+      <div class="actions">
+        <?php if (empty($onedriveStatus['configured'])): ?>
+          <span class="badge">OneDrive not configured</span>
+        <?php elseif (empty($onedriveStatus['has_refresh_token'])): ?>
+          <a class="btn" href="<?= $h(BASE_URL) ?>/accounting/onedrive_connect.php?return_to=<?= urlencode(BASE_URL . '/admin/field_work_order.php?id=' . (int)$workOrderId) ?>">Connect OneDrive</a>
+        <?php else: ?>
+          <form method="post" style="margin:0;">
+            <?= csrf_field() ?>
+            <input type="hidden" name="action" value="sync_all_attachments_onedrive">
+            <input type="hidden" name="work_order_id" value="<?= (int)$workOrderId ?>">
+            <button class="btn btn-primary" type="submit">Sync all to OneDrive</button>
+          </form>
+        <?php endif; ?>
+      </div>
+    </div>
+
+    <form method="post" enctype="multipart/form-data" class="form-grid" style="margin-bottom:16px;">
+      <?= csrf_field() ?>
+      <input type="hidden" name="action" value="upload_attachment">
+      <input type="hidden" name="work_order_id" value="<?= (int)$workOrderId ?>">
+
+      <label>
+        Type
+        <select name="attachment_type">
+          <?php foreach (field_ops_attachment_types() as $typeCode => $typeLabel): ?>
+            <option value="<?= $h($typeCode) ?>"><?= $h($typeLabel) ?></option>
+          <?php endforeach; ?>
+        </select>
+      </label>
+
+      <label>
+        File
+        <input type="file" name="attachment_file" required>
+      </label>
+
+      <label class="full">
+        Description
+        <input name="description" placeholder="Receipt for fish poles, before photo, signed lead release, tester export, etc.">
+      </label>
+
+      <div class="full">
+        <button class="btn btn-primary" type="submit">Upload attachment</button>
+      </div>
+    </form>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th>File</th>
+            <th>Description</th>
+            <th>Size</th>
+            <th>Uploaded</th>
+            <th>OneDrive</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+        <?php if (!$attachments): ?>
+          <tr><td colspan="7" class="muted">No attachments yet.</td></tr>
+        <?php endif; ?>
+        <?php foreach ($attachments as $attachment): ?>
+          <tr>
+            <td><span class="badge"><?= $h(field_ops_attachment_types()[$attachment['attachment_type']] ?? $attachment['attachment_type']) ?></span></td>
+            <td>
+              <a href="<?= $h(BASE_URL) ?>/admin/field_attachment.php?id=<?= (int)$attachment['attachment_id'] ?>" target="_blank" rel="noopener">
+                <?= $h($attachment['original_filename']) ?>
+              </a>
+              <div class="muted"><?= $h($attachment['mime_type'] ?? '') ?></div>
+            </td>
+            <td><?= $h($attachment['description'] ?? '') ?></td>
+            <td><?= number_format(((int)$attachment['file_size_bytes']) / 1024, 1) ?> KB</td>
+            <td><?= $h($attachment['uploaded_at']) ?></td>
+            <td>
+              <?php if (!empty($attachment['onedrive_web_url'])): ?>
+                <a class="btn" href="<?= $h($attachment['onedrive_web_url']) ?>" target="_blank" rel="noopener" style="min-height:32px;padding:7px 10px;">Open in OneDrive</a>
+              <?php elseif (!empty($onedriveStatus['has_refresh_token'])): ?>
+                <form method="post" style="margin:0;">
+                  <?= csrf_field() ?>
+                  <input type="hidden" name="action" value="sync_attachment_onedrive">
+                  <input type="hidden" name="work_order_id" value="<?= (int)$workOrderId ?>">
+                  <input type="hidden" name="attachment_id" value="<?= (int)$attachment['attachment_id'] ?>">
+                  <button class="btn" type="submit" style="min-height:32px;padding:7px 10px;">Sync</button>
+                </form>
+              <?php else: ?>
+                <span class="muted">Local only</span>
+              <?php endif; ?>
+            </td>
+            <td>
+              <form method="post" style="margin:0;" onsubmit="return confirm('Remove this attachment from the W/O?');">
+                <?= csrf_field() ?>
+                <input type="hidden" name="action" value="delete_attachment">
+                <input type="hidden" name="work_order_id" value="<?= (int)$workOrderId ?>">
+                <input type="hidden" name="attachment_id" value="<?= (int)$attachment['attachment_id'] ?>">
+                <button class="btn btn-danger" type="submit" style="min-height:32px;padding:7px 10px;">Remove</button>
+              </form>
+            </td>
+          </tr>
+        <?php endforeach; ?>
+        </tbody>
+      </table>
+    </div>
+  </section>
 
   <section class="card" style="margin-top:16px;">
     <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap;">
