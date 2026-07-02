@@ -2647,3 +2647,172 @@ function field_ops_opportunity_summary(): array
     ];
 }
 
+
+
+function field_ops_find_work_order_by_external_number_safe(string $number): ?array
+{
+    field_ops_ensure_schema();
+
+    $number = trim($number);
+
+    if ($number === '') {
+        return null;
+    }
+
+    $st = db()->prepare("
+        SELECT *
+        FROM field_work_orders
+        WHERE external_work_order_number = ?
+          AND deleted_at IS NULL
+        ORDER BY work_order_id DESC
+        LIMIT 1
+    ");
+    $st->execute([$number]);
+
+    $row = $st->fetch(PDO::FETCH_ASSOC);
+
+    return is_array($row) ? $row : null;
+}
+
+function field_ops_apply_assigned_email_event_to_work_order(int $eventId): array
+{
+    field_ops_ensure_opportunity_schema();
+
+    $event = field_ops_find_email_event($eventId);
+
+    if (!$event) {
+        return ['ok' => false, 'errors' => ['Email event not found.']];
+    }
+
+    $status = strtoupper((string)($event['parsed_status'] ?? ''));
+
+    if ($status !== 'ASSIGNED') {
+        return ['ok' => false, 'errors' => ['Only ASSIGNED email events can be applied to W/O from this action.']];
+    }
+
+    $woNumber = trim((string)($event['parsed_work_order_number'] ?? ''));
+
+    if ($woNumber === '') {
+        return ['ok' => false, 'errors' => ['Assigned email did not include a W/O number.']];
+    }
+
+    $buyerName = trim((string)($event['parsed_buyer_name'] ?? 'FieldNation')) ?: 'FieldNation';
+    $buyerId = field_ops_find_or_create_buyer('FieldNation', $buyerName);
+    $existing = field_ops_find_work_order_by_external_number_safe($woNumber);
+
+    $title = trim((string)($event['parsed_title'] ?? '')) ?: ('FieldNation W/O ' . $woNumber);
+
+    $notes = [
+        'Created/updated from ASSIGNED FieldNation email event #' . $eventId . '.',
+        'Parsed status: ASSIGNED.',
+    ];
+
+    if (!empty($event['body_text'])) {
+        $notes[] = "\n--- Email body snapshot ---\n" . substr((string)$event['body_text'], 0, 1800);
+    }
+
+    $candidate = [
+        'platform' => 'FieldNation',
+        'external_work_order_number' => $woNumber,
+        'buyer_id' => $buyerId,
+        'title' => $title,
+        'work_type' => 'Field service',
+        'city' => trim((string)($event['parsed_city'] ?? '')) ?: null,
+        'state' => trim((string)($event['parsed_state'] ?? '')) ?: null,
+        'scheduled_start_at' => $event['parsed_schedule_start_at'] ?: null,
+        'scheduled_end_at' => $event['parsed_schedule_end_at'] ?: null,
+        'status' => 'ASSIGNED',
+        'payment_status' => 'UNPAID',
+        'gross_pay' => (float)($event['parsed_estimated_gross'] ?? 0),
+        'source_system' => 'FieldNation Email',
+        'source_message_id' => (string)$eventId,
+        'source_url' => trim((string)($event['parsed_url'] ?? '')) ?: null,
+        'notes' => implode("\n", $notes),
+    ];
+
+    $table = 'field_work_orders';
+    $pdo = db();
+    $pdo->beginTransaction();
+
+    try {
+        if ($existing) {
+            $workOrderId = (int)$existing['work_order_id'];
+            $set = [];
+            $params = [];
+
+            foreach ($candidate as $column => $value) {
+                if (function_exists('db_column_exists') && !db_column_exists($table, $column)) {
+                    continue;
+                }
+
+                if ($column === 'external_work_order_number') {
+                    continue;
+                }
+
+                if ($column === 'notes') {
+                    $set[] = "notes = CONCAT(COALESCE(notes, ''), ?)";
+                    $params[] = "\n\n" . (string)$value;
+                    continue;
+                }
+
+                if ($column === 'gross_pay' && (float)$value <= 0) {
+                    continue;
+                }
+
+                $set[] = "{$column} = ?";
+                $params[] = $value;
+            }
+
+            $set[] = "updated_at = NOW()";
+            $params[] = $workOrderId;
+
+            $pdo->prepare("
+                UPDATE {$table}
+                SET " . implode(', ', $set) . "
+                WHERE work_order_id = ?
+                LIMIT 1
+            ")->execute($params);
+        } else {
+            $cols = [];
+            $marks = [];
+            $params = [];
+
+            foreach ($candidate as $column => $value) {
+                if (function_exists('db_column_exists') && !db_column_exists($table, $column)) {
+                    continue;
+                }
+
+                $cols[] = $column;
+                $marks[] = '?';
+                $params[] = $value;
+            }
+
+            $pdo->prepare("
+                INSERT INTO {$table}
+                  (" . implode(', ', $cols) . ")
+                VALUES
+                  (" . implode(', ', $marks) . ")
+            ")->execute($params);
+
+            $workOrderId = (int)$pdo->lastInsertId();
+        }
+
+        $pdo->prepare("
+            UPDATE field_email_events
+            SET matched_work_order_id = ?,
+                applied_at = NOW(),
+                updated_at = NOW()
+            WHERE email_event_id = ?
+            LIMIT 1
+        ")->execute([$workOrderId, $eventId]);
+
+        $pdo->commit();
+
+        return ['ok' => true, 'work_order_id' => $workOrderId];
+    } catch (Throwable $e) {
+        $pdo->rollBack();
+
+        return ['ok' => false, 'errors' => ['Assigned W/O bridge failed: ' . $e->getMessage()]];
+    }
+}
+

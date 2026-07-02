@@ -24,6 +24,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $result = field_ops_apply_email_event_to_opportunity((int)($_POST['email_event_id'] ?? 0));
     } elseif ($action === 'promote_opportunity') {
         $result = field_ops_promote_opportunity_to_work_order((int)($_POST['opportunity_id'] ?? 0));
+    } elseif ($action === 'apply_assigned_email_event') {
+        $result = field_ops_apply_assigned_email_event_to_work_order((int)($_POST['email_event_id'] ?? 0));
     } elseif ($action === 'ignore_opportunity') {
         $result = field_ops_ignore_opportunity((int)($_POST['opportunity_id'] ?? 0));
     }
@@ -33,6 +35,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'save_email_event' => 'FN email parsed and queued.',
             'apply_email_event' => 'FN email applied to opportunity board.',
             'promote_opportunity' => 'Opportunity promoted to REQUESTED W/O.',
+            'apply_assigned_email_event' => 'Assigned FN email applied to W/O.',
             'ignore_opportunity' => 'Opportunity ignored.',
             default => 'Saved.',
         };
@@ -323,8 +326,15 @@ $now = date('Y-m-d H:i');
                     <input type="hidden" name="email_event_id" value="<?= (int)$event['email_event_id'] ?>">
                     <button class="btn btn-primary" type="submit">Apply to board</button>
                   </form>
-                <?php elseif ($status === 'ASSIGNED'): ?>
-                  <span class="muted">W/O bridge next</span>
+                <?php elseif ($status === 'ASSIGNED' && empty($event['applied_at'])): ?>
+                  <form method="post" style="margin:0;">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="action" value="apply_assigned_email_event">
+                    <input type="hidden" name="email_event_id" value="<?= (int)$event['email_event_id'] ?>">
+                    <button class="btn btn-primary" type="submit">Apply to W/O</button>
+                  </form>
+                <?php elseif ($status === 'ASSIGNED' && !empty($event['matched_work_order_id'])): ?>
+                  <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_work_order.php?id=<?= (int)$event['matched_work_order_id'] ?>">Open W/O</a>
                 <?php endif; ?>
               </div>
             </td>
