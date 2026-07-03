@@ -75,7 +75,39 @@ if (!empty($_SESSION['flash_msg'])) {
 
 $summary = field_ops_opportunity_summary();
 $events = field_ops_email_events(80);
-$opportunities = field_ops_opportunities(200);
+$allOpportunities = field_ops_opportunities(200);
+
+$opportunityFilters = [
+    'all' => 'All',
+    'routed' => 'Routed',
+    'request' => 'Request this',
+    'watching' => 'Watching',
+    'review' => 'Review',
+    'skip' => 'Skip',
+];
+
+$opportunityFilter = strtolower((string)($_GET['opportunity_filter'] ?? 'all'));
+if (!array_key_exists($opportunityFilter, $opportunityFilters)) {
+    $opportunityFilter = 'all';
+}
+
+$opportunities = array_values(array_filter($allOpportunities, static function (array $op) use ($opportunityFilter): bool {
+    $status = strtoupper((string)($op['status'] ?? 'AVAILABLE'));
+    $score = (int)($op['score'] ?? 0);
+    $recommendation = strtolower(trim((string)($op['recommendation'] ?? '')));
+
+    return match ($opportunityFilter) {
+        'routed' => $status === 'ROUTED',
+        'request' => $recommendation === 'request this' || $score >= 80,
+        'watching' => $status === 'WATCHING',
+        'review' => $score >= 45 && $score < 80,
+        'skip' => $recommendation === 'skip' || $score < 45,
+        default => true,
+    };
+}));
+
+$opportunityCount = count($opportunities);
+$totalOpportunityCount = count($allOpportunities);
 $now = date('Y-m-d H:i');
 
 ?>
@@ -145,6 +177,9 @@ $now = date('Y-m-d H:i');
     .red { color:var(--red); background:rgba(239,68,68,.12); }
     .score { font-size:22px; font-weight:950; }
     .actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    .filter-bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:10px 0 14px; }
+    .filter-pill { display:inline-flex; align-items:center; justify-content:center; min-height:34px; padding:7px 12px; border-radius:999px; border:1px solid rgba(147,197,253,.28); color:#bfdbfe; background:rgba(15,23,42,.42); text-decoration:none; font-weight:950; font-size:13px; }
+    .filter-pill.active { color:white; border-color:rgba(96,165,250,.7); background:linear-gradient(135deg,rgba(37,99,235,.84),rgba(96,165,250,.7)); }
     .action-note { flex-basis:100%; font-size:12px; line-height:1.4; }
     html { scroll-behavior:smooth; }
     .op-detail-row td { padding-top:0; background:rgba(15,23,42,.32); }
@@ -250,6 +285,20 @@ $now = date('Y-m-d H:i');
 
   <section class="card" style="margin-top:16px;">
     <h2>Opportunity board</h2>
+    <p class="muted" style="margin-top:-4px;">
+      Showing <?= (int)$opportunityCount ?> of <?= (int)$totalOpportunityCount ?> active opportunities.
+    </p>
+
+    <nav class="filter-bar" aria-label="Opportunity board filters">
+      <?php foreach ($opportunityFilters as $filterKey => $filterLabel): ?>
+        <a
+          class="filter-pill <?= $opportunityFilter === $filterKey ? 'active' : '' ?>"
+          href="<?= $h(BASE_URL) ?>/admin/field_opportunities.php?opportunity_filter=<?= $h($filterKey) ?>"
+          aria-current="<?= $opportunityFilter === $filterKey ? 'page' : 'false' ?>"
+        ><?= $h($filterLabel) ?></a>
+      <?php endforeach; ?>
+    </nav>
+
     <div class="table-wrap">
       <table>
         <thead>
@@ -267,7 +316,15 @@ $now = date('Y-m-d H:i');
         </thead>
         <tbody>
         <?php if (!$opportunities): ?>
-          <tr><td colspan="9" class="muted">No opportunities yet. Import from the FN mailbox or paste a routed/new-work email above.</td></tr>
+          <tr>
+            <td colspan="9" class="muted">
+              <?php if ($totalOpportunityCount > 0): ?>
+                No opportunities match the <?= $h($opportunityFilters[$opportunityFilter] ?? 'selected') ?> filter.
+              <?php else: ?>
+                No opportunities yet. Import from the FN mailbox or paste a routed/new-work email above.
+              <?php endif; ?>
+            </td>
+          </tr>
         <?php endif; ?>
         <?php foreach ($opportunities as $op):
           $score = (int)$op['score'];
