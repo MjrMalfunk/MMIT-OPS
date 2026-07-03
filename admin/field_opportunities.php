@@ -74,7 +74,7 @@ if (!empty($_SESSION['flash_msg'])) {
 }
 
 $summary = field_ops_opportunity_summary();
-$events = field_ops_email_events(80);
+$allEvents = field_ops_email_events(80);
 $allOpportunities = field_ops_opportunities(200);
 
 $opportunityFilters = [
@@ -108,6 +108,37 @@ $opportunities = array_values(array_filter($allOpportunities, static function (a
 
 $opportunityCount = count($opportunities);
 $totalOpportunityCount = count($allOpportunities);
+
+$eventFilters = [
+    'all' => 'All',
+    'queued' => 'Queued',
+    'applied' => 'Applied',
+    'assigned' => 'Assigned',
+    'declined' => 'Declined',
+    'available' => 'Available/Routed',
+];
+
+$eventFilter = strtolower((string)($_GET['event_filter'] ?? 'all'));
+if (!array_key_exists($eventFilter, $eventFilters)) {
+    $eventFilter = 'all';
+}
+
+$events = array_values(array_filter($allEvents, static function (array $event) use ($eventFilter): bool {
+    $status = strtoupper((string)($event['parsed_status'] ?? 'MESSAGE'));
+    $applied = !empty($event['applied_at']);
+
+    return match ($eventFilter) {
+        'queued' => !$applied,
+        'applied' => $applied,
+        'assigned' => $status === 'ASSIGNED',
+        'declined' => in_array($status, ['DECLINED', 'CANCELLED'], true),
+        'available' => in_array($status, ['AVAILABLE', 'ROUTED', 'MESSAGE'], true),
+        default => true,
+    };
+}));
+
+$eventCount = count($events);
+$totalEventCount = count($allEvents);
 $now = date('Y-m-d H:i');
 
 ?>
@@ -180,6 +211,8 @@ $now = date('Y-m-d H:i');
     .filter-bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:10px 0 14px; }
     .filter-pill { display:inline-flex; align-items:center; justify-content:center; min-height:34px; padding:7px 12px; border-radius:999px; border:1px solid rgba(147,197,253,.28); color:#bfdbfe; background:rgba(15,23,42,.42); text-decoration:none; font-weight:950; font-size:13px; }
     .filter-pill.active { color:white; border-color:rgba(96,165,250,.7); background:linear-gradient(135deg,rgba(37,99,235,.84),rgba(96,165,250,.7)); }
+    #opportunity-board-filters,
+    #email-event-filters { scroll-margin-top:24px; }
     .action-note { flex-basis:100%; font-size:12px; line-height:1.4; }
     html { scroll-behavior:smooth; }
     .op-detail-row td { padding-top:0; background:rgba(15,23,42,.32); }
@@ -289,11 +322,11 @@ $now = date('Y-m-d H:i');
       Showing <?= (int)$opportunityCount ?> of <?= (int)$totalOpportunityCount ?> active opportunities.
     </p>
 
-    <nav class="filter-bar" aria-label="Opportunity board filters">
+    <nav id="opportunity-board-filters" class="filter-bar" aria-label="Opportunity board filters">
       <?php foreach ($opportunityFilters as $filterKey => $filterLabel): ?>
         <a
           class="filter-pill <?= $opportunityFilter === $filterKey ? 'active' : '' ?>"
-          href="<?= $h(BASE_URL) ?>/admin/field_opportunities.php?opportunity_filter=<?= $h($filterKey) ?>"
+          href="<?= $h(BASE_URL) ?>/admin/field_opportunities.php?opportunity_filter=<?= $h($filterKey) ?>&amp;event_filter=<?= $h($eventFilter) ?>#opportunity-board-filters"
           aria-current="<?= $opportunityFilter === $filterKey ? 'page' : 'false' ?>"
         ><?= $h($filterLabel) ?></a>
       <?php endforeach; ?>
@@ -540,7 +573,21 @@ $now = date('Y-m-d H:i');
 
   <section class="card" style="margin-top:16px;">
     <h2>Email events</h2>
-    <div class="table-wrap">
+    <p class="muted" style="margin-top:-4px;">
+      Showing <?= (int)$eventCount ?> of <?= (int)$totalEventCount ?> email events.
+    </p>
+
+    <nav id="email-event-filters" class="filter-bar" aria-label="Email event filters">
+      <?php foreach ($eventFilters as $filterKey => $filterLabel): ?>
+        <a
+          class="filter-pill <?= $eventFilter === $filterKey ? 'active' : '' ?>"
+          href="<?= $h(BASE_URL) ?>/admin/field_opportunities.php?opportunity_filter=<?= $h($opportunityFilter) ?>&amp;event_filter=<?= $h($filterKey) ?>#email-event-filters"
+          aria-current="<?= $eventFilter === $filterKey ? 'page' : 'false' ?>"
+        ><?= $h($filterLabel) ?></a>
+      <?php endforeach; ?>
+    </nav>
+
+    <div id="email-events" class="table-wrap">
       <table>
         <thead>
           <tr>
@@ -555,7 +602,15 @@ $now = date('Y-m-d H:i');
         </thead>
         <tbody>
         <?php if (!$events): ?>
-          <tr><td colspan="7" class="muted">No email events yet.</td></tr>
+          <tr>
+            <td colspan="7" class="muted">
+              <?php if ($totalEventCount > 0): ?>
+                No email events match the <?= $h($eventFilters[$eventFilter] ?? 'selected') ?> filter.
+              <?php else: ?>
+                No email events yet.
+              <?php endif; ?>
+            </td>
+          </tr>
         <?php endif; ?>
         <?php foreach ($events as $event):
           $status = (string)($event['parsed_status'] ?? 'MESSAGE');
