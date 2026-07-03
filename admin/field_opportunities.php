@@ -129,11 +129,17 @@ $now = date('Y-m-d H:i');
     th { color:#bfdbfe; font-size:12px; text-transform:uppercase; letter-spacing:.08em; }
     code { display:inline-block; max-width:100%; overflow-wrap:anywhere; padding:4px 7px; border-radius:8px; background:rgba(0,0,0,.28); color:#dbeafe; }
     .badge { display:inline-flex; border:1px solid var(--line); border-radius:999px; padding:5px 9px; font-size:12px; font-weight:950; letter-spacing:.04em; background:rgba(147,197,253,.1); white-space:nowrap; }
+    .badge-routed { color:#c4b5fd; border-color:rgba(196,181,253,.45); background:rgba(124,58,237,.18); }
+    .badge-available { color:var(--yellow); border-color:rgba(250,204,21,.35); background:rgba(250,204,21,.10); }
+    .badge-watching { color:#bfdbfe; border-color:rgba(147,197,253,.35); background:rgba(59,130,246,.12); }
+    .badge-requested { color:var(--green); border-color:rgba(34,197,94,.35); background:rgba(34,197,94,.12); }
+    .op-context { margin-top:7px; font-size:12px; line-height:1.45; }
     .green { color:var(--green); background:rgba(34,197,94,.12); }
     .yellow { color:var(--yellow); background:rgba(250,204,21,.10); }
     .red { color:var(--red); background:rgba(239,68,68,.12); }
     .score { font-size:22px; font-weight:950; }
     .actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    .action-note { flex-basis:100%; font-size:12px; line-height:1.4; }
     @media (max-width:1000px) { .stats,.two,.form-grid { grid-template-columns:1fr; } .full { grid-column:auto; } }
   </style>
 </head>
@@ -243,11 +249,19 @@ $now = date('Y-m-d H:i');
         </thead>
         <tbody>
         <?php if (!$opportunities): ?>
-          <tr><td colspan="9" class="muted">No opportunities yet. Paste a routed or new-work FN email above.</td></tr>
+          <tr><td colspan="9" class="muted">No opportunities yet. Import from the FN mailbox or paste a routed/new-work email above.</td></tr>
         <?php endif; ?>
         <?php foreach ($opportunities as $op):
           $score = (int)$op['score'];
           $scoreClass = $score >= 80 ? 'green' : ($score >= 65 ? 'yellow' : ($score < 45 ? 'red' : ''));
+          $status = strtoupper((string)($op['status'] ?? 'AVAILABLE'));
+          $statusBadgeClass = match ($status) {
+              'ROUTED' => 'badge-routed',
+              'AVAILABLE' => 'badge-available',
+              'WATCHING' => 'badge-watching',
+              'REQUESTED' => 'badge-requested',
+              default => '',
+          };
         ?>
           <tr>
             <td><span class="score <?= $h($scoreClass) ?>"><?= $score ?></span></td>
@@ -264,7 +278,14 @@ $now = date('Y-m-d H:i');
                 </div>
               <?php endif; ?>
             </td>
-            <td><span class="badge"><?= $h($op['status']) ?></span></td>
+            <td>
+              <span class="badge <?= $h($statusBadgeClass) ?>"><?= $h($status) ?></span>
+              <?php if ($status === 'ROUTED'): ?>
+                <div class="muted op-context">Routed to you. Not accepted, assigned, or calendar-blocking.</div>
+              <?php elseif ($status === 'AVAILABLE'): ?>
+                <div class="muted op-context">Public/new opportunity. Safe to review before request.</div>
+              <?php endif; ?>
+            </td>
             <td><?php if (!empty($op['external_work_order_number'])): ?><code><?= $h($op['external_work_order_number']) ?></code><?php endif; ?></td>
             <td>
               <strong><?= $h($op['buyer_name_snapshot'] ?? 'FieldNation') ?></strong><br>
@@ -283,12 +304,13 @@ $now = date('Y-m-d H:i');
               <div class="actions">
                 <?php if (!empty($op['promoted_work_order_id'])): ?>
                   <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_work_order.php?id=<?= (int)$op['promoted_work_order_id'] ?>">Open W/O</a>
+                  <span class="badge badge-requested">REQUESTED W/O</span>
                 <?php else: ?>
                   <form method="post" style="margin:0;">
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="promote_opportunity">
                     <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
-                    <button class="btn btn-primary" type="submit">Promote to W/O</button>
+                    <button class="btn btn-primary" type="submit">Create REQUESTED W/O</button>
                   </form>
                   <form method="post" style="margin:0;">
                     <?= csrf_field() ?>
@@ -296,6 +318,7 @@ $now = date('Y-m-d H:i');
                     <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
                     <button class="btn btn-danger" type="submit">Ignore</button>
                   </form>
+                  <div class="muted action-note">Creates a request-stage record only. It does not accept, assign, schedule, or block your calendar.</div>
                 <?php endif; ?>
               </div>
             </td>
