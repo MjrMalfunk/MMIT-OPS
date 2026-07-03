@@ -140,7 +140,10 @@ $now = date('Y-m-d H:i');
     .score { font-size:22px; font-weight:950; }
     .actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
     .action-note { flex-basis:100%; font-size:12px; line-height:1.4; }
+    html { scroll-behavior:smooth; }
     .op-detail-row td { padding-top:0; background:rgba(15,23,42,.32); }
+    .email-event-row { scroll-margin-top:24px; }
+    .email-event-row:target td { background:rgba(59,130,246,.16); box-shadow:inset 4px 0 0 #60a5fa; }
     .op-detail { border:1px solid rgba(147,197,253,.18); border-radius:16px; padding:12px 14px; background:rgba(2,6,23,.22); }
     .op-detail summary { cursor:pointer; color:#bfdbfe; font-weight:950; letter-spacing:.02em; }
     .op-detail[open] summary { margin-bottom:12px; }
@@ -278,14 +281,8 @@ $now = date('Y-m-d H:i');
               <strong><?= $h($op['recommendation']) ?></strong>
               <?php
                 $breakdown = json_decode((string)($op['score_breakdown_json'] ?? ''), true);
-                if (is_array($breakdown) && $breakdown):
               ?>
-                <div class="muted" style="margin-top:6px;font-size:12px;line-height:1.45;">
-                  <?php foreach ($breakdown as $reason): ?>
-                    <div><?= $h($reason) ?></div>
-                  <?php endforeach; ?>
-                </div>
-              <?php endif; ?>
+              <div class="muted op-context">Open details for score evidence.</div>
             </td>
             <td>
               <span class="badge <?= $h($statusBadgeClass) ?>"><?= $h($status) ?></span>
@@ -345,7 +342,7 @@ $now = date('Y-m-d H:i');
                   <div class="detail-item">
                     <strong>Source event</strong>
                     <?php if (!empty($op['source_email_event_id'])): ?>
-                      #<?= (int)$op['source_email_event_id'] ?>
+                      <a href="#email-event-<?= (int)$op['source_email_event_id'] ?>">#<?= (int)$op['source_email_event_id'] ?></a>
                     <?php else: ?>
                       <span class="muted">None linked</span>
                     <?php endif; ?>
@@ -469,9 +466,9 @@ $now = date('Y-m-d H:i');
         <?php endif; ?>
         <?php foreach ($events as $event):
           $status = (string)($event['parsed_status'] ?? 'MESSAGE');
-          $badgeClass = in_array($status, ['ASSIGNED'], true) ? 'green' : (in_array($status, ['DECLINED', 'CANCELLED'], true) ? 'red' : 'yellow');
+          $badgeClass = in_array($status, ['ASSIGNED'], true) ? 'green' : (in_array($status, ['DECLINED', 'CANCELLED'], true) ? 'red' : ($status === 'ROUTED' ? 'badge-routed' : 'yellow'));
         ?>
-          <tr>
+          <tr id="email-event-<?= (int)$event['email_event_id'] ?>" class="email-event-row">
             <td><span class="badge <?= $h($badgeClass) ?>"><?= $h($status) ?></span></td>
             <td>
               <strong><?= $h($event['subject']) ?></strong><br>
