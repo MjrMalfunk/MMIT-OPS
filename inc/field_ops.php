@@ -2212,6 +2212,127 @@ function field_ops_rate_opportunity(array $data): array
     ];
 }
 
+
+function field_ops_refine_fieldnation_parsed_from_body(array $parsed, string $subject, string $body): array
+{
+    $text = trim($body);
+
+    if ($text === '') {
+        return $parsed;
+    }
+
+    $lines = preg_split('/\R+/', $text) ?: [];
+    $cleanLines = [];
+
+    foreach ($lines as $line) {
+        $line = trim((string)$line);
+
+        if ($line === '') {
+            continue;
+        }
+
+        $cleanLines[] = $line;
+    }
+
+    // Work Order ID appears both as a label and inside FieldNation deep links.
+    if (empty($parsed['work_order_number'])) {
+        if (preg_match('/\bWork\s*Order\s*ID\s*:?\s*([0-9]{5,})\b/i', $text, $m)) {
+            $parsed['work_order_number'] = $m[1];
+        } elseif (preg_match('~/workorders/([0-9]{5,})\b~i', $text, $m)) {
+            $parsed['work_order_number'] = $m[1];
+        }
+    }
+
+    if (empty($parsed['url']) && preg_match('~https://app\.fieldnation\.com/workorders/[0-9]{5,}[^\s>]*~i', $text, $m)) {
+        $parsed['url'] = $m[0];
+    }
+
+    // Real FN email title is usually the first meaningful non-link line.
+    $badTitle = trim((string)($parsed['title'] ?? '')) === ''
+        || preg_match('~^<?https?://~i', trim((string)($parsed['title'] ?? '')));
+
+    if ($badTitle) {
+        foreach ($cleanLines as $line) {
+            $candidate = trim($line, " \t\n\r\0\x0B<>");
+
+            if ($candidate === '') {
+                continue;
+            }
+
+            if (preg_match('~^https?://~i', $candidate)) {
+                continue;
+            }
+
+            if (preg_match('/\.(png|jpg|jpeg|gif|webp)(\?|$)/i', $candidate)) {
+                continue;
+            }
+
+            if (preg_match('/^(View Work Order|Status|Location|Pay|Schedule|Type of Work|Work Order ID)$/i', $candidate)) {
+                continue;
+            }
+
+            if (preg_match('/^(Hourly Rate|Fixed Rate|To be paid|Primary Role)\b/i', $candidate)) {
+                continue;
+            }
+
+            if (preg_match('/^[A-Z][A-Za-z .-]+,\s*[A-Z]{2}\s+\d{5}/', $candidate)) {
+                continue;
+            }
+
+            if (strlen($candidate) < 8) {
+                continue;
+            }
+
+            $parsed['title'] = $candidate;
+            break;
+        }
+    }
+
+    if (empty($parsed['city']) || empty($parsed['state']) || empty($parsed['zip']) || empty($parsed['distance_miles'])) {
+        if (preg_match('/\bLocation\s+([A-Za-z .\'-]+),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\s*\(\s*([0-9]+(?:\.[0-9]+)?)\s*miles?\s+away\s*\)/i', $text, $m)
+            || preg_match('/\b([A-Za-z .\'-]+),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\s*\(\s*([0-9]+(?:\.[0-9]+)?)\s*mi\s*\)/i', $text, $m)) {
+            $parsed['city'] = trim($m[1]);
+            $parsed['state'] = strtoupper(trim($m[2]));
+            $parsed['zip'] = trim($m[3]);
+            $parsed['distance_miles'] = (float)$m[4];
+        }
+    }
+
+    if (empty($parsed['pay_rate']) && preg_match('/Hourly\s+Rate:\s*\$?([0-9]+(?:\.[0-9]{1,2})?)\s*\/\s*hour/i', $text, $m)) {
+        $parsed['pay_rate'] = (float)$m[1];
+    }
+
+    if (empty($parsed['max_hours']) && preg_match('/\(([0-9]+(?:\.[0-9]+)?)\s+hours?\s+max\)/i', $text, $m)) {
+        $parsed['max_hours'] = (float)$m[1];
+    }
+
+    if (
+        (empty($parsed['estimated_gross']) || (float)$parsed['estimated_gross'] <= 0)
+        && !empty($parsed['pay_rate'])
+        && !empty($parsed['max_hours'])
+    ) {
+        $parsed['estimated_gross'] = round((float)$parsed['pay_rate'] * (float)$parsed['max_hours'], 2);
+    }
+
+    $confidence = (int)($parsed['confidence'] ?? 0);
+
+    if (!empty($parsed['work_order_number'])) {
+        $confidence = max($confidence, 90);
+    }
+
+    if (!empty($parsed['title']) && !preg_match('~^<?https?://~i', (string)$parsed['title'])) {
+        $confidence = max($confidence, 92);
+    }
+
+    if (!empty($parsed['pay_rate']) && !empty($parsed['max_hours'])) {
+        $confidence = max($confidence, 96);
+    }
+
+    $parsed['confidence'] = min(100, $confidence);
+
+    return $parsed;
+}
+
 function field_ops_save_fn_email_event(array $input): array
 {
     field_ops_ensure_opportunity_schema();
@@ -2225,7 +2346,7 @@ function field_ops_save_fn_email_event(array $input): array
         return ['ok' => false, 'errors' => ['Email subject is required.']];
     }
 
-    $parsed = field_ops_parse_fieldnation_email($subject, $body, $sender, $receivedAt);
+    $parsed = field_ops_refine_fieldnation_parsed_from_body(field_ops_parse_fieldnation_email($subject, $body, $sender, $receivedAt), $subject, $body);
 
     db()->prepare("
         INSERT INTO field_email_events
@@ -2938,5 +3059,469 @@ function field_ops_apply_declined_email_event(int $eventId): array
 
         return ['ok' => false, 'errors' => ['Declined email handler failed: ' . $e->getMessage()]];
     }
+}
+
+
+
+function field_ops_fn_imap_config_string(string $constant, string $env, string $default = ''): string
+{
+    if (defined($constant)) {
+        return trim((string)constant($constant));
+    }
+
+    $value = getenv($env);
+
+    if ($value !== false) {
+        return trim((string)$value);
+    }
+
+    return $default;
+}
+
+function field_ops_fn_imap_config_int(string $constant, string $env, int $default): int
+{
+    $value = field_ops_fn_imap_config_string($constant, $env, (string)$default);
+    $int = (int)$value;
+
+    return $int > 0 ? $int : $default;
+}
+
+function field_ops_fn_imap_config_bool(string $constant, string $env, bool $default = false): bool
+{
+    $value = field_ops_fn_imap_config_string($constant, $env, $default ? 'true' : 'false');
+    $value = strtolower(trim($value));
+
+    return in_array($value, ['1', 'true', 'yes', 'on'], true);
+}
+
+function field_ops_fn_imap_mailbox_string(?string $folder = null): string
+{
+    $host = field_ops_fn_imap_config_string('FIELD_OPS_FN_IMAP_HOST', 'FIELD_OPS_FN_IMAP_HOST', 'server242.web-hosting.com');
+    $port = field_ops_fn_imap_config_int('FIELD_OPS_FN_IMAP_PORT', 'FIELD_OPS_FN_IMAP_PORT', 993);
+    $flags = field_ops_fn_imap_config_string('FIELD_OPS_FN_IMAP_FLAGS', 'FIELD_OPS_FN_IMAP_FLAGS', '/imap/ssl');
+    $folder = $folder ?? field_ops_fn_imap_config_string('FIELD_OPS_FN_IMAP_FOLDER', 'FIELD_OPS_FN_IMAP_FOLDER', 'INBOX.Field Nation');
+
+    return '{' . $host . ':' . $port . $flags . '}' . $folder;
+}
+
+function field_ops_imap_decode_header_value(string $value): string
+{
+    if ($value === '' || !function_exists('imap_mime_header_decode')) {
+        return trim($value);
+    }
+
+    $parts = @imap_mime_header_decode($value);
+
+    if (!is_array($parts)) {
+        return trim($value);
+    }
+
+    $decoded = '';
+
+    foreach ($parts as $part) {
+        $text = (string)($part->text ?? '');
+        $charset = strtoupper((string)($part->charset ?? ''));
+
+        if ($charset !== '' && $charset !== 'DEFAULT' && $charset !== 'UTF-8' && function_exists('mb_convert_encoding')) {
+            $converted = @mb_convert_encoding($text, 'UTF-8', $charset);
+
+            if (is_string($converted)) {
+                $text = $converted;
+            }
+        }
+
+        $decoded .= $text;
+    }
+
+    return trim($decoded);
+}
+
+function field_ops_imap_decode_body_payload(string $payload, int $encoding): string
+{
+    switch ($encoding) {
+        case 3:
+            return (string)base64_decode($payload, true);
+        case 4:
+            return quoted_printable_decode($payload);
+        default:
+            return $payload;
+    }
+}
+
+function field_ops_imap_part_is_text_plain($part): bool
+{
+    return isset($part->type, $part->subtype)
+        && (int)$part->type === 0
+        && strtoupper((string)$part->subtype) === 'PLAIN';
+}
+
+function field_ops_imap_part_is_text_html($part): bool
+{
+    return isset($part->type, $part->subtype)
+        && (int)$part->type === 0
+        && strtoupper((string)$part->subtype) === 'HTML';
+}
+
+function field_ops_imap_fetch_body_recursive($imap, int $messageNumber, $structure, string $partPrefix = ''): array
+{
+    $plain = '';
+    $html = '';
+
+    if (!isset($structure->parts) || !is_array($structure->parts)) {
+        // Single-part messages do not always expose a valid section "1".
+        // For root single-part bodies, imap_body() is more reliable.
+        $raw = $partPrefix === ''
+            ? (string)@imap_body($imap, $messageNumber, FT_PEEK)
+            : (string)@imap_fetchbody($imap, $messageNumber, $partPrefix, FT_PEEK);
+
+        $decoded = field_ops_imap_decode_body_payload($raw, (int)($structure->encoding ?? 0));
+
+        if (field_ops_imap_part_is_text_html($structure)) {
+            $html .= $decoded;
+        } else {
+            $plain .= $decoded;
+        }
+
+        return ['plain' => $plain, 'html' => $html];
+    }
+
+    foreach ($structure->parts as $index => $part) {
+        $section = $partPrefix === '' ? (string)($index + 1) : $partPrefix . '.' . ($index + 1);
+
+        if (isset($part->parts) && is_array($part->parts)) {
+            $nested = field_ops_imap_fetch_body_recursive($imap, $messageNumber, $part, $section);
+            $plain .= (string)($nested['plain'] ?? '');
+            $html .= (string)($nested['html'] ?? '');
+            continue;
+        }
+
+        $raw = (string)@imap_fetchbody($imap, $messageNumber, $section, FT_PEEK);
+        $decoded = field_ops_imap_decode_body_payload($raw, (int)($part->encoding ?? 0));
+
+        if (field_ops_imap_part_is_text_plain($part)) {
+            $plain .= "\n" . $decoded;
+        } elseif (field_ops_imap_part_is_text_html($part)) {
+            $html .= "\n" . $decoded;
+        }
+    }
+
+    return ['plain' => trim($plain), 'html' => trim($html)];
+}
+
+function field_ops_imap_clean_extracted_text(string $text, bool $html = false): string
+{
+    if ($html) {
+        $text = preg_replace('/<br\s*\/?>/i', "\n", $text) ?? $text;
+        $text = preg_replace('/<\/p>/i', "\n", $text) ?? $text;
+        $text = preg_replace('/<\/div>/i', "\n", $text) ?? $text;
+        $text = strip_tags($text);
+    }
+
+    $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $text = str_replace(["\r\n", "\r"], "\n", $text);
+    $text = preg_replace('/[ \t]+/', ' ', $text) ?? $text;
+    $text = preg_replace('/\n[ \t]+/', "\n", $text) ?? $text;
+    $text = preg_replace('/\n{3,}/', "\n\n", $text) ?? $text;
+
+    return trim($text);
+}
+
+function field_ops_imap_fetch_message_text($imap, int $messageNumber): string
+{
+    $structure = @imap_fetchstructure($imap, $messageNumber);
+
+    $plainCandidates = [];
+    $htmlCandidates = [];
+    $otherCandidates = [];
+
+    if ($structure && isset($structure->parts) && is_array($structure->parts)) {
+        foreach ($structure->parts as $index => $part) {
+            $section = (string)($index + 1);
+            $raw = (string)@imap_fetchbody($imap, $messageNumber, $section, FT_PEEK);
+
+            if ($raw === '') {
+                continue;
+            }
+
+            $decoded = field_ops_imap_decode_body_payload($raw, (int)($part->encoding ?? 0));
+            $type = (int)($part->type ?? -1);
+            $subtype = strtoupper((string)($part->subtype ?? ''));
+
+            if ($type === 0 && $subtype === 'PLAIN') {
+                $plainCandidates[] = field_ops_imap_clean_extracted_text($decoded, false);
+            } elseif ($type === 0 && $subtype === 'HTML') {
+                $htmlCandidates[] = field_ops_imap_clean_extracted_text($decoded, true);
+            } else {
+                $otherCandidates[] = field_ops_imap_clean_extracted_text($decoded, $subtype === 'HTML');
+            }
+        }
+    }
+
+    foreach ($plainCandidates as $candidate) {
+        if ($candidate !== '') {
+            return $candidate;
+        }
+    }
+
+    foreach ($htmlCandidates as $candidate) {
+        if ($candidate !== '') {
+            return $candidate;
+        }
+    }
+
+    foreach ($otherCandidates as $candidate) {
+        if ($candidate !== '') {
+            return $candidate;
+        }
+    }
+
+    // Direct section fallback for Dovecot/cPanel messages that expose clean text in section 1.
+    foreach (['1', '2', '1.1', '1.2', '2.1', '2.2'] as $section) {
+        $raw = (string)@imap_fetchbody($imap, $messageNumber, $section, FT_PEEK);
+
+        if ($raw === '') {
+            continue;
+        }
+
+        $qp = quoted_printable_decode($raw);
+        $candidate = field_ops_imap_clean_extracted_text($qp !== '' ? $qp : $raw, false);
+
+        if ($candidate !== '') {
+            return $candidate;
+        }
+    }
+
+    $rawBody = (string)@imap_body($imap, $messageNumber, FT_PEEK);
+
+    if ($rawBody !== '') {
+        $qp = quoted_printable_decode($rawBody);
+        $candidate = field_ops_imap_clean_extracted_text($qp !== '' ? $qp : $rawBody, false);
+
+        if ($candidate !== '') {
+            return $candidate;
+        }
+    }
+
+    return '';
+}
+
+
+function field_ops_ensure_email_event_source_columns(): void
+{
+    field_ops_ensure_opportunity_schema();
+
+    if (!function_exists('db_table_exists') || !db_table_exists('field_email_events')) {
+        return;
+    }
+
+    $pdo = db();
+
+    $columns = [
+        'source_system' => "VARCHAR(60) NULL",
+        'source_message_id' => "VARCHAR(255) NULL",
+        'source_url' => "VARCHAR(500) NULL",
+    ];
+
+    foreach ($columns as $column => $definition) {
+        if (function_exists('db_column_exists') && db_column_exists('field_email_events', $column)) {
+            continue;
+        }
+
+        try {
+            $pdo->exec("ALTER TABLE field_email_events ADD COLUMN {$column} {$definition}");
+        } catch (Throwable $e) {
+            error_log('Unable to add field_email_events.' . $column . ': ' . $e->getMessage());
+        }
+    }
+
+    try {
+        $indexes = $pdo->query("SHOW INDEX FROM field_email_events")->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        $existing = [];
+
+        foreach ($indexes as $index) {
+            $name = (string)($index['Key_name'] ?? '');
+
+            if ($name !== '') {
+                $existing[$name] = true;
+            }
+        }
+
+        if (empty($existing['idx_field_email_events_source_message'])) {
+            $pdo->exec("ALTER TABLE field_email_events ADD INDEX idx_field_email_events_source_message (source_system, source_message_id)");
+        }
+    } catch (Throwable $e) {
+        error_log('Unable to add field_email_events source index: ' . $e->getMessage());
+    }
+}
+
+function field_ops_email_event_exists_by_message_id(string $messageId): bool
+{
+    field_ops_ensure_email_event_source_columns();
+
+    $messageId = trim($messageId);
+
+    if ($messageId === '') {
+        return false;
+    }
+
+    $st = db()->prepare("
+        SELECT email_event_id
+        FROM field_email_events
+        WHERE source_system = 'FIELDNATION_IMAP'
+          AND source_message_id = ?
+        LIMIT 1
+    ");
+    $st->execute([$messageId]);
+
+    return (bool)$st->fetchColumn();
+}
+
+function field_ops_import_fieldnation_mailbox(array $options = []): array
+{
+    field_ops_ensure_email_event_source_columns();
+
+    if (!function_exists('imap_open')) {
+        return ['ok' => false, 'errors' => ['PHP IMAP extension is not available.']];
+    }
+
+    $username = field_ops_fn_imap_config_string('FIELD_OPS_FN_IMAP_USERNAME', 'FIELD_OPS_FN_IMAP_USERNAME', 'keithj@svrarcades.com');
+    $password = field_ops_fn_imap_config_string('FIELD_OPS_FN_IMAP_PASSWORD', 'FIELD_OPS_FN_IMAP_PASSWORD', '');
+    $folder = field_ops_fn_imap_config_string('FIELD_OPS_FN_IMAP_FOLDER', 'FIELD_OPS_FN_IMAP_FOLDER', 'INBOX.Field Nation');
+    $lookbackDays = field_ops_fn_imap_config_int('FIELD_OPS_FN_IMAP_LOOKBACK_DAYS', 'FIELD_OPS_FN_IMAP_LOOKBACK_DAYS', 14);
+    $limit = max(1, min(100, (int)($options['limit'] ?? 25)));
+    $markSeen = field_ops_fn_imap_config_bool('FIELD_OPS_FN_IMAP_MARK_SEEN', 'FIELD_OPS_FN_IMAP_MARK_SEEN', false);
+
+    if ($username === '' || $password === '') {
+        return ['ok' => false, 'errors' => ['FieldNation IMAP username/password is not configured.']];
+    }
+
+    imap_timeout(IMAP_OPENTIMEOUT, 10);
+    imap_timeout(IMAP_READTIMEOUT, 10);
+    imap_timeout(IMAP_WRITETIMEOUT, 10);
+    imap_timeout(IMAP_CLOSETIMEOUT, 5);
+
+    $mailbox = field_ops_fn_imap_mailbox_string($folder);
+    $imap = @imap_open($mailbox, $username, $password, $markSeen ? 0 : OP_READONLY);
+
+    if (!$imap) {
+        return [
+            'ok' => false,
+            'errors' => array_values(imap_errors() ?: ['Unable to open FieldNation IMAP mailbox.']),
+            'mailbox' => $mailbox,
+        ];
+    }
+
+    $since = date('d-M-Y', strtotime('-' . $lookbackDays . ' days'));
+    $messageNumbers = @imap_search($imap, 'SINCE "' . $since . '"', SE_FREE, 'UTF-8');
+
+    if (!is_array($messageNumbers)) {
+        $messageNumbers = [];
+    }
+
+    rsort($messageNumbers);
+
+    $stats = [
+        'ok' => true,
+        'mailbox' => $mailbox,
+        'folder' => $folder,
+        'seen_mode' => $markSeen ? 'mark_seen' : 'read_only',
+        'lookback_days' => $lookbackDays,
+        'found' => count($messageNumbers),
+        'checked' => 0,
+        'imported' => 0,
+        'duplicates' => 0,
+        'skipped' => 0,
+        'errors' => [],
+        'events' => [],
+    ];
+
+    foreach ($messageNumbers as $messageNumber) {
+        if ($stats['checked'] >= $limit) {
+            break;
+        }
+
+        $stats['checked']++;
+
+        $overviewList = @imap_fetch_overview($imap, (string)$messageNumber, 0);
+
+        if (!is_array($overviewList) || empty($overviewList[0])) {
+            $stats['skipped']++;
+            continue;
+        }
+
+        $overview = $overviewList[0];
+        $messageId = trim((string)($overview->message_id ?? ''));
+
+        if ($messageId === '') {
+            $messageId = 'imap-' . $folder . '-' . (string)($overview->uid ?? $messageNumber);
+        }
+
+        if (field_ops_email_event_exists_by_message_id($messageId)) {
+            $stats['duplicates']++;
+            continue;
+        }
+
+        $subject = field_ops_imap_decode_header_value((string)($overview->subject ?? ''));
+        $sender = field_ops_imap_decode_header_value((string)($overview->from ?? 'Field Nation <support@fieldnation.com>'));
+        $receivedAt = null;
+
+        if (!empty($overview->date)) {
+            $ts = strtotime((string)$overview->date);
+
+            if ($ts !== false) {
+                $receivedAt = date('Y-m-d H:i:s', $ts);
+            }
+        }
+
+        $bodyText = field_ops_imap_fetch_message_text($imap, (int)$messageNumber);
+
+        if ($subject === '' && $bodyText === '') {
+            $stats['skipped']++;
+            continue;
+        }
+
+        $save = field_ops_save_fn_email_event([
+            'subject' => $subject,
+            // Support both manual-paste and IMAP/import call shapes.
+            'body' => $bodyText,
+            'body_text' => $bodyText,
+            'sender' => $sender,
+            'received_at' => $receivedAt ?: date('Y-m-d H:i:s'),
+        ]);
+
+        if (empty($save['ok'])) {
+            $stats['errors'][] = [
+                'message_id' => $messageId,
+                'subject' => $subject,
+                'errors' => $save['errors'] ?? [$save['error'] ?? 'Unknown save error.'],
+            ];
+            continue;
+        }
+
+        $eventId = (int)($save['email_event_id'] ?? 0);
+
+        if ($eventId > 0) {
+            db()->prepare("
+                UPDATE field_email_events
+                SET source_system = 'FIELDNATION_IMAP',
+                    source_message_id = ?
+                WHERE email_event_id = ?
+                LIMIT 1
+            ")->execute([$messageId, $eventId]);
+        }
+
+        $stats['imported']++;
+        $stats['events'][] = [
+            'email_event_id' => $eventId,
+            'message_id' => $messageId,
+            'subject' => $subject,
+            'status' => (string)($save['parsed']['status'] ?? ''),
+            'work_order_number' => (string)($save['parsed']['work_order_number'] ?? ''),
+        ];
+    }
+
+    imap_close($imap);
+
+    return $stats;
 }
 
