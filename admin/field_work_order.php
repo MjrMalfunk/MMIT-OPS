@@ -71,6 +71,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             default => 'Saved.',
         };
 
+        if ($action === 'discard_work_order') {
+            header('Location: ' . BASE_URL . '/admin/field_ops.php');
+            exit;
+        }
+
         header('Location: ' . BASE_URL . '/admin/field_work_order.php?id=' . $workOrderId);
         exit;
     }

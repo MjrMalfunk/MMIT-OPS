@@ -408,7 +408,7 @@ $now = date('Y-m-d H:i');
                   <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_work_order.php?id=<?= (int)$op['promoted_work_order_id'] ?>">Open W/O</a>
                   <span class="badge badge-requested">REQUESTED W/O</span>
                 <?php else: ?>
-                  <form method="post" style="margin:0;">
+                  <form method="post" style="margin:0;" onsubmit="return confirm(&quot;Create a REQUESTED W/O only? This will not accept, assign, schedule, or block your calendar.&quot;);">
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="promote_opportunity">
                     <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
@@ -429,7 +429,7 @@ $now = date('Y-m-d H:i');
                       <button class="btn" type="submit">Watch</button>
                     </form>
                   <?php endif; ?>
-                  <form method="post" style="margin:0;">
+                  <form method="post" style="margin:0;" onsubmit="return confirm(&quot;Ignore this opportunity and remove it from the active radar?&quot;);">
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="ignore_opportunity">
                     <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
@@ -532,7 +532,7 @@ $now = date('Y-m-d H:i');
                     <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_work_order.php?id=<?= (int)$op['promoted_work_order_id'] ?>">Open W/O</a>
                     <span class="badge badge-requested">REQUESTED W/O</span>
                   <?php else: ?>
-                    <form method="post" style="margin:0;">
+                    <form method="post" style="margin:0;" onsubmit="return confirm(&quot;Create a REQUESTED W/O only? This will not accept, assign, schedule, or block your calendar.&quot;);">
                       <?= csrf_field() ?>
                       <input type="hidden" name="action" value="promote_opportunity">
                       <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
@@ -553,7 +553,7 @@ $now = date('Y-m-d H:i');
                         <button class="btn" type="submit">Watch</button>
                       </form>
                     <?php endif; ?>
-                    <form method="post" style="margin:0;">
+                    <form method="post" style="margin:0;" onsubmit="return confirm(&quot;Ignore this opportunity and remove it from the active radar?&quot;);">
                       <?= csrf_field() ?>
                       <input type="hidden" name="action" value="ignore_opportunity">
                       <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
@@ -638,21 +638,21 @@ $now = date('Y-m-d H:i');
             <td>
               <div class="actions">
                 <?php if (empty($event['applied_at']) && in_array($status, ['AVAILABLE', 'ROUTED', 'MESSAGE'], true)): ?>
-                  <form method="post" style="margin:0;">
+                  <form method="post" style="margin:0;" onsubmit="return confirm(&quot;Apply this queued FieldNation email to the opportunity board?&quot;);">
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="apply_email_event">
                     <input type="hidden" name="email_event_id" value="<?= (int)$event['email_event_id'] ?>">
                     <button class="btn btn-primary" type="submit">Apply to board</button>
                   </form>
                 <?php elseif ($status === 'DECLINED' && empty($event['applied_at'])): ?>
-                  <form method="post" style="margin:0;">
+                  <form method="post" style="margin:0;" onsubmit="return confirm(&quot;Process this declined FieldNation email and update any matching records?&quot;);">
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="apply_declined_email_event">
                     <input type="hidden" name="email_event_id" value="<?= (int)$event['email_event_id'] ?>">
                     <button class="btn btn-danger" type="submit">Process decline</button>
                   </form>
                 <?php elseif ($status === 'ASSIGNED' && empty($event['applied_at'])): ?>
-                  <form method="post" style="margin:0;">
+                  <form method="post" style="margin:0;" onsubmit="return confirm(&quot;Apply this assigned FieldNation email to the real W/O table?&quot;);">
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="apply_assigned_email_event">
                     <input type="hidden" name="email_event_id" value="<?= (int)$event['email_event_id'] ?>">
