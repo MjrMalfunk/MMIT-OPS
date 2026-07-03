@@ -33,6 +33,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $result = field_ops_apply_declined_email_event((int)($_POST['email_event_id'] ?? 0));
     } elseif ($action === 'ignore_opportunity') {
         $result = field_ops_ignore_opportunity((int)($_POST['opportunity_id'] ?? 0));
+    } elseif ($action === 'watch_opportunity') {
+        $result = field_ops_watch_opportunity((int)($_POST['opportunity_id'] ?? 0));
+    } elseif ($action === 'unwatch_opportunity') {
+        $result = field_ops_unwatch_opportunity((int)($_POST['opportunity_id'] ?? 0));
     }
 
     if (!empty($result['ok'])) {
@@ -51,6 +55,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'apply_assigned_email_event' => 'Assigned FN email applied to W/O.',
             'apply_declined_email_event' => 'Declined FN email processed.',
             'ignore_opportunity' => 'Opportunity ignored.',
+            'watch_opportunity' => 'Opportunity marked as watching.',
+            'unwatch_opportunity' => 'Opportunity returned to available.',
             default => 'Saved.',
         };
         }
@@ -318,6 +324,21 @@ $now = date('Y-m-d H:i');
                     <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
                     <button class="btn btn-primary" type="submit">Create REQUESTED W/O</button>
                   </form>
+                  <?php if ($status === 'WATCHING'): ?>
+                    <form method="post" style="margin:0;">
+                      <?= csrf_field() ?>
+                      <input type="hidden" name="action" value="unwatch_opportunity">
+                      <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
+                      <button class="btn" type="submit">Return to Available</button>
+                    </form>
+                  <?php elseif ($status !== 'ROUTED'): ?>
+                    <form method="post" style="margin:0;">
+                      <?= csrf_field() ?>
+                      <input type="hidden" name="action" value="watch_opportunity">
+                      <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
+                      <button class="btn" type="submit">Watch</button>
+                    </form>
+                  <?php endif; ?>
                   <form method="post" style="margin:0;">
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="ignore_opportunity">
@@ -427,6 +448,21 @@ $now = date('Y-m-d H:i');
                       <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
                       <button class="btn btn-primary" type="submit">Create REQUESTED W/O</button>
                     </form>
+                    <?php if ($status === 'WATCHING'): ?>
+                      <form method="post" style="margin:0;">
+                        <?= csrf_field() ?>
+                        <input type="hidden" name="action" value="unwatch_opportunity">
+                        <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
+                        <button class="btn" type="submit">Return to Available</button>
+                      </form>
+                    <?php elseif ($status !== 'ROUTED'): ?>
+                      <form method="post" style="margin:0;">
+                        <?= csrf_field() ?>
+                        <input type="hidden" name="action" value="watch_opportunity">
+                        <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
+                        <button class="btn" type="submit">Watch</button>
+                      </form>
+                    <?php endif; ?>
                     <form method="post" style="margin:0;">
                       <?= csrf_field() ?>
                       <input type="hidden" name="action" value="ignore_opportunity">

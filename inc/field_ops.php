@@ -2670,6 +2670,68 @@ function field_ops_ignore_opportunity(int $opportunityId): array
     return ['ok' => true];
 }
 
+function field_ops_watch_opportunity(int $opportunityId): array
+{
+    field_ops_ensure_opportunity_schema();
+
+    $op = field_ops_find_opportunity($opportunityId);
+
+    if (!$op) {
+        return ['ok' => false, 'errors' => ['Opportunity not found.']];
+    }
+
+    if (!empty($op['promoted_work_order_id'])) {
+        return ['ok' => false, 'errors' => ['Promoted opportunities are managed from the W/O record.']];
+    }
+
+    if (!empty($op['ignored_at']) || strtoupper((string)$op['status']) === 'IGNORED') {
+        return ['ok' => false, 'errors' => ['Ignored opportunities cannot be watched from the active board.']];
+    }
+
+    if (strtoupper((string)$op['status']) === 'ROUTED') {
+        return ['ok' => false, 'errors' => ['Routed opportunities stay routed until requested or ignored.']];
+    }
+
+    db()->prepare("
+        UPDATE field_opportunities
+        SET status = 'WATCHING',
+            updated_at = NOW()
+        WHERE opportunity_id = ?
+        LIMIT 1
+    ")->execute([$opportunityId]);
+
+    return ['ok' => true];
+}
+
+function field_ops_unwatch_opportunity(int $opportunityId): array
+{
+    field_ops_ensure_opportunity_schema();
+
+    $op = field_ops_find_opportunity($opportunityId);
+
+    if (!$op) {
+        return ['ok' => false, 'errors' => ['Opportunity not found.']];
+    }
+
+    if (!empty($op['promoted_work_order_id'])) {
+        return ['ok' => false, 'errors' => ['Promoted opportunities are managed from the W/O record.']];
+    }
+
+    if (strtoupper((string)$op['status']) !== 'WATCHING') {
+        return ['ok' => false, 'errors' => ['Only watching opportunities can be returned to available.']];
+    }
+
+    db()->prepare("
+        UPDATE field_opportunities
+        SET status = 'AVAILABLE',
+            updated_at = NOW()
+        WHERE opportunity_id = ?
+        LIMIT 1
+    ")->execute([$opportunityId]);
+
+    return ['ok' => true];
+}
+
 function field_ops_promote_opportunity_to_work_order(int $opportunityId): array
 {
     field_ops_ensure_opportunity_schema();
