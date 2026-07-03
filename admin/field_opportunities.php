@@ -140,6 +140,15 @@ $now = date('Y-m-d H:i');
     .score { font-size:22px; font-weight:950; }
     .actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
     .action-note { flex-basis:100%; font-size:12px; line-height:1.4; }
+    .op-detail-row td { padding-top:0; background:rgba(15,23,42,.32); }
+    .op-detail { border:1px solid rgba(147,197,253,.18); border-radius:16px; padding:12px 14px; background:rgba(2,6,23,.22); }
+    .op-detail summary { cursor:pointer; color:#bfdbfe; font-weight:950; letter-spacing:.02em; }
+    .op-detail[open] summary { margin-bottom:12px; }
+    .detail-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:10px; }
+    .detail-item { border:1px solid rgba(147,197,253,.16); border-radius:14px; padding:10px; background:rgba(15,23,42,.34); min-width:0; }
+    .detail-item strong { display:block; color:#bfdbfe; font-size:11px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:5px; }
+    .detail-notes { white-space:pre-wrap; overflow-wrap:anywhere; }
+    .detail-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
     @media (max-width:1000px) { .stats,.two,.form-grid { grid-template-columns:1fr; } .full { grid-column:auto; } }
   </style>
 </head>
@@ -321,6 +330,116 @@ $now = date('Y-m-d H:i');
                   <div class="muted action-note">Creates a request-stage record only. It does not accept, assign, schedule, or block your calendar.</div>
                 <?php endif; ?>
               </div>
+            </td>
+          </tr>
+          <tr class="op-detail-row">
+            <td colspan="9">
+              <details class="op-detail">
+                <summary>View opportunity details</summary>
+
+                <div class="detail-grid">
+                  <div class="detail-item">
+                    <strong>Work type</strong>
+                    <?= $h((string)($op['work_type'] ?? 'Field service')) ?>
+                  </div>
+                  <div class="detail-item">
+                    <strong>Source event</strong>
+                    <?php if (!empty($op['source_email_event_id'])): ?>
+                      #<?= (int)$op['source_email_event_id'] ?>
+                    <?php else: ?>
+                      <span class="muted">None linked</span>
+                    <?php endif; ?>
+                  </div>
+                  <div class="detail-item">
+                    <strong>Created</strong>
+                    <?= $h(field_ops_datetime_display($op['created_at'] ?? '')) ?>
+                  </div>
+                  <div class="detail-item">
+                    <strong>Updated</strong>
+                    <?= $h(field_ops_datetime_display($op['updated_at'] ?? '')) ?>
+                  </div>
+
+                  <div class="detail-item">
+                    <strong>Schedule start</strong>
+                    <?= $h(field_ops_datetime_display($op['scheduled_start_at'] ?? '')) ?>
+                  </div>
+                  <div class="detail-item">
+                    <strong>Schedule end</strong>
+                    <?= $h(field_ops_datetime_display($op['scheduled_end_at'] ?? '')) ?>
+                  </div>
+                  <div class="detail-item">
+                    <strong>Pay model</strong>
+                    <?php if ((float)$op['pay_rate'] > 0): ?>
+                      $<?= number_format((float)$op['pay_rate'], 2) ?>/hr
+                    <?php else: ?>
+                      <span class="muted">Rate unknown</span>
+                    <?php endif; ?>
+                    <?php if ((float)$op['max_hours'] > 0): ?>
+                      <br><span class="muted"><?= number_format((float)$op['max_hours'], 2) ?> max hrs</span>
+                    <?php endif; ?>
+                  </div>
+                  <div class="detail-item">
+                    <strong>Estimated gross</strong>
+                    <?php if ((float)$op['estimated_gross'] > 0): ?>
+                      $<?= number_format((float)$op['estimated_gross'], 2) ?>
+                    <?php else: ?>
+                      <span class="muted">Unknown</span>
+                    <?php endif; ?>
+                  </div>
+
+                  <div class="detail-item full">
+                    <strong>Source URL</strong>
+                    <?php if (!empty($op['source_url'])): ?>
+                      <a href="<?= $h((string)$op['source_url']) ?>" target="_blank" rel="noopener noreferrer"><?= $h((string)$op['source_url']) ?></a>
+                    <?php else: ?>
+                      <span class="muted">No FieldNation URL captured.</span>
+                    <?php endif; ?>
+                  </div>
+
+                  <div class="detail-item full">
+                    <strong>Notes</strong>
+                    <?php if (trim((string)($op['notes'] ?? '')) !== ''): ?>
+                      <div class="detail-notes"><?= $h((string)$op['notes']) ?></div>
+                    <?php else: ?>
+                      <span class="muted">No notes captured yet.</span>
+                    <?php endif; ?>
+                  </div>
+
+                  <div class="detail-item full">
+                    <strong>Score breakdown</strong>
+                    <?php if (is_array($breakdown ?? null) && $breakdown): ?>
+                      <div class="muted" style="line-height:1.55;">
+                        <?php foreach ($breakdown as $reason): ?>
+                          <div><?= $h($reason) ?></div>
+                        <?php endforeach; ?>
+                      </div>
+                    <?php else: ?>
+                      <span class="muted">No score breakdown available.</span>
+                    <?php endif; ?>
+                  </div>
+                </div>
+
+                <div class="detail-actions">
+                  <?php if (!empty($op['promoted_work_order_id'])): ?>
+                    <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_work_order.php?id=<?= (int)$op['promoted_work_order_id'] ?>">Open W/O</a>
+                    <span class="badge badge-requested">REQUESTED W/O</span>
+                  <?php else: ?>
+                    <form method="post" style="margin:0;">
+                      <?= csrf_field() ?>
+                      <input type="hidden" name="action" value="promote_opportunity">
+                      <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
+                      <button class="btn btn-primary" type="submit">Create REQUESTED W/O</button>
+                    </form>
+                    <form method="post" style="margin:0;">
+                      <?= csrf_field() ?>
+                      <input type="hidden" name="action" value="ignore_opportunity">
+                      <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
+                      <button class="btn btn-danger" type="submit">Ignore</button>
+                    </form>
+                    <div class="muted action-note">Still request-stage only. No accept, assign, schedule, or calendar block happens here.</div>
+                  <?php endif; ?>
+                </div>
+              </details>
             </td>
           </tr>
         <?php endforeach; ?>
