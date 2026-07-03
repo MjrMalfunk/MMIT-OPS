@@ -20,6 +20,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($action === 'save_email_event') {
         $result = field_ops_save_fn_email_event($_POST);
+    } elseif ($action === 'import_fieldnation_mailbox') {
+        $limit = max(1, min(100, (int)($_POST['limit'] ?? 25)));
+        $result = field_ops_import_fieldnation_mailbox(["limit" => $limit]);
     } elseif ($action === 'apply_email_event') {
         $result = field_ops_apply_email_event_to_opportunity((int)($_POST['email_event_id'] ?? 0));
     } elseif ($action === 'promote_opportunity') {
@@ -33,6 +36,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if (!empty($result['ok'])) {
+        if ($action === 'import_fieldnation_mailbox') {
+            $_SESSION['flash_msg'] = sprintf(
+                'FieldNation mailbox import complete. Imported: %d. Duplicates: %d. Skipped: %d.',
+                (int)($result['imported'] ?? 0),
+                (int)($result['duplicates'] ?? 0),
+                (int)($result['skipped'] ?? 0)
+            );
+        } else {
         $_SESSION['flash_msg'] = match ($action) {
             'save_email_event' => 'FN email parsed and queued.',
             'apply_email_event' => 'FN email applied to opportunity board.',
@@ -42,6 +53,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'ignore_opportunity' => 'Opportunity ignored.',
             default => 'Saved.',
         };
+        }
 
         header('Location: ' . BASE_URL . '/admin/field_opportunities.php');
         exit;
@@ -134,6 +146,22 @@ $now = date('Y-m-d H:i');
       <p style="margin:0;">Rate new and routed FieldNation work before it becomes a real W/O. Radar can be noisy. Work orders stay clean.</p>
     </div>
     <div class="actions">
+      <form method="post" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <?= csrf_field() ?>
+        <input type="hidden" name="action" value="import_fieldnation_mailbox">
+        <label class="muted" for="fn-import-limit">Mailbox limit</label>
+        <input
+          id="fn-import-limit"
+          name="limit"
+          type="number"
+          min="1"
+          max="100"
+          value="25"
+          style="width:86px"
+          aria-label="FieldNation mailbox import limit"
+        >
+        <button class="btn btn-primary" type="submit">Import from FN mailbox</button>
+      </form>
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_ops.php">Back to Field Ops</a>
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/index.php">Back to admin</a>
     </div>
