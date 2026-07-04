@@ -78,6 +78,7 @@ function field_ops_ensure_schema(): void
             payment_status VARCHAR(40) NOT NULL DEFAULT 'UNPAID',
             gross_pay DECIMAL(12,2) NOT NULL DEFAULT 0.00,
             platform_fee DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+            insurance_fee DECIMAL(12,2) NOT NULL DEFAULT 0.00,
             bonus_pay DECIMAL(12,2) NOT NULL DEFAULT 0.00,
             reimbursement_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
             mileage DECIMAL(12,2) NOT NULL DEFAULT 0.00,
@@ -137,6 +138,7 @@ function field_ops_ensure_schema(): void
         'invoice_id' => "INT UNSIGNED NULL",
         'invoice_created_at' => "DATETIME NULL",
 
+        'insurance_fee' => "DECIMAL(12,2) NOT NULL DEFAULT 0.00",
         'delete_reason' => "VARCHAR(255) NULL",
         'source_system' => "VARCHAR(80) NULL",
         'source_message_id' => "VARCHAR(190) NULL",
@@ -399,6 +401,7 @@ function field_ops_work_orders(int $limit = 100): array
                (
                  wo.gross_pay + wo.bonus_pay + wo.reimbursement_amount
                  - wo.platform_fee
+                 - wo.insurance_fee
                  - COALESCE(mat.material_cost, 0)
                  - COALESCE(exp.expense_cost, 0)
                ) AS estimated_net
@@ -501,6 +504,16 @@ function field_ops_save_inventory_item(array $input): array
     return ['ok' => true, 'item_id' => (int)db()->lastInsertId()];
 }
 
+function field_ops_fn_fee_estimates(float $grossPay): array
+{
+    $grossPay = max(0.0, $grossPay);
+
+    return [
+        'platform_fee' => round($grossPay * 0.10, 2),
+        'insurance_fee' => round($grossPay * 0.019, 2),
+    ];
+}
+
 function field_ops_save_work_order(array $input, int $userId = 0): array
 {
     field_ops_ensure_schema();
@@ -513,19 +526,23 @@ function field_ops_save_work_order(array $input, int $userId = 0): array
 
     $status = field_ops_clean_status((string)($input['status'] ?? 'REQUESTED'), field_ops_work_statuses(), 'REQUESTED');
     $paymentStatus = field_ops_clean_status((string)($input['payment_status'] ?? 'UNPAID'), field_ops_payment_statuses(), 'UNPAID');
+    $platform = trim((string)($input['platform'] ?? 'FieldNation')) ?: 'FieldNation';
+    $grossPay = field_ops_money($input['gross_pay'] ?? 0);
+    $platformFee = field_ops_money($input['platform_fee'] ?? 0);
+    $insuranceFee = field_ops_money($input['insurance_fee'] ?? 0);
 
     $st = db()->prepare("
         INSERT INTO field_work_orders
           (platform, external_work_order_number, buyer_id, title, work_type, site_name, site_address, city, state,
            scheduled_start_at, scheduled_end_at, checked_in_at, checked_out_at, actual_left_site_at,
-           status, payment_status, gross_pay, platform_fee, bonus_pay, reimbursement_amount,
+           status, payment_status, gross_pay, platform_fee, insurance_fee, bonus_pay, reimbursement_amount,
            mileage, mileage_rate, drive_minutes, onsite_minutes, admin_minutes, notes, created_by)
         VALUES
-          (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ");
 
     $st->execute([
-        trim((string)($input['platform'] ?? 'FieldNation')) ?: 'FieldNation',
+        $platform,
         trim((string)($input['external_work_order_number'] ?? '')) ?: null,
         !empty($input['buyer_id']) ? (int)$input['buyer_id'] : null,
         $title,
@@ -541,8 +558,9 @@ function field_ops_save_work_order(array $input, int $userId = 0): array
         field_ops_datetime_or_null($input['actual_left_site_at'] ?? ''),
         $status,
         $paymentStatus,
-        field_ops_money($input['gross_pay'] ?? 0),
-        field_ops_money($input['platform_fee'] ?? 0),
+        $grossPay,
+        $platformFee,
+        $insuranceFee,
         field_ops_money($input['bonus_pay'] ?? 0),
         field_ops_money($input['reimbursement_amount'] ?? 0),
         field_ops_decimal($input['mileage'] ?? 0),
@@ -692,7 +710,7 @@ function field_ops_work_order_totals(int $workOrderId): array
     $totalMinutes = $detailMinutes > 0 ? $detailMinutes : $baseMinutes;
 
     $gross = (float)$wo['gross_pay'] + (float)$wo['bonus_pay'] + (float)$wo['reimbursement_amount'];
-    $fees = (float)$wo['platform_fee'];
+    $fees = (float)$wo['platform_fee'] + (float)($wo['insurance_fee'] ?? 0);
     $mileageCost = (float)$wo['mileage'] * (float)$wo['mileage_rate'];
     $materialCost = (float)($materials['material_cost'] ?? 0);
     $expenseCost = (float)($expenses['expense_cost'] ?? 0);
@@ -702,6 +720,8 @@ function field_ops_work_order_totals(int $workOrderId): array
     return [
         'gross' => $gross,
         'fees' => $fees,
+        'platform_fee' => (float)$wo['platform_fee'],
+        'insurance_fee' => (float)($wo['insurance_fee'] ?? 0),
         'mileage_cost' => $mileageCost,
         'material_cost' => $materialCost,
         'material_billable' => (float)($materials['material_billable'] ?? 0),
@@ -877,12 +897,17 @@ function field_ops_update_work_order_state(array $input): array
 
     $workOrderId = (int)($input['work_order_id'] ?? 0);
 
-    if ($workOrderId <= 0 || !field_ops_find_work_order($workOrderId)) {
+    $existingWorkOrder = $workOrderId > 0 ? field_ops_find_work_order($workOrderId) : null;
+
+    if (!$existingWorkOrder) {
         return ['ok' => false, 'errors' => ['Valid work order is required.']];
     }
 
     $status = field_ops_clean_status((string)($input['status'] ?? 'REQUESTED'), field_ops_work_statuses(), 'REQUESTED');
     $paymentStatus = field_ops_clean_status((string)($input['payment_status'] ?? 'UNPAID'), field_ops_payment_statuses(), 'UNPAID');
+    $grossPay = field_ops_money($input['gross_pay'] ?? 0);
+    $platformFee = field_ops_money($input['platform_fee'] ?? 0);
+    $insuranceFee = field_ops_money($input['insurance_fee'] ?? 0);
 
     db()->prepare("
         UPDATE field_work_orders
@@ -890,6 +915,7 @@ function field_ops_update_work_order_state(array $input): array
             payment_status = ?,
             gross_pay = ?,
             platform_fee = ?,
+            insurance_fee = ?,
             bonus_pay = ?,
             reimbursement_amount = ?,
             mileage = ?,
@@ -903,8 +929,9 @@ function field_ops_update_work_order_state(array $input): array
     ")->execute([
         $status,
         $paymentStatus,
-        field_ops_money($input['gross_pay'] ?? 0),
-        field_ops_money($input['platform_fee'] ?? 0),
+        $grossPay,
+        $platformFee,
+        $insuranceFee,
         field_ops_money($input['bonus_pay'] ?? 0),
         field_ops_money($input['reimbursement_amount'] ?? 0),
         field_ops_decimal($input['mileage'] ?? 0),
@@ -1623,6 +1650,7 @@ function field_ops_summary(): array
           SUM(CASE WHEN payment_status <> 'PAID' THEN 1 ELSE 0 END) AS unpaid_work_orders,
           COALESCE(SUM(gross_pay + bonus_pay + reimbursement_amount), 0) AS gross_total,
           COALESCE(SUM(platform_fee), 0) AS platform_fee_total,
+          COALESCE(SUM(insurance_fee), 0) AS insurance_fee_total,
           COALESCE(SUM(mileage * mileage_rate), 0) AS mileage_cost_total,
           COALESCE(SUM(drive_minutes + onsite_minutes + admin_minutes), 0) AS total_minutes
         FROM field_work_orders
@@ -1630,13 +1658,17 @@ function field_ops_summary(): array
     ")->fetch(PDO::FETCH_ASSOC) ?: [];
 
     $materialCost = (float)(db()->query("
-        SELECT COALESCE(SUM(quantity_used * unit_cost), 0)
-        FROM field_work_order_materials
+        SELECT COALESCE(SUM(m.quantity_used * m.unit_cost), 0)
+        FROM field_work_order_materials m
+        INNER JOIN field_work_orders wo ON wo.work_order_id = m.work_order_id
+        WHERE wo.deleted_at IS NULL
     ")->fetchColumn() ?: 0);
 
     $expenseCost = (float)(db()->query("
-        SELECT COALESCE(SUM(amount), 0)
-        FROM field_work_order_expenses
+        SELECT COALESCE(SUM(e.amount), 0)
+        FROM field_work_order_expenses e
+        INNER JOIN field_work_orders wo ON wo.work_order_id = e.work_order_id
+        WHERE wo.deleted_at IS NULL
     ")->fetchColumn() ?: 0);
 
     $inventoryLow = (int)(db()->query("
@@ -1646,7 +1678,9 @@ function field_ops_summary(): array
     ")->fetchColumn() ?: 0);
 
     $gross = (float)($wo['gross_total'] ?? 0);
-    $fees = (float)($wo['platform_fee_total'] ?? 0);
+    $platformFees = (float)($wo['platform_fee_total'] ?? 0);
+    $insuranceFees = (float)($wo['insurance_fee_total'] ?? 0);
+    $fees = $platformFees + $insuranceFees;
     $mileage = (float)($wo['mileage_cost_total'] ?? 0);
     $net = $gross - $fees - $materialCost - $expenseCost - $mileage;
     $hours = ((int)($wo['total_minutes'] ?? 0)) / 60;
@@ -1656,7 +1690,9 @@ function field_ops_summary(): array
         'active_work_orders' => (int)($wo['active_work_orders'] ?? 0),
         'unpaid_work_orders' => (int)($wo['unpaid_work_orders'] ?? 0),
         'gross_total' => $gross,
-        'platform_fee_total' => $fees,
+        'platform_fee_total' => $platformFees,
+        'insurance_fee_total' => $insuranceFees,
+        'fee_total' => $fees,
         'material_cost_total' => $materialCost,
         'expense_cost_total' => $expenseCost,
         'mileage_cost_total' => $mileage,
@@ -2747,6 +2783,8 @@ function field_ops_promote_opportunity_to_work_order(int $opportunityId): array
     }
 
     $table = 'field_work_orders';
+    $grossPay = field_ops_money($op['estimated_gross'] ?? 0);
+    $fnFees = field_ops_fn_fee_estimates($grossPay);
 
     $candidate = [
         'platform' => 'FieldNation',
@@ -2760,7 +2798,9 @@ function field_ops_promote_opportunity_to_work_order(int $opportunityId): array
         'scheduled_end_at' => $op['scheduled_end_at'],
         'status' => 'REQUESTED',
         'payment_status' => 'UNPAID',
-        'gross_pay' => $op['estimated_gross'],
+        'gross_pay' => $grossPay,
+        'platform_fee' => $fnFees['platform_fee'],
+        'insurance_fee' => $fnFees['insurance_fee'],
         'notes' => "Promoted from Field Ops opportunity #{$opportunityId}.\nRecommendation: {$op['recommendation']}.\nScore: {$op['score']}.\n\n" . (string)($op['notes'] ?? ''),
     ];
 

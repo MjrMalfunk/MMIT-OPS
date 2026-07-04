@@ -244,7 +244,8 @@ $defaultRevenueAccountId = field_ops_default_revenue_account_id();
         </label>
 
         <label>Gross pay <input name="gross_pay" inputmode="decimal" value="<?= $h($moneyInput($wo['gross_pay'])) ?>"></label>
-        <label>Platform fee <input name="platform_fee" inputmode="decimal" value="<?= $h($moneyInput($wo['platform_fee'])) ?>"></label>
+        <label>Provider fee <input name="platform_fee" inputmode="decimal" value="<?= $h($moneyInput($wo['platform_fee'])) ?>"></label>
+        <label>Insurance fee <input name="insurance_fee" inputmode="decimal" value="<?= $h($moneyInput($wo['insurance_fee'] ?? 0)) ?>"></label>
         <label>Bonus pay <input name="bonus_pay" inputmode="decimal" value="<?= $h($moneyInput($wo['bonus_pay'])) ?>"></label>
         <label>Reimbursement <input name="reimbursement_amount" inputmode="decimal" value="<?= $h($moneyInput($wo['reimbursement_amount'])) ?>"></label>
         <label>Mileage <input name="mileage" value="<?= $h($wo['mileage']) ?>"></label>

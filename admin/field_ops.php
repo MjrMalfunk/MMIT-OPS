@@ -321,8 +321,13 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
         </label>
 
         <label>
-          Platform fee
-          <input name="platform_fee" inputmode="decimal" value="<?= $h($moneyInput(0)) ?>" placeholder="$0.00">
+          Provider fee
+          <input name="platform_fee" inputmode="decimal" placeholder="Manual fee, usually $0.00">
+        </label>
+
+        <label>
+          Insurance fee
+          <input name="insurance_fee" inputmode="decimal" placeholder="Manual insurance, usually $0.00">
         </label>
 
         <label>
@@ -489,7 +494,10 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
             </td>
             <td><?= $h($dtDisplay($wo['scheduled_start_at'] ?? '')) ?></td>
             <td><?= $fmtMoney($wo['gross_pay']) ?></td>
-            <td><?= $fmtMoney($wo['platform_fee']) ?></td>
+            <td>
+              Provider: <?= $fmtMoney($wo['platform_fee']) ?><br>
+              Insurance: <?= $fmtMoney($wo['insurance_fee'] ?? 0) ?>
+            </td>
             <td>
               Materials: <?= $fmtMoney($wo['material_cost']) ?><br>
               Expenses: <?= $fmtMoney($wo['expense_cost']) ?>
