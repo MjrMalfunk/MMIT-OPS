@@ -425,6 +425,25 @@ function field_ops_work_orders(int $limit = 100): array
     return db()->query($sql)->fetchAll(PDO::FETCH_ASSOC) ?: [];
 }
 
+function field_ops_discarded_work_orders(int $limit = 10): array
+{
+    field_ops_ensure_schema();
+
+    $limit = max(1, min(50, $limit));
+
+    $sql = "
+        SELECT wo.*,
+               b.buyer_name
+        FROM field_work_orders wo
+        LEFT JOIN field_buyers b ON b.buyer_id = wo.buyer_id
+        WHERE wo.deleted_at IS NOT NULL
+        ORDER BY wo.deleted_at DESC, wo.work_order_id DESC
+        LIMIT {$limit}
+    ";
+
+    return db()->query($sql)->fetchAll(PDO::FETCH_ASSOC) ?: [];
+}
+
 function field_ops_save_buyer(array $input): array
 {
     field_ops_ensure_schema();

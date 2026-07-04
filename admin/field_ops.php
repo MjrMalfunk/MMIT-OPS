@@ -56,6 +56,7 @@ $summary = field_ops_summary();
 $buyers = field_ops_buyers();
 $items = field_ops_inventory_items();
 $workOrders = field_ops_work_orders(100);
+$discardedWorkOrders = field_ops_discarded_work_orders(10);
 
 $fmtMoney = static fn($value): string => '$' . number_format((float)$value, 2);
 $fmtHours = static fn($value): string => number_format((float)$value, 1) . ' hrs';
@@ -523,6 +524,48 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
         </tbody>
       </table>
     </div>
+  </section>
+
+  <section class="card" style="margin-top:16px;">
+    <details>
+      <summary style="cursor:pointer;font-weight:950;font-size:18px;">Recently discarded W/O audit</summary>
+      <p class="muted">Soft-deleted work orders are hidden from active totals and the active board, but kept here for traceability.</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Discarded</th>
+              <th>W/O</th>
+              <th>Buyer</th>
+              <th>Gross</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+          <?php if (!$discardedWorkOrders): ?>
+            <tr><td colspan="5" class="muted">No discarded work orders yet.</td></tr>
+          <?php endif; ?>
+          <?php foreach ($discardedWorkOrders as $discarded): ?>
+            <tr>
+              <td><?= $h($dtDisplay($discarded['deleted_at'] ?? '')) ?></td>
+              <td>
+                <strong><?= $h($discarded['title'] ?? 'Untitled W/O') ?></strong><br>
+                <?php if (!empty($discarded['external_work_order_number'])): ?><code><?= $h($discarded['external_work_order_number']) ?></code><?php endif; ?>
+                <div class="muted"><?= $h(trim((string)($discarded['city'] ?? '') . ', ' . (string)($discarded['state'] ?? ''), ' ,')) ?></div>
+              </td>
+              <td>
+                <?= $h($discarded['buyer_name'] ?? 'Unassigned') ?><br>
+                <span class="muted"><?= $h($discarded['platform'] ?? 'FieldNation') ?></span>
+              </td>
+              <td><?= $fmtMoney($discarded['gross_pay'] ?? 0) ?></td>
+              <td><?= $h($discarded['delete_reason'] ?? 'Discarded') ?></td>
+            </tr>
+          <?php endforeach; ?>
+          </tbody>
+        </table>
+      </div>
+    </details>
   </section>
 
   <section class="card" style="margin-top:16px;">
