@@ -428,6 +428,45 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
     .status-paid { color: var(--green); background: rgba(34,197,94,.12); }
     .status-unpaid { color: var(--yellow); background: rgba(250,204,21,.1); }
 
+    .schedule-cue {
+      display: inline-flex;
+      align-items: center;
+      min-height: 20px;
+      margin-top: 5px;
+      padding: 2px 6px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 950;
+      letter-spacing: .05em;
+      white-space: nowrap;
+    }
+    .schedule-cue-attention {
+      color: #fecdd3;
+      border-color: rgba(251,113,133,.46);
+      background: rgba(159,18,57,.22);
+    }
+    .schedule-cue-overdue {
+      color: #fecaca;
+      border-color: rgba(248,113,113,.5);
+      background: rgba(153,27,27,.26);
+    }
+    .schedule-cue-today {
+      color: #fed7aa;
+      border-color: rgba(251,146,60,.5);
+      background: rgba(194,65,12,.22);
+    }
+    .schedule-cue-tomorrow {
+      color: #fef08a;
+      border-color: rgba(250,204,21,.45);
+      background: rgba(161,98,7,.2);
+    }
+    .schedule-cue-upcoming {
+      color: #bfdbfe;
+      border-color: rgba(96,165,250,.4);
+      background: rgba(37,99,235,.16);
+    }
+
     .wo-status-routed {
       color: #c4b5fd;
       border-color: rgba(196,181,253,.45);
@@ -880,6 +919,58 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
               'DECLINED' => 'wo-status-declined',
               default => '',
           };
+
+          $scheduleCueLabel = '';
+          $scheduleCueClass = '';
+          $scheduledStartRaw = trim((string)($wo['scheduled_start_at'] ?? ''));
+          $scheduledStart = null;
+
+          if ($scheduledStartRaw !== '') {
+              try {
+                  $scheduledStart = new DateTimeImmutable($scheduledStartRaw);
+              } catch (Throwable $e) {
+                  $scheduledStart = null;
+              }
+          }
+
+          $terminalStatuses = [
+              'RELEASED_BY_LEAD',
+              'CHECKED_OUT',
+              'SUBMITTED',
+              'APPROVED',
+              'PAID',
+              'CANCELLED',
+              'DECLINED',
+          ];
+
+          $isTerminal = in_array($workStatus, $terminalStatuses, true);
+
+          if (
+              !$isTerminal
+              && in_array($workStatus, ['REQUESTED', 'ASSIGNED'], true)
+              && $scheduledStart === null
+          ) {
+              $scheduleCueLabel = 'NEEDS SCHEDULE';
+              $scheduleCueClass = 'schedule-cue-attention';
+          } elseif (!$isTerminal && $scheduledStart !== null) {
+              $scheduledDay = $scheduledStart->setTime(0, 0);
+              $dayDelta = (int)$todayStart->diff($scheduledDay)->format('%r%a');
+
+              if ($scheduledDay < $todayStart) {
+                  $scheduleCueLabel = 'OVERDUE';
+                  $scheduleCueClass = 'schedule-cue-overdue';
+              } elseif ($dayDelta === 0) {
+                  $scheduleCueLabel = 'TODAY';
+                  $scheduleCueClass = 'schedule-cue-today';
+              } elseif ($dayDelta === 1) {
+                  $scheduleCueLabel = 'TOMORROW';
+                  $scheduleCueClass = 'schedule-cue-tomorrow';
+              } elseif ($dayDelta > 1) {
+                  $scheduleCueLabel = 'IN ' . $dayDelta . ' DAYS';
+                  $scheduleCueClass = 'schedule-cue-upcoming';
+              }
+          }
+
         ?>
           <tr>
             <td>
@@ -896,7 +987,16 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
               <?= $h($wo['buyer_name'] ?? 'Unassigned') ?><br>
               <span class="muted"><?= $h($wo['platform'] ?? 'FieldNation') ?></span>
             </td>
-            <td><?= $h($dtDisplay($wo['scheduled_start_at'] ?? '')) ?></td>
+            <td>
+              <?= $h($dtDisplay($wo['scheduled_start_at'] ?? '')) ?>
+              <?php if ($scheduleCueLabel !== ''): ?>
+                <div>
+                  <span class="schedule-cue <?= $h($scheduleCueClass) ?>">
+                    <?= $h($scheduleCueLabel) ?>
+                  </span>
+                </div>
+              <?php endif; ?>
+            </td>
             <td><?= $fmtMoney($wo['gross_pay']) ?></td>
             <td>
               <dl class="money-pairs" aria-label="Work order fees">
