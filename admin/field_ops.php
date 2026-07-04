@@ -59,6 +59,9 @@ $allWorkOrders = field_ops_work_orders(100);
 
 $workOrderFilters = [
     'all' => 'All',
+    'today' => 'Today',
+    'upcoming' => 'Upcoming',
+    'needs_attention' => 'Needs attention',
     'requested' => 'Requested',
     'assigned' => 'Assigned',
     'scheduled' => 'Scheduled',
@@ -72,11 +75,53 @@ if (!array_key_exists($workOrderFilter, $workOrderFilters)) {
     $workOrderFilter = 'all';
 }
 
-$workOrders = array_values(array_filter($allWorkOrders, static function (array $wo) use ($workOrderFilter): bool {
+$todayStart = new DateTimeImmutable('today');
+$tomorrowStart = $todayStart->modify('+1 day');
+
+$workOrders = array_values(array_filter($allWorkOrders, static function (array $wo) use ($workOrderFilter, $todayStart, $tomorrowStart): bool {
     $status = strtoupper((string)($wo['status'] ?? ''));
     $paymentStatus = strtoupper((string)($wo['payment_status'] ?? ''));
+    $scheduledStartRaw = trim((string)($wo['scheduled_start_at'] ?? ''));
+    $scheduledStart = null;
+
+    if ($scheduledStartRaw !== '') {
+        try {
+            $scheduledStart = new DateTimeImmutable($scheduledStartRaw);
+        } catch (Throwable $e) {
+            $scheduledStart = null;
+        }
+    }
+
+    $terminalStatuses = [
+        'RELEASED_BY_LEAD',
+        'CHECKED_OUT',
+        'SUBMITTED',
+        'APPROVED',
+        'PAID',
+        'CANCELLED',
+        'DECLINED',
+    ];
+
+    $isTerminal = in_array($status, $terminalStatuses, true);
+    $isToday = $scheduledStart !== null
+        && $scheduledStart >= $todayStart
+        && $scheduledStart < $tomorrowStart;
+    $isUpcoming = $scheduledStart !== null
+        && $scheduledStart >= $tomorrowStart
+        && !$isTerminal;
+    $needsAttention = (
+        in_array($status, ['REQUESTED', 'ASSIGNED'], true)
+        && $scheduledStart === null
+    ) || (
+        $scheduledStart !== null
+        && $scheduledStart < $todayStart
+        && !$isTerminal
+    );
 
     return match ($workOrderFilter) {
+        'today' => $isToday,
+        'upcoming' => $isUpcoming,
+        'needs_attention' => $needsAttention,
         'requested' => $status === 'REQUESTED',
         'assigned' => $status === 'ASSIGNED',
         'scheduled' => $status === 'SCHEDULED',
@@ -89,6 +134,61 @@ $workOrders = array_values(array_filter($allWorkOrders, static function (array $
 
 $workOrderCount = count($workOrders);
 $totalWorkOrderCount = count($allWorkOrders);
+
+$scheduleIntelligence = [
+    'today' => 0,
+    'upcoming' => 0,
+    'needs_attention' => 0,
+];
+
+foreach ($allWorkOrders as $wo) {
+    $status = strtoupper((string)($wo['status'] ?? ''));
+    $scheduledStartRaw = trim((string)($wo['scheduled_start_at'] ?? ''));
+    $scheduledStart = null;
+
+    if ($scheduledStartRaw !== '') {
+        try {
+            $scheduledStart = new DateTimeImmutable($scheduledStartRaw);
+        } catch (Throwable $e) {
+            $scheduledStart = null;
+        }
+    }
+
+    $terminalStatuses = [
+        'RELEASED_BY_LEAD',
+        'CHECKED_OUT',
+        'SUBMITTED',
+        'APPROVED',
+        'PAID',
+        'CANCELLED',
+        'DECLINED',
+    ];
+
+    $isTerminal = in_array($status, $terminalStatuses, true);
+
+    if ($scheduledStart !== null && $scheduledStart >= $todayStart && $scheduledStart < $tomorrowStart) {
+        $scheduleIntelligence['today']++;
+    }
+
+    if ($scheduledStart !== null && $scheduledStart >= $tomorrowStart && !$isTerminal) {
+        $scheduleIntelligence['upcoming']++;
+    }
+
+    if (
+        (
+            in_array($status, ['REQUESTED', 'ASSIGNED'], true)
+            && $scheduledStart === null
+        )
+        || (
+            $scheduledStart !== null
+            && $scheduledStart < $todayStart
+            && !$isTerminal
+        )
+    ) {
+        $scheduleIntelligence['needs_attention']++;
+    }
+}
+
 $discardedWorkOrders = field_ops_discarded_work_orders(10);
 
 $fmtMoney = static fn($value): string => '$' . number_format((float)$value, 2);
@@ -321,6 +421,19 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
     .filter-bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:10px 0 14px; }
     .filter-pill { display:inline-flex; align-items:center; justify-content:center; min-height:34px; padding:7px 12px; border-radius:999px; border:1px solid rgba(147,197,253,.28); color:#bfdbfe; background:rgba(15,23,42,.42); text-decoration:none; font-weight:950; font-size:13px; }
     .filter-pill.active { color:white; border-color:rgba(96,165,250,.7); background:linear-gradient(135deg,rgba(37,99,235,.84),rgba(96,165,250,.7)); }
+    .filter-count {
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      min-width:20px;
+      min-height:20px;
+      margin-left:5px;
+      padding:1px 5px;
+      border-radius:999px;
+      background:rgba(0,0,0,.28);
+      font-size:11px;
+      font-weight:950;
+    }
     #work-order-filters { scroll-margin-top:24px; }
     @media (max-width: 1000px) {
       .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -614,7 +727,12 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
           class="filter-pill <?= $workOrderFilter === $filterKey ? 'active' : '' ?>"
           href="<?= $h(BASE_URL) ?>/admin/field_ops.php?work_order_filter=<?= $h($filterKey) ?>#work-order-filters"
           aria-current="<?= $workOrderFilter === $filterKey ? 'page' : 'false' ?>"
-        ><?= $h($filterLabel) ?></a>
+        >
+          <?= $h($filterLabel) ?>
+          <?php if (isset($scheduleIntelligence[$filterKey])): ?>
+            <span class="filter-count"><?= (int)$scheduleIntelligence[$filterKey] ?></span>
+          <?php endif; ?>
+        </a>
       <?php endforeach; ?>
     </nav>
 
