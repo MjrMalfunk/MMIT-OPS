@@ -604,6 +604,8 @@ function field_ops_save_work_order(array $input, int $userId = 0): array
         field_ops_datetime_or_null($input['actual_left_site_at'] ?? ''),
         $status,
         $paymentStatus,
+        $scheduledStartAt,
+        $scheduledEndAt,
         $grossPay,
         $platformFee,
         $insuranceFee,
@@ -951,6 +953,31 @@ function field_ops_update_work_order_state(array $input): array
 
     $status = field_ops_clean_status((string)($input['status'] ?? 'REQUESTED'), field_ops_work_statuses(), 'REQUESTED');
     $paymentStatus = field_ops_clean_status((string)($input['payment_status'] ?? 'UNPAID'), field_ops_payment_statuses(), 'UNPAID');
+
+    $scheduledStartInput = trim((string)($input['scheduled_start_at'] ?? ''));
+    $scheduledEndInput = trim((string)($input['scheduled_end_at'] ?? ''));
+    $scheduledStartAt = field_ops_datetime_or_null($scheduledStartInput);
+    $scheduledEndAt = field_ops_datetime_or_null($scheduledEndInput);
+
+    $scheduleErrors = [];
+
+    if ($scheduledStartInput !== '' && $scheduledStartAt === null) {
+        $scheduleErrors[] = 'Scheduled start must use YYYY-MM-DD HH:MM.';
+    }
+
+    if ($scheduledEndInput !== '' && $scheduledEndAt === null) {
+        $scheduleErrors[] = 'Scheduled end must use YYYY-MM-DD HH:MM.';
+    }
+
+    $scheduleErrors = array_merge(
+        $scheduleErrors,
+        field_ops_schedule_validation_errors($scheduledStartAt, $scheduledEndAt)
+    );
+
+    if ($scheduleErrors !== []) {
+        return ['ok' => false, 'errors' => $scheduleErrors];
+    }
+
     $grossPay = field_ops_money($input['gross_pay'] ?? 0);
     $platformFee = field_ops_money($input['platform_fee'] ?? 0);
     $insuranceFee = field_ops_money($input['insurance_fee'] ?? 0);
@@ -959,6 +986,8 @@ function field_ops_update_work_order_state(array $input): array
         UPDATE field_work_orders
         SET status = ?,
             payment_status = ?,
+            scheduled_start_at = ?,
+            scheduled_end_at = ?,
             gross_pay = ?,
             platform_fee = ?,
             insurance_fee = ?,
@@ -975,6 +1004,8 @@ function field_ops_update_work_order_state(array $input): array
     ")->execute([
         $status,
         $paymentStatus,
+        $scheduledStartAt,
+        $scheduledEndAt,
         $grossPay,
         $platformFee,
         $insuranceFee,

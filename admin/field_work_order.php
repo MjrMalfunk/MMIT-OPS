@@ -243,6 +243,28 @@ $defaultRevenueAccountId = field_ops_default_revenue_account_id();
           </select>
         </label>
 
+        <label>
+          Scheduled start
+          <input
+            type="text"
+            name="scheduled_start_at"
+            value="<?= $h($dtDisplay($wo['scheduled_start_at'] ?? '')) ?>"
+            placeholder="2026-07-06 14:00"
+          >
+          <span style="font-size:11px;color:var(--muted);margin-top:-4px;">24-hour format: YYYY-MM-DD HH:MM</span>
+        </label>
+
+        <label>
+          Scheduled end
+          <input
+            type="text"
+            name="scheduled_end_at"
+            value="<?= $h($dtDisplay($wo['scheduled_end_at'] ?? '')) ?>"
+            placeholder="2026-07-06 19:00"
+          >
+          <span style="font-size:11px;color:var(--muted);margin-top:-4px;">24-hour format: YYYY-MM-DD HH:MM</span>
+        </label>
+
         <label>Gross pay <input name="gross_pay" inputmode="decimal" value="<?= $h($moneyInput($wo['gross_pay'])) ?>"></label>
         <label>Provider fee <input name="platform_fee" inputmode="decimal" value="<?= $h($moneyInput($wo['platform_fee'])) ?>"></label>
         <label>Insurance fee <input name="insurance_fee" inputmode="decimal" value="<?= $h($moneyInput($wo['insurance_fee'] ?? 0)) ?>"></label>
