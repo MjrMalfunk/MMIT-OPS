@@ -237,10 +237,12 @@ $scheduleIntelligence = [
     'today' => 0,
     'upcoming' => 0,
     'needs_attention' => 0,
+    'unpaid' => 0,
 ];
 
 foreach ($allWorkOrders as $wo) {
     $status = strtoupper((string)($wo['status'] ?? ''));
+    $paymentStatus = strtoupper((string)($wo['payment_status'] ?? ''));
     $scheduledStartRaw = trim((string)($wo['scheduled_start_at'] ?? ''));
     $scheduledStart = null;
 
@@ -284,6 +286,10 @@ foreach ($allWorkOrders as $wo) {
         )
     ) {
         $scheduleIntelligence['needs_attention']++;
+    }
+
+    if ($paymentStatus !== 'PAID') {
+        $scheduleIntelligence['unpaid']++;
     }
 }
 
@@ -345,6 +351,80 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
     }
     .stat-value { font-size: 28px; font-weight: 950; }
     .stat-label { color: var(--muted); font-size: 13px; }
+
+    .attention-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      margin: 18px 0 0;
+    }
+
+    .attention-card {
+      position: relative;
+      display: grid;
+      gap: 5px;
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 16px 18px;
+      background: var(--panel);
+      color: var(--text);
+      text-decoration: none;
+      box-shadow: 0 20px 60px rgba(0,0,0,.22);
+      transition:
+        transform .16s ease,
+        border-color .16s ease,
+        background .16s ease;
+    }
+
+    .attention-card:hover,
+    .attention-card:focus-visible {
+      transform: translateY(-2px);
+      border-color: rgba(147,197,253,.58);
+      background: rgba(30,41,59,.94);
+      outline: none;
+    }
+
+    .attention-card.active {
+      border-color: rgba(96,165,250,.78);
+      box-shadow:
+        0 20px 60px rgba(0,0,0,.22),
+        0 0 0 2px rgba(96,165,250,.16);
+    }
+
+    .attention-card-today {
+      border-top: 3px solid rgba(96,165,250,.82);
+    }
+
+    .attention-card-upcoming {
+      border-top: 3px solid rgba(167,139,250,.82);
+    }
+
+    .attention-card-needs-attention {
+      border-top: 3px solid rgba(251,113,133,.88);
+    }
+
+    .attention-card-unpaid {
+      border-top: 3px solid rgba(250,204,21,.84);
+    }
+
+    .attention-value {
+      font-size: clamp(28px, 4vw, 38px);
+      line-height: 1;
+      font-weight: 950;
+    }
+
+    .attention-label {
+      font-size: 12px;
+      font-weight: 950;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .attention-description {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
     .flash-success, .flash-error {
       border-radius: 14px;
       padding: 12px 14px;
@@ -573,12 +653,14 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
     }
     #work-order-filters { scroll-margin-top:24px; }
     @media (max-width: 1000px) {
-      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .stats,
+      .attention-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .forms, .form-grid { grid-template-columns: 1fr; }
       .full { grid-column: auto; }
     }
     @media (max-width: 620px) {
-      .stats { grid-template-columns: 1fr; }
+      .stats,
+      .attention-grid { grid-template-columns: 1fr; }
       .topbar { align-items: flex-start; flex-direction: column; }
     }
   
@@ -625,6 +707,48 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
 
   <?php if ($flashSuccess !== ''): ?><div class="flash-success"><?= $h($flashSuccess) ?></div><?php endif; ?>
   <?php if ($flashError !== ''): ?><div class="flash-error"><?= $h($flashError) ?></div><?php endif; ?>
+
+  <section class="grid attention-grid" aria-label="Field Ops attention summary">
+    <a
+      class="attention-card attention-card-today <?= $workOrderFilter === 'today' ? 'active' : '' ?>"
+      href="<?= $h(BASE_URL) ?>/admin/field_ops.php?work_order_filter=today#work-order-filters"
+      aria-current="<?= $workOrderFilter === 'today' ? 'page' : 'false' ?>"
+    >
+      <span class="attention-value"><?= (int)$scheduleIntelligence['today'] ?></span>
+      <span class="attention-label">Today</span>
+      <span class="attention-description">Scheduled for today</span>
+    </a>
+
+    <a
+      class="attention-card attention-card-upcoming <?= $workOrderFilter === 'upcoming' ? 'active' : '' ?>"
+      href="<?= $h(BASE_URL) ?>/admin/field_ops.php?work_order_filter=upcoming#work-order-filters"
+      aria-current="<?= $workOrderFilter === 'upcoming' ? 'page' : 'false' ?>"
+    >
+      <span class="attention-value"><?= (int)$scheduleIntelligence['upcoming'] ?></span>
+      <span class="attention-label">Upcoming</span>
+      <span class="attention-description">Future scheduled work</span>
+    </a>
+
+    <a
+      class="attention-card attention-card-needs-attention <?= $workOrderFilter === 'needs_attention' ? 'active' : '' ?>"
+      href="<?= $h(BASE_URL) ?>/admin/field_ops.php?work_order_filter=needs_attention#work-order-filters"
+      aria-current="<?= $workOrderFilter === 'needs_attention' ? 'page' : 'false' ?>"
+    >
+      <span class="attention-value"><?= (int)$scheduleIntelligence['needs_attention'] ?></span>
+      <span class="attention-label">Needs attention</span>
+      <span class="attention-description">Missing schedule or overdue</span>
+    </a>
+
+    <a
+      class="attention-card attention-card-unpaid <?= $workOrderFilter === 'unpaid' ? 'active' : '' ?>"
+      href="<?= $h(BASE_URL) ?>/admin/field_ops.php?work_order_filter=unpaid#work-order-filters"
+      aria-current="<?= $workOrderFilter === 'unpaid' ? 'page' : 'false' ?>"
+    >
+      <span class="attention-value"><?= (int)$scheduleIntelligence['unpaid'] ?></span>
+      <span class="attention-label">Unpaid</span>
+      <span class="attention-description">Payment not marked paid</span>
+    </a>
+  </section>
 
   <section class="grid stats">
     <article class="card"><div class="stat-value"><?= (int)$summary['total_work_orders'] ?></div><div class="stat-label">Total W/O</div></article>
