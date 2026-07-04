@@ -229,6 +229,68 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
     }
     .status-paid { color: var(--green); background: rgba(34,197,94,.12); }
     .status-unpaid { color: var(--yellow); background: rgba(250,204,21,.1); }
+
+    .wo-status-routed {
+      color: #c4b5fd;
+      border-color: rgba(196,181,253,.45);
+      background: rgba(124,58,237,.18);
+    }
+    .wo-status-requested {
+      color: #bfdbfe;
+      border-color: rgba(96,165,250,.45);
+      background: rgba(37,99,235,.18);
+    }
+    .wo-status-assigned {
+      color: #a5f3fc;
+      border-color: rgba(34,211,238,.42);
+      background: rgba(8,145,178,.18);
+    }
+    .wo-status-scheduled {
+      color: #fde68a;
+      border-color: rgba(250,204,21,.42);
+      background: rgba(202,138,4,.16);
+    }
+    .wo-status-checked-in {
+      color: #fdba74;
+      border-color: rgba(251,146,60,.45);
+      background: rgba(194,65,12,.18);
+    }
+    .wo-status-in-progress {
+      color: #fed7aa;
+      border-color: rgba(249,115,22,.55);
+      background: rgba(234,88,12,.24);
+    }
+    .wo-status-released,
+    .wo-status-checked-out {
+      color: #99f6e4;
+      border-color: rgba(45,212,191,.42);
+      background: rgba(13,148,136,.18);
+    }
+    .wo-status-submitted {
+      color: #ddd6fe;
+      border-color: rgba(167,139,250,.42);
+      background: rgba(109,40,217,.18);
+    }
+    .wo-status-approved {
+      color: #bbf7d0;
+      border-color: rgba(74,222,128,.42);
+      background: rgba(22,163,74,.18);
+    }
+    .wo-status-paid {
+      color: #86efac;
+      border-color: rgba(34,197,94,.55);
+      background: rgba(21,128,61,.28);
+    }
+    .wo-status-cancelled {
+      color: #cbd5e1;
+      border-color: rgba(148,163,184,.32);
+      background: rgba(71,85,105,.24);
+    }
+    .wo-status-declined {
+      color: #fecaca;
+      border-color: rgba(248,113,113,.45);
+      background: rgba(153,27,27,.24);
+    }
     .low-stock { color: var(--red); font-weight: 950; }
     .muted { color: var(--muted); }
     .field-hint { color: var(--muted); font-size: 11px; margin-top: -4px; }
@@ -584,9 +646,31 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
             </td>
           </tr>
         <?php endif; ?>
-        <?php foreach ($workOrders as $wo): ?>
+        <?php foreach ($workOrders as $wo):
+          $workStatus = strtoupper((string)($wo['status'] ?? ''));
+          $workStatusClass = match ($workStatus) {
+              'ROUTED' => 'wo-status-routed',
+              'REQUESTED' => 'wo-status-requested',
+              'ASSIGNED' => 'wo-status-assigned',
+              'SCHEDULED' => 'wo-status-scheduled',
+              'CHECKED_IN' => 'wo-status-checked-in',
+              'IN_PROGRESS' => 'wo-status-in-progress',
+              'RELEASED_BY_LEAD' => 'wo-status-released',
+              'CHECKED_OUT' => 'wo-status-checked-out',
+              'SUBMITTED' => 'wo-status-submitted',
+              'APPROVED' => 'wo-status-approved',
+              'PAID' => 'wo-status-paid',
+              'CANCELLED' => 'wo-status-cancelled',
+              'DECLINED' => 'wo-status-declined',
+              default => '',
+          };
+        ?>
           <tr>
-            <td><span class="badge"><?= $h($wo['status']) ?></span></td>
+            <td>
+              <span class="badge <?= $h($workStatusClass) ?>">
+                <?= $h(str_replace('_', ' ', $workStatus)) ?>
+              </span>
+            </td>
             <td>
               <strong><a href="<?= $h(BASE_URL) ?>/admin/field_work_order.php?id=<?= (int)$wo['work_order_id'] ?>"><?= $h($wo['title']) ?></a></strong><br>
               <?php if (!empty($wo['external_work_order_number'])): ?><code><?= $h($wo['external_work_order_number']) ?></code><?php endif; ?>
