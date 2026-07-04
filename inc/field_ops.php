@@ -306,6 +306,25 @@ function field_ops_datetime_or_null($value): ?string
     return null;
 }
 
+function field_ops_schedule_validation_errors($startValue, $endValue): array
+{
+    $startAt = field_ops_datetime_or_null($startValue);
+    $endAt = field_ops_datetime_or_null($endValue);
+
+    if ($startAt === null || $endAt === null) {
+        return [];
+    }
+
+    $startYear = (int)substr($startAt, 0, 4);
+    $endYear = (int)substr($endAt, 0, 4);
+
+    if (abs($startYear - $endYear) > 1) {
+        return ['Schedule start/end years appear inconsistent.'];
+    }
+
+    return [];
+}
+
 function field_ops_date_or_today($value): string
 {
     $value = trim((string)$value);
@@ -543,6 +562,14 @@ function field_ops_save_work_order(array $input, int $userId = 0): array
         return ['ok' => false, 'errors' => ['Work order title is required.']];
     }
 
+    $scheduledStartAt = field_ops_datetime_or_null($input['scheduled_start_at'] ?? '');
+    $scheduledEndAt = field_ops_datetime_or_null($input['scheduled_end_at'] ?? '');
+    $scheduleErrors = field_ops_schedule_validation_errors($scheduledStartAt, $scheduledEndAt);
+
+    if ($scheduleErrors !== []) {
+        return ['ok' => false, 'errors' => $scheduleErrors];
+    }
+
     $status = field_ops_clean_status((string)($input['status'] ?? 'REQUESTED'), field_ops_work_statuses(), 'REQUESTED');
     $paymentStatus = field_ops_clean_status((string)($input['payment_status'] ?? 'UNPAID'), field_ops_payment_statuses(), 'UNPAID');
     $platform = trim((string)($input['platform'] ?? 'FieldNation')) ?: 'FieldNation';
@@ -570,8 +597,8 @@ function field_ops_save_work_order(array $input, int $userId = 0): array
         trim((string)($input['site_address'] ?? '')) ?: null,
         trim((string)($input['city'] ?? '')) ?: null,
         trim((string)($input['state'] ?? '')) ?: null,
-        field_ops_datetime_or_null($input['scheduled_start_at'] ?? ''),
-        field_ops_datetime_or_null($input['scheduled_end_at'] ?? ''),
+        $scheduledStartAt,
+        $scheduledEndAt,
         field_ops_datetime_or_null($input['checked_in_at'] ?? ''),
         field_ops_datetime_or_null($input['checked_out_at'] ?? ''),
         field_ops_datetime_or_null($input['actual_left_site_at'] ?? ''),
@@ -2804,6 +2831,14 @@ function field_ops_promote_opportunity_to_work_order(int $opportunityId): array
     $table = 'field_work_orders';
     $grossPay = field_ops_money($op['estimated_gross'] ?? 0);
     $fnFees = field_ops_fn_fee_estimates($grossPay);
+    $scheduleErrors = field_ops_schedule_validation_errors(
+        $op['scheduled_start_at'] ?? null,
+        $op['scheduled_end_at'] ?? null
+    );
+
+    if ($scheduleErrors !== []) {
+        return ['ok' => false, 'errors' => $scheduleErrors];
+    }
 
     $candidate = [
         'platform' => 'FieldNation',
@@ -2943,6 +2978,14 @@ function field_ops_apply_assigned_email_event_to_work_order(int $eventId): array
     $existing = field_ops_find_work_order_by_external_number_safe($woNumber);
 
     $title = trim((string)($event['parsed_title'] ?? '')) ?: ('FieldNation W/O ' . $woNumber);
+    $scheduleErrors = field_ops_schedule_validation_errors(
+        $event['parsed_schedule_start_at'] ?? null,
+        $event['parsed_schedule_end_at'] ?? null
+    );
+
+    if ($scheduleErrors !== []) {
+        return ['ok' => false, 'errors' => $scheduleErrors];
+    }
 
     $notes = [
         'Created/updated from ASSIGNED FieldNation email event #' . $eventId . '.',
