@@ -55,7 +55,40 @@ if (!empty($_SESSION['flash_msg'])) {
 $summary = field_ops_summary();
 $buyers = field_ops_buyers();
 $items = field_ops_inventory_items();
-$workOrders = field_ops_work_orders(100);
+$allWorkOrders = field_ops_work_orders(100);
+
+$workOrderFilters = [
+    'all' => 'All',
+    'requested' => 'Requested',
+    'assigned' => 'Assigned',
+    'scheduled' => 'Scheduled',
+    'in_progress' => 'In Progress',
+    'completed' => 'Completed',
+    'unpaid' => 'Unpaid',
+];
+
+$workOrderFilter = strtolower((string)($_GET['work_order_filter'] ?? 'all'));
+if (!array_key_exists($workOrderFilter, $workOrderFilters)) {
+    $workOrderFilter = 'all';
+}
+
+$workOrders = array_values(array_filter($allWorkOrders, static function (array $wo) use ($workOrderFilter): bool {
+    $status = strtoupper((string)($wo['status'] ?? ''));
+    $paymentStatus = strtoupper((string)($wo['payment_status'] ?? ''));
+
+    return match ($workOrderFilter) {
+        'requested' => $status === 'REQUESTED',
+        'assigned' => $status === 'ASSIGNED',
+        'scheduled' => $status === 'SCHEDULED',
+        'in_progress' => in_array($status, ['CHECKED_IN', 'IN_PROGRESS'], true),
+        'completed' => in_array($status, ['RELEASED_BY_LEAD', 'CHECKED_OUT', 'SUBMITTED', 'APPROVED', 'PAID'], true),
+        'unpaid' => $paymentStatus !== 'PAID',
+        default => true,
+    };
+}));
+
+$workOrderCount = count($workOrders);
+$totalWorkOrderCount = count($allWorkOrders);
 $discardedWorkOrders = field_ops_discarded_work_orders(10);
 
 $fmtMoney = static fn($value): string => '$' . number_format((float)$value, 2);
@@ -179,6 +212,10 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
     .muted { color: var(--muted); }
     .field-hint { color: var(--muted); font-size: 11px; margin-top: -4px; }
     .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .filter-bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:10px 0 14px; }
+    .filter-pill { display:inline-flex; align-items:center; justify-content:center; min-height:34px; padding:7px 12px; border-radius:999px; border:1px solid rgba(147,197,253,.28); color:#bfdbfe; background:rgba(15,23,42,.42); text-decoration:none; font-weight:950; font-size:13px; }
+    .filter-pill.active { color:white; border-color:rgba(96,165,250,.7); background:linear-gradient(135deg,rgba(37,99,235,.84),rgba(96,165,250,.7)); }
+    #work-order-filters { scroll-margin-top:24px; }
     @media (max-width: 1000px) {
       .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .forms, .form-grid { grid-template-columns: 1fr; }
@@ -461,6 +498,20 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
 
   <section class="card" style="margin-top:16px;">
     <h2>Work orders</h2>
+    <p class="muted" style="margin-top:-4px;">
+      Showing <?= (int)$workOrderCount ?> of <?= (int)$totalWorkOrderCount ?> non-discarded work orders.
+    </p>
+
+    <nav id="work-order-filters" class="filter-bar" aria-label="Work order filters">
+      <?php foreach ($workOrderFilters as $filterKey => $filterLabel): ?>
+        <a
+          class="filter-pill <?= $workOrderFilter === $filterKey ? 'active' : '' ?>"
+          href="<?= $h(BASE_URL) ?>/admin/field_ops.php?work_order_filter=<?= $h($filterKey) ?>#work-order-filters"
+          aria-current="<?= $workOrderFilter === $filterKey ? 'page' : 'false' ?>"
+        ><?= $h($filterLabel) ?></a>
+      <?php endforeach; ?>
+    </nav>
+
     <div class="table-wrap">
       <table>
         <thead>
@@ -479,7 +530,15 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
         </thead>
         <tbody>
         <?php if (!$workOrders): ?>
-          <tr><td colspan="10" class="muted">No field work orders yet.</td></tr>
+          <tr>
+            <td colspan="10" class="muted">
+              <?php if ($totalWorkOrderCount > 0): ?>
+                No work orders match the <?= $h($workOrderFilters[$workOrderFilter] ?? 'selected') ?> filter.
+              <?php else: ?>
+                No field work orders yet.
+              <?php endif; ?>
+            </td>
+          </tr>
         <?php endif; ?>
         <?php foreach ($workOrders as $wo): ?>
           <tr>
