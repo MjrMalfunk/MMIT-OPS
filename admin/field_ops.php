@@ -212,6 +212,29 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
     .muted { color: var(--muted); }
     .field-hint { color: var(--muted); font-size: 11px; margin-top: -4px; }
     .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .money-pairs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 12px;
+      margin: 0;
+    }
+    .money-pairs > div {
+      display: inline-grid;
+      grid-template-columns: auto auto;
+      gap: 4px;
+      align-items: baseline;
+      white-space: nowrap;
+    }
+    .money-pairs dt {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .money-pairs dd {
+      margin: 0;
+      color: var(--text);
+      font-weight: 850;
+    }
     .filter-bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:10px 0 14px; }
     .filter-pill { display:inline-flex; align-items:center; justify-content:center; min-height:34px; padding:7px 12px; border-radius:999px; border:1px solid rgba(147,197,253,.28); color:#bfdbfe; background:rgba(15,23,42,.42); text-decoration:none; font-weight:950; font-size:13px; }
     .filter-pill.active { color:white; border-color:rgba(96,165,250,.7); background:linear-gradient(135deg,rgba(37,99,235,.84),rgba(96,165,250,.7)); }
@@ -555,12 +578,28 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
             <td><?= $h($dtDisplay($wo['scheduled_start_at'] ?? '')) ?></td>
             <td><?= $fmtMoney($wo['gross_pay']) ?></td>
             <td>
-              Provider: <?= $fmtMoney($wo['platform_fee']) ?><br>
-              Insurance: <?= $fmtMoney($wo['insurance_fee'] ?? 0) ?>
+              <dl class="money-pairs" aria-label="Work order fees">
+                <div>
+                  <dt>Provider</dt>
+                  <dd><?= $fmtMoney($wo['platform_fee']) ?></dd>
+                </div>
+                <div>
+                  <dt>Insurance</dt>
+                  <dd><?= $fmtMoney($wo['insurance_fee'] ?? 0) ?></dd>
+                </div>
+              </dl>
             </td>
             <td>
-              Materials: <?= $fmtMoney($wo['material_cost']) ?><br>
-              Expenses: <?= $fmtMoney($wo['expense_cost']) ?>
+              <dl class="money-pairs" aria-label="Work order costs">
+                <div>
+                  <dt>Materials</dt>
+                  <dd><?= $fmtMoney($wo['material_cost']) ?></dd>
+                </div>
+                <div>
+                  <dt>Expenses</dt>
+                  <dd><?= $fmtMoney($wo['expense_cost']) ?></dd>
+                </div>
+              </dl>
             </td>
             <td><strong><?= $fmtMoney($wo['estimated_net']) ?></strong></td>
             <td>
