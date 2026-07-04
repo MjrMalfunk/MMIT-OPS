@@ -542,13 +542,47 @@ function field_ops_save_inventory_item(array $input): array
     return ['ok' => true, 'item_id' => (int)db()->lastInsertId()];
 }
 
+function field_ops_fn_insurance_fee_rate(): float
+{
+    $rate = defined('FIELD_OPS_FN_INSURANCE_FEE_RATE')
+        ? (float)constant('FIELD_OPS_FN_INSURANCE_FEE_RATE')
+        : 0.019;
+
+    return min(1.0, max(0.0, $rate));
+}
+
+function field_ops_fn_minimum_provider_fee(float $grossPay): float
+{
+    return round(max(0.0, $grossPay) * 0.10, 2);
+}
+
+function field_ops_fn_normalize_provider_fee(
+    string $platform,
+    float $grossPay,
+    float $platformFee
+): float {
+    $platformFee = max(0.0, $platformFee);
+
+    if (strcasecmp(trim($platform), 'FieldNation') !== 0) {
+        return $platformFee;
+    }
+
+    return max(
+        $platformFee,
+        field_ops_fn_minimum_provider_fee($grossPay)
+    );
+}
+
 function field_ops_fn_fee_estimates(float $grossPay): array
 {
     $grossPay = max(0.0, $grossPay);
 
     return [
-        'platform_fee' => round($grossPay * 0.10, 2),
-        'insurance_fee' => round($grossPay * 0.019, 2),
+        'platform_fee' => field_ops_fn_minimum_provider_fee($grossPay),
+        'insurance_fee' => round(
+            $grossPay * field_ops_fn_insurance_fee_rate(),
+            2
+        ),
     ];
 }
 
@@ -574,8 +608,22 @@ function field_ops_save_work_order(array $input, int $userId = 0): array
     $paymentStatus = field_ops_clean_status((string)($input['payment_status'] ?? 'UNPAID'), field_ops_payment_statuses(), 'UNPAID');
     $platform = trim((string)($input['platform'] ?? 'FieldNation')) ?: 'FieldNation';
     $grossPay = field_ops_money($input['gross_pay'] ?? 0);
-    $platformFee = field_ops_money($input['platform_fee'] ?? 0);
+    $feeEstimates = field_ops_fn_fee_estimates($grossPay);
+
+    $platformFee = field_ops_fn_normalize_provider_fee(
+        $platform,
+        $grossPay,
+        field_ops_money($input['platform_fee'] ?? 0)
+    );
+
     $insuranceFee = field_ops_money($input['insurance_fee'] ?? 0);
+
+    if (
+        strcasecmp(trim($platform), 'FieldNation') === 0
+        && $insuranceFee <= 0.0
+    ) {
+        $insuranceFee = $feeEstimates['insurance_fee'];
+    }
 
     $st = db()->prepare("
         INSERT INTO field_work_orders
@@ -604,8 +652,6 @@ function field_ops_save_work_order(array $input, int $userId = 0): array
         field_ops_datetime_or_null($input['actual_left_site_at'] ?? ''),
         $status,
         $paymentStatus,
-        $scheduledStartAt,
-        $scheduledEndAt,
         $grossPay,
         $platformFee,
         $insuranceFee,
@@ -979,7 +1025,13 @@ function field_ops_update_work_order_state(array $input): array
     }
 
     $grossPay = field_ops_money($input['gross_pay'] ?? 0);
-    $platformFee = field_ops_money($input['platform_fee'] ?? 0);
+
+    $platformFee = field_ops_fn_normalize_provider_fee(
+        (string)($existingWorkOrder['platform'] ?? ''),
+        $grossPay,
+        field_ops_money($input['platform_fee'] ?? 0)
+    );
+
     $insuranceFee = field_ops_money($input['insurance_fee'] ?? 0);
 
     db()->prepare("
@@ -3027,6 +3079,15 @@ function field_ops_apply_assigned_email_event_to_work_order(int $eventId): array
         $notes[] = "\n--- Email body snapshot ---\n" . substr((string)$event['body_text'], 0, 1800);
     }
 
+    $grossPay = max(
+        0.0,
+        (float)($event['parsed_estimated_gross'] ?? 0)
+    );
+
+    $fnFees = field_ops_fn_fee_estimates($grossPay);
+    $existingPlatformFee = (float)($existing['platform_fee'] ?? 0);
+    $existingInsuranceFee = (float)($existing['insurance_fee'] ?? 0);
+
     $candidate = [
         'platform' => 'FieldNation',
         'external_work_order_number' => $woNumber,
@@ -3039,7 +3100,15 @@ function field_ops_apply_assigned_email_event_to_work_order(int $eventId): array
         'scheduled_end_at' => $event['parsed_schedule_end_at'] ?: null,
         'status' => 'ASSIGNED',
         'payment_status' => 'UNPAID',
-        'gross_pay' => (float)($event['parsed_estimated_gross'] ?? 0),
+        'gross_pay' => $grossPay,
+        'platform_fee' => field_ops_fn_normalize_provider_fee(
+            'FieldNation',
+            $grossPay,
+            $existingPlatformFee
+        ),
+        'insurance_fee' => $existingInsuranceFee > 0
+            ? $existingInsuranceFee
+            : $fnFees['insurance_fee'],
         'source_system' => 'FieldNation Email',
         'source_message_id' => (string)$eventId,
         'source_url' => trim((string)($event['parsed_url'] ?? '')) ?: null,
