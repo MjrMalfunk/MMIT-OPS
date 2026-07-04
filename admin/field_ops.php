@@ -132,6 +132,104 @@ $workOrders = array_values(array_filter($allWorkOrders, static function (array $
     };
 }));
 
+$workOrderSortMeta = static function (array $wo) use ($todayStart, $tomorrowStart): array {
+    $status = strtoupper((string)($wo['status'] ?? ''));
+    $scheduledStartRaw = trim((string)($wo['scheduled_start_at'] ?? ''));
+    $scheduledStart = null;
+
+    if ($scheduledStartRaw !== '') {
+        try {
+            $scheduledStart = new DateTimeImmutable($scheduledStartRaw);
+        } catch (Throwable $e) {
+            $scheduledStart = null;
+        }
+    }
+
+    $terminalStatuses = [
+        'RELEASED_BY_LEAD',
+        'CHECKED_OUT',
+        'SUBMITTED',
+        'APPROVED',
+        'PAID',
+        'CANCELLED',
+        'DECLINED',
+    ];
+
+    $isTerminal = in_array($status, $terminalStatuses, true);
+
+    if (
+        !$isTerminal
+        && $scheduledStart !== null
+        && $scheduledStart < $todayStart
+    ) {
+        $bucket = 0;
+    } elseif (
+        !$isTerminal
+        && in_array($status, ['REQUESTED', 'ASSIGNED'], true)
+        && $scheduledStart === null
+    ) {
+        $bucket = 1;
+    } elseif (
+        !$isTerminal
+        && $scheduledStart !== null
+        && $scheduledStart >= $todayStart
+        && $scheduledStart < $tomorrowStart
+    ) {
+        $bucket = 2;
+    } elseif (
+        !$isTerminal
+        && $scheduledStart !== null
+        && $scheduledStart >= $tomorrowStart
+    ) {
+        $bucket = 3;
+    } elseif (!$isTerminal) {
+        $bucket = 4;
+    } else {
+        $bucket = 5;
+    }
+
+    $statusPriority = match ($status) {
+        'ASSIGNED' => 0,
+        'REQUESTED' => 1,
+        default => 2,
+    };
+
+    $updatedAt = strtotime((string)($wo['updated_at'] ?? '')) ?: 0;
+
+    return [
+        'bucket' => $bucket,
+        'scheduled_at' => $scheduledStart?->getTimestamp() ?? PHP_INT_MAX,
+        'status_priority' => $statusPriority,
+        'updated_at' => $updatedAt,
+    ];
+};
+
+usort($workOrders, static function (array $leftWo, array $rightWo) use ($workOrderSortMeta): int {
+    $left = $workOrderSortMeta($leftWo);
+    $right = $workOrderSortMeta($rightWo);
+
+    if ($left['bucket'] !== $right['bucket']) {
+        return $left['bucket'] <=> $right['bucket'];
+    }
+
+    if (
+        $left['bucket'] === 1
+        && $left['status_priority'] !== $right['status_priority']
+    ) {
+        return $left['status_priority'] <=> $right['status_priority'];
+    }
+
+    if ($left['bucket'] === 5) {
+        if ($left['updated_at'] !== $right['updated_at']) {
+            return $right['updated_at'] <=> $left['updated_at'];
+        }
+    } elseif ($left['scheduled_at'] !== $right['scheduled_at']) {
+        return $left['scheduled_at'] <=> $right['scheduled_at'];
+    }
+
+    return (int)$rightWo['work_order_id'] <=> (int)$leftWo['work_order_id'];
+});
+
 $workOrderCount = count($workOrders);
 $totalWorkOrderCount = count($allWorkOrders);
 
