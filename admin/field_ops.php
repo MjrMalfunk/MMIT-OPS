@@ -182,7 +182,28 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
       font-weight: 900;
       cursor: pointer;
     }
-    .btn-primary { background: linear-gradient(135deg, #3b82f6, #60a5fa); color: white; }
+    .btn-primary {
+      background: linear-gradient(135deg, #3b82f6, #60a5fa);
+      border-color: rgba(147,197,253,.55);
+      color: white;
+    }
+    .btn-danger {
+      background: rgba(127,29,29,.24);
+      border-color: rgba(252,165,165,.35);
+      color: #fecaca;
+    }
+    .btn-table {
+      min-height: 32px;
+      padding: 6px 10px;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .action-group {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
     .table-wrap { overflow: auto; }
     table { width: 100%; border-collapse: collapse; min-width: 980px; }
     th, td { padding: 11px 9px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
@@ -608,13 +629,13 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
               </span>
             </td>
             <td>
-              <form method="post" style="margin:0;" onsubmit="return confirm('Discard this work order from the active Field Ops view?');">
+              <form method="post" class="action-group" style="margin:0;" onsubmit="return confirm('Discard this work order from the active Field Ops view?');">
                 <?= csrf_field() ?>
                 <input type="hidden" name="action" value="discard_work_order">
                 <input type="hidden" name="work_order_id" value="<?= (int)$wo['work_order_id'] ?>">
                 <input type="hidden" name="delete_reason" value="Rejected, withdrawn, or manually discarded.">
-                <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_work_order.php?id=<?= (int)$wo['work_order_id'] ?>" style="min-height:32px;padding:7px 10px;">Open</a>
-                <button class="btn" type="submit" style="min-height:32px;padding:7px 10px;">Discard</button>
+                <a class="btn btn-table" href="<?= $h(BASE_URL) ?>/admin/field_work_order.php?id=<?= (int)$wo['work_order_id'] ?>">Open</a>
+                <button class="btn btn-danger btn-table" type="submit">Discard</button>
               </form>
             </td>
           </tr>

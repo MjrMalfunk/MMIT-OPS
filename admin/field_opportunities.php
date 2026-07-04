@@ -190,8 +190,22 @@ $now = date('Y-m-d H:i');
     .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
     .full { grid-column:1 / -1; }
     .btn { display:inline-flex; align-items:center; justify-content:center; min-height:38px; padding:9px 13px; border-radius:999px; border:1px solid rgba(147,197,253,.35); color:var(--text); background:rgba(96,165,250,.16); text-decoration:none; font-weight:900; cursor:pointer; }
-    .btn-primary { background:linear-gradient(135deg,#3b82f6,#60a5fa); color:white; }
-    .btn-danger { background:rgba(127,29,29,.24); border-color:rgba(252,165,165,.35); color:#fecaca; }
+    .btn-primary {
+      background:linear-gradient(135deg,#3b82f6,#60a5fa);
+      border-color:rgba(147,197,253,.55);
+      color:white;
+    }
+    .btn-danger {
+      background:rgba(127,29,29,.24);
+      border-color:rgba(252,165,165,.35);
+      color:#fecaca;
+    }
+    .btn-table {
+      min-height:32px;
+      padding:6px 10px;
+      font-size:12px;
+      white-space:nowrap;
+    }
     .table-wrap { overflow:auto; }
     table { width:100%; border-collapse:collapse; min-width:1220px; }
     th,td { padding:11px 9px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
@@ -405,35 +419,35 @@ $now = date('Y-m-d H:i');
             <td>
               <div class="actions">
                 <?php if (!empty($op['promoted_work_order_id'])): ?>
-                  <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_work_order.php?id=<?= (int)$op['promoted_work_order_id'] ?>">Open W/O</a>
+                  <a class="btn btn-table" href="<?= $h(BASE_URL) ?>/admin/field_work_order.php?id=<?= (int)$op['promoted_work_order_id'] ?>">Open W/O</a>
                   <span class="badge badge-requested">REQUESTED W/O</span>
                 <?php else: ?>
                   <form method="post" style="margin:0;" onsubmit="return confirm(&quot;Create a REQUESTED W/O only? This will not accept, assign, schedule, or block your calendar.&quot;);">
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="promote_opportunity">
                     <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
-                    <button class="btn btn-primary" type="submit">Create REQUESTED W/O</button>
+                    <button class="btn btn-primary btn-table" type="submit">Create REQUESTED W/O</button>
                   </form>
                   <?php if ($status === 'WATCHING'): ?>
                     <form method="post" style="margin:0;">
                       <?= csrf_field() ?>
                       <input type="hidden" name="action" value="unwatch_opportunity">
                       <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
-                      <button class="btn" type="submit">Return to Available</button>
+                      <button class="btn btn-table" type="submit">Return to Available</button>
                     </form>
                   <?php elseif ($status !== 'ROUTED'): ?>
                     <form method="post" style="margin:0;">
                       <?= csrf_field() ?>
                       <input type="hidden" name="action" value="watch_opportunity">
                       <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
-                      <button class="btn" type="submit">Watch</button>
+                      <button class="btn btn-table" type="submit">Watch</button>
                     </form>
                   <?php endif; ?>
                   <form method="post" style="margin:0;" onsubmit="return confirm(&quot;Ignore this opportunity and remove it from the active radar?&quot;);">
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="ignore_opportunity">
                     <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
-                    <button class="btn btn-danger" type="submit">Ignore</button>
+                    <button class="btn btn-danger btn-table" type="submit">Ignore</button>
                   </form>
                   <div class="muted action-note">Creates a request-stage record only. It does not accept, assign, schedule, or block your calendar.</div>
                 <?php endif; ?>
@@ -529,35 +543,35 @@ $now = date('Y-m-d H:i');
 
                 <div class="detail-actions">
                   <?php if (!empty($op['promoted_work_order_id'])): ?>
-                    <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_work_order.php?id=<?= (int)$op['promoted_work_order_id'] ?>">Open W/O</a>
+                    <a class="btn btn-table" href="<?= $h(BASE_URL) ?>/admin/field_work_order.php?id=<?= (int)$op['promoted_work_order_id'] ?>">Open W/O</a>
                     <span class="badge badge-requested">REQUESTED W/O</span>
                   <?php else: ?>
                     <form method="post" style="margin:0;" onsubmit="return confirm(&quot;Create a REQUESTED W/O only? This will not accept, assign, schedule, or block your calendar.&quot;);">
                       <?= csrf_field() ?>
                       <input type="hidden" name="action" value="promote_opportunity">
                       <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
-                      <button class="btn btn-primary" type="submit">Create REQUESTED W/O</button>
+                      <button class="btn btn-primary btn-table" type="submit">Create REQUESTED W/O</button>
                     </form>
                     <?php if ($status === 'WATCHING'): ?>
                       <form method="post" style="margin:0;">
                         <?= csrf_field() ?>
                         <input type="hidden" name="action" value="unwatch_opportunity">
                         <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
-                        <button class="btn" type="submit">Return to Available</button>
+                        <button class="btn btn-table" type="submit">Return to Available</button>
                       </form>
                     <?php elseif ($status !== 'ROUTED'): ?>
                       <form method="post" style="margin:0;">
                         <?= csrf_field() ?>
                         <input type="hidden" name="action" value="watch_opportunity">
                         <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
-                        <button class="btn" type="submit">Watch</button>
+                        <button class="btn btn-table" type="submit">Watch</button>
                       </form>
                     <?php endif; ?>
                     <form method="post" style="margin:0;" onsubmit="return confirm(&quot;Ignore this opportunity and remove it from the active radar?&quot;);">
                       <?= csrf_field() ?>
                       <input type="hidden" name="action" value="ignore_opportunity">
                       <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
-                      <button class="btn btn-danger" type="submit">Ignore</button>
+                      <button class="btn btn-danger btn-table" type="submit">Ignore</button>
                     </form>
                     <div class="muted action-note">Still request-stage only. No accept, assign, schedule, or calendar block happens here.</div>
                   <?php endif; ?>
@@ -642,24 +656,24 @@ $now = date('Y-m-d H:i');
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="apply_email_event">
                     <input type="hidden" name="email_event_id" value="<?= (int)$event['email_event_id'] ?>">
-                    <button class="btn btn-primary" type="submit">Apply to board</button>
+                    <button class="btn btn-primary btn-table" type="submit">Apply to board</button>
                   </form>
                 <?php elseif ($status === 'DECLINED' && empty($event['applied_at'])): ?>
                   <form method="post" style="margin:0;" onsubmit="return confirm(&quot;Process this declined FieldNation email and update any matching records?&quot;);">
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="apply_declined_email_event">
                     <input type="hidden" name="email_event_id" value="<?= (int)$event['email_event_id'] ?>">
-                    <button class="btn btn-danger" type="submit">Process decline</button>
+                    <button class="btn btn-danger btn-table" type="submit">Process decline</button>
                   </form>
                 <?php elseif ($status === 'ASSIGNED' && empty($event['applied_at'])): ?>
                   <form method="post" style="margin:0;" onsubmit="return confirm(&quot;Apply this assigned FieldNation email to the real W/O table?&quot;);">
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="apply_assigned_email_event">
                     <input type="hidden" name="email_event_id" value="<?= (int)$event['email_event_id'] ?>">
-                    <button class="btn btn-primary" type="submit">Apply to W/O</button>
+                    <button class="btn btn-primary btn-table" type="submit">Apply to W/O</button>
                   </form>
                 <?php elseif ($status === 'ASSIGNED' && !empty($event['matched_work_order_id'])): ?>
-                  <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_work_order.php?id=<?= (int)$event['matched_work_order_id'] ?>">Open W/O</a>
+                  <a class="btn btn-table" href="<?= $h(BASE_URL) ?>/admin/field_work_order.php?id=<?= (int)$event['matched_work_order_id'] ?>">Open W/O</a>
                 <?php endif; ?>
               </div>
             </td>
