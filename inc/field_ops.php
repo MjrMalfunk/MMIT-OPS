@@ -4089,8 +4089,10 @@ function field_ops_import_fieldnation_mailbox(array $options = []): array
         'events' => [],
     ];
 
+    $candidateCount = 0;
+
     foreach ($messageNumbers as $messageNumber) {
-        if ($stats['checked'] >= $limit) {
+        if ($candidateCount >= $limit) {
             break;
         }
 
@@ -4114,6 +4116,8 @@ function field_ops_import_fieldnation_mailbox(array $options = []): array
             $stats['duplicates']++;
             continue;
         }
+
+        $candidateCount++;
 
         $subject = field_ops_imap_decode_header_value((string)($overview->subject ?? ''));
         $sender = field_ops_imap_decode_header_value((string)($overview->from ?? 'Field Nation <support@fieldnation.com>'));
