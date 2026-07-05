@@ -113,6 +113,21 @@ $receivableExpectedAt = field_ops_receivable_datetime(
     ?? null
 );
 
+$paymentTermsDays = isset($wo['payment_terms_days'])
+    ? (int)$wo['payment_terms_days']
+    : null;
+
+$estimatedApprovalDays = isset($wo['estimated_approval_days'])
+    ? (int)$wo['estimated_approval_days']
+    : null;
+
+$paymentTermsLabel = match ($paymentTermsDays) {
+    0 => '0-day · first Friday after approval',
+    7 => '7-day · second Friday after approval',
+    14 => '14-day · third Friday after approval',
+    default => null,
+};
+
 $receivableStateClass = match ($receivableState) {
     'READY_TO_SUBMIT' => 'receivable-state-ready',
     'AWAITING_APPROVAL' => 'receivable-state-approval',
@@ -308,19 +323,36 @@ $receivableStateClass = match ($receivableState) {
     </div>
 
     <?php if (
-        $receivableExpectedAt !== null
+        $paymentTermsLabel !== null
+        || $estimatedApprovalDays !== null
+        || $receivableExpectedAt !== null
         || !empty($wo['payment_terms_text'])
     ): ?>
       <div class="receivable-state-meta">
+        <?php if ($paymentTermsLabel !== null): ?>
+          <span>
+            FN terms: <?= $h($paymentTermsLabel) ?>
+          </span>
+        <?php endif; ?>
+
+        <?php if ($estimatedApprovalDays !== null): ?>
+          <span>
+            Est. approval after submission:
+            ~<?= (int)$estimatedApprovalDays ?>
+            <?= (int)$estimatedApprovalDays === 1 ? 'day' : 'days' ?>
+          </span>
+        <?php endif; ?>
+
         <?php if ($receivableExpectedAt !== null): ?>
           <span>
-            Expected <?= $h($receivableExpectedAt->format('M j, Y')) ?>
+            Expected payment:
+            <?= $h($receivableExpectedAt->format('M j, Y')) ?>
           </span>
         <?php endif; ?>
 
         <?php if (!empty($wo['payment_terms_text'])): ?>
           <span>
-            Terms: <?= $h($wo['payment_terms_text']) ?>
+            Terms note: <?= $h($wo['payment_terms_text']) ?>
           </span>
         <?php endif; ?>
       </div>
@@ -384,6 +416,40 @@ $receivableStateClass = match ($receivableState) {
         </label>
 
         <label>
+          FN payment terms
+          <select name="payment_terms_days">
+            <option value="" <?= $wo['payment_terms_days'] === null ? 'selected' : '' ?>>
+              Custom / unknown
+            </option>
+            <option value="0" <?= (string)($wo['payment_terms_days'] ?? '') === '0' ? 'selected' : '' ?>>
+              0-day · first Friday after approval
+            </option>
+            <option value="7" <?= (string)($wo['payment_terms_days'] ?? '') === '7' ? 'selected' : '' ?>>
+              7-day · second Friday after approval
+            </option>
+            <option value="14" <?= (string)($wo['payment_terms_days'] ?? '') === '14' ? 'selected' : '' ?>>
+              14-day · third Friday after approval
+            </option>
+          </select>
+          <span class="field-hint">
+            FieldNation payment cycle shown on the W/O.
+          </span>
+        </label>
+
+        <label>
+          Estimated approval days
+          <input
+            name="estimated_approval_days"
+            inputmode="numeric"
+            value="<?= $wo['estimated_approval_days'] === null ? '' : (int)$wo['estimated_approval_days'] ?>"
+            placeholder="1"
+          >
+          <span class="field-hint">
+            Forecast only. Does not set the payment date.
+          </span>
+        </label>
+
+        <label>
           Expected payment date
           <input
             type="date"
@@ -391,7 +457,7 @@ $receivableStateClass = match ($receivableState) {
             value="<?= $h(substr((string)($wo['expected_payment_at'] ?? ''), 0, 10)) ?>"
           >
           <span class="field-hint">
-            Use the W/O's actual expected payment date.
+            Auto-calculated after approval when FN terms are known. Manual override allowed.
           </span>
         </label>
 

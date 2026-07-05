@@ -80,6 +80,8 @@ function field_ops_ensure_schema(): void
             approved_at DATETIME NULL,
             expected_payment_at DATETIME NULL,
             paid_at DATETIME NULL,
+            payment_terms_days SMALLINT UNSIGNED NULL,
+            estimated_approval_days SMALLINT UNSIGNED NULL,
             payment_terms_text TEXT NULL,
             gross_pay DECIMAL(12,2) NOT NULL DEFAULT 0.00,
             platform_fee DECIMAL(12,2) NOT NULL DEFAULT 0.00,
@@ -154,6 +156,8 @@ function field_ops_ensure_schema(): void
         'approved_at' => "DATETIME NULL",
         'expected_payment_at' => "DATETIME NULL",
         'paid_at' => "DATETIME NULL",
+        'payment_terms_days' => "SMALLINT UNSIGNED NULL",
+        'estimated_approval_days' => "SMALLINT UNSIGNED NULL",
         'payment_terms_text' => "TEXT NULL"
     ] as $column => $definition) {
         if (function_exists('db_column_exists') && !db_column_exists('field_work_orders', $column)) {
@@ -380,6 +384,50 @@ function field_ops_work_statuses(): array
 function field_ops_payment_statuses(): array
 {
     return ['UNPAID', 'PENDING', 'PAID', 'REIMBURSED', 'DISPUTED', 'VOID'];
+}
+
+function field_ops_fn_payment_terms_days(): array
+{
+    return [0, 7, 14];
+}
+
+function field_ops_fn_expected_payment_at(
+    string $approvedAt,
+    int $paymentTermsDays
+): ?string {
+    if (
+        !in_array(
+            $paymentTermsDays,
+            field_ops_fn_payment_terms_days(),
+            true
+        )
+    ) {
+        return null;
+    }
+
+    try {
+        $approved = new DateTimeImmutable($approvedAt);
+    } catch (Throwable $e) {
+        return null;
+    }
+
+    $approvedDay = $approved->setTime(0, 0);
+    $dayOfWeek = (int)$approvedDay->format('N');
+
+    $daysUntilFriday = (5 - $dayOfWeek + 7) % 7;
+
+    // FieldNation wording is the Friday FOLLOWING approval.
+    if ($daysUntilFriday === 0) {
+        $daysUntilFriday = 7;
+    }
+
+    $additionalDays = intdiv($paymentTermsDays, 7) * 7;
+
+    return $approvedDay
+        ->modify(
+            '+' . ($daysUntilFriday + $additionalDays) . ' days'
+        )
+        ->format('Y-m-d 00:00:00');
 }
 
 function field_ops_receivable_datetime($value): ?DateTimeImmutable
@@ -1247,6 +1295,71 @@ function field_ops_update_work_order_state(array $input): array
         }
     }
 
+    $paymentTermsDays = isset(
+        $existingWorkOrder['payment_terms_days']
+    )
+        ? (int)$existingWorkOrder['payment_terms_days']
+        : null;
+
+    if (array_key_exists('payment_terms_days', $input)) {
+        $paymentTermsDaysInput = trim(
+            (string)$input['payment_terms_days']
+        );
+
+        $paymentTermsDays = null;
+
+        if ($paymentTermsDaysInput !== '') {
+            $candidatePaymentTermsDays = (int)$paymentTermsDaysInput;
+
+            if (
+                !in_array(
+                    $candidatePaymentTermsDays,
+                    field_ops_fn_payment_terms_days(),
+                    true
+                )
+            ) {
+                return [
+                    'ok' => false,
+                    'errors' => [
+                        'FieldNation payment terms must be 0, 7, or 14 days.',
+                    ],
+                ];
+            }
+
+            $paymentTermsDays = $candidatePaymentTermsDays;
+        }
+    }
+
+    $estimatedApprovalDays = isset(
+        $existingWorkOrder['estimated_approval_days']
+    )
+        ? (int)$existingWorkOrder['estimated_approval_days']
+        : null;
+
+    if (array_key_exists('estimated_approval_days', $input)) {
+        $estimatedApprovalDaysInput = trim(
+            (string)$input['estimated_approval_days']
+        );
+
+        $estimatedApprovalDays = null;
+
+        if ($estimatedApprovalDaysInput !== '') {
+            if (
+                !ctype_digit($estimatedApprovalDaysInput)
+                || (int)$estimatedApprovalDaysInput > 365
+            ) {
+                return [
+                    'ok' => false,
+                    'errors' => [
+                        'Estimated approval days must be between 0 and 365.',
+                    ],
+                ];
+            }
+
+            $estimatedApprovalDays = (int)$estimatedApprovalDaysInput;
+        }
+    }
+
     $paymentTermsText = $existingWorkOrder['payment_terms_text']
         ?? null;
 
@@ -1277,6 +1390,17 @@ function field_ops_update_work_order_state(array $input): array
     }
 
     if (
+        $expectedPaymentAt === null
+        && $approvedAt !== null
+        && $paymentTermsDays !== null
+    ) {
+        $expectedPaymentAt = field_ops_fn_expected_payment_at(
+            (string)$approvedAt,
+            $paymentTermsDays
+        );
+    }
+
+    if (
         $paidAt === null
         && (
             $status === 'PAID'
@@ -1303,6 +1427,8 @@ function field_ops_update_work_order_state(array $input): array
             onsite_minutes = ?,
             admin_minutes = ?,
             expected_payment_at = ?,
+            payment_terms_days = ?,
+            estimated_approval_days = ?,
             payment_terms_text = ?,
             submitted_at = ?,
             approved_at = ?,
@@ -1326,6 +1452,8 @@ function field_ops_update_work_order_state(array $input): array
         field_ops_int($input['onsite_minutes'] ?? 0),
         field_ops_int($input['admin_minutes'] ?? 0),
         $expectedPaymentAt,
+        $paymentTermsDays,
+        $estimatedApprovalDays,
         $paymentTermsText,
         $submittedAt,
         $approvedAt,
