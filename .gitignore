@@ -16,6 +16,7 @@ secrets.php
 /cache/
 /tmp/
 /sessions/
+/storage/locks/
 error_log
 *.log
 
