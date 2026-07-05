@@ -76,6 +76,11 @@ function field_ops_ensure_schema(): void
             actual_left_site_at DATETIME NULL,
             status VARCHAR(40) NOT NULL DEFAULT 'REQUESTED',
             payment_status VARCHAR(40) NOT NULL DEFAULT 'UNPAID',
+            submitted_at DATETIME NULL,
+            approved_at DATETIME NULL,
+            expected_payment_at DATETIME NULL,
+            paid_at DATETIME NULL,
+            payment_terms_text TEXT NULL,
             gross_pay DECIMAL(12,2) NOT NULL DEFAULT 0.00,
             platform_fee DECIMAL(12,2) NOT NULL DEFAULT 0.00,
             insurance_fee DECIMAL(12,2) NOT NULL DEFAULT 0.00,
@@ -144,7 +149,12 @@ function field_ops_ensure_schema(): void
         'source_message_id' => "VARCHAR(190) NULL",
         'source_url' => "VARCHAR(500) NULL",
         'requested_at' => "DATETIME NULL",
-        'assigned_at' => "DATETIME NULL"
+        'assigned_at' => "DATETIME NULL",
+        'submitted_at' => "DATETIME NULL",
+        'approved_at' => "DATETIME NULL",
+        'expected_payment_at' => "DATETIME NULL",
+        'paid_at' => "DATETIME NULL",
+        'payment_terms_text' => "TEXT NULL"
     ] as $column => $definition) {
         if (function_exists('db_column_exists') && !db_column_exists('field_work_orders', $column)) {
             try {
@@ -370,6 +380,157 @@ function field_ops_work_statuses(): array
 function field_ops_payment_statuses(): array
 {
     return ['UNPAID', 'PENDING', 'PAID', 'REIMBURSED', 'DISPUTED', 'VOID'];
+}
+
+function field_ops_receivable_datetime($value): ?DateTimeImmutable
+{
+    $value = trim((string)$value);
+
+    if ($value === '') {
+        return null;
+    }
+
+    try {
+        return new DateTimeImmutable($value);
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function field_ops_receivable_state(
+    array $workOrder,
+    ?DateTimeImmutable $now = null
+): array {
+    $now ??= new DateTimeImmutable('now');
+
+    $status = strtoupper(trim((string)($workOrder['status'] ?? '')));
+    $paymentStatus = strtoupper(
+        trim((string)($workOrder['payment_status'] ?? ''))
+    );
+
+    $closedStatuses = [
+        'CANCELLED',
+        'DECLINED',
+    ];
+
+    if (
+        in_array($status, $closedStatuses, true)
+        || $paymentStatus === 'VOID'
+    ) {
+        return [
+            'state' => 'CLOSED',
+            'label' => 'Closed',
+            'description' => 'No payment expected',
+            'days' => null,
+            'expected_payment_at' => null,
+        ];
+    }
+
+    if (
+        $status === 'PAID'
+        || $paymentStatus === 'PAID'
+    ) {
+        return [
+            'state' => 'PAID',
+            'label' => 'Paid',
+            'description' => 'Payment received',
+            'days' => null,
+            'expected_payment_at' => $workOrder['expected_payment_at'] ?? null,
+        ];
+    }
+
+    $expectedPaymentAt = field_ops_receivable_datetime(
+        $workOrder['expected_payment_at'] ?? null
+    );
+
+    if ($expectedPaymentAt !== null) {
+        $today = $now->setTime(0, 0);
+        $dueDate = $expectedPaymentAt->setTime(0, 0);
+
+        $days = (int)$today
+            ->diff($dueDate)
+            ->format('%r%a');
+
+        if ($days < 0) {
+            return [
+                'state' => 'PAYMENT_OVERDUE',
+                'label' => 'Payment overdue',
+                'description' => abs($days) . ' day(s) overdue',
+                'days' => $days,
+                'expected_payment_at' => $expectedPaymentAt->format(
+                    'Y-m-d H:i:s'
+                ),
+            ];
+        }
+
+        if ($days <= 7) {
+            return [
+                'state' => 'PAYMENT_DUE_SOON',
+                'label' => 'Payment due soon',
+                'description' => $days === 0
+                    ? 'Payment expected today'
+                    : 'Payment expected in ' . $days . ' day(s)',
+                'days' => $days,
+                'expected_payment_at' => $expectedPaymentAt->format(
+                    'Y-m-d H:i:s'
+                ),
+            ];
+        }
+
+        return [
+            'state' => 'PAYMENT_PENDING',
+            'label' => 'Payment pending',
+            'description' => 'Approved payment is scheduled',
+            'days' => $days,
+            'expected_payment_at' => $expectedPaymentAt->format(
+                'Y-m-d H:i:s'
+            ),
+        ];
+    }
+
+    if ($status === 'APPROVED') {
+        return [
+            'state' => 'PAYMENT_TERMS_REVIEW',
+            'label' => 'Pay terms review',
+            'description' => 'Approved but payment date is unknown',
+            'days' => null,
+            'expected_payment_at' => null,
+        ];
+    }
+
+    if ($status === 'SUBMITTED') {
+        return [
+            'state' => 'AWAITING_APPROVAL',
+            'label' => 'Awaiting approval',
+            'description' => 'Submitted to buyer for approval',
+            'days' => null,
+            'expected_payment_at' => null,
+        ];
+    }
+
+    if (
+        in_array(
+            $status,
+            ['RELEASED_BY_LEAD', 'CHECKED_OUT'],
+            true
+        )
+    ) {
+        return [
+            'state' => 'READY_TO_SUBMIT',
+            'label' => 'Ready to submit',
+            'description' => 'Field work complete; submission pending',
+            'days' => null,
+            'expected_payment_at' => null,
+        ];
+    }
+
+    return [
+        'state' => 'ACTIVE_WORK',
+        'label' => 'Active work',
+        'description' => 'Work order has not entered receivables',
+        'days' => null,
+        'expected_payment_at' => null,
+    ];
 }
 
 function field_ops_clean_status(string $value, array $allowed, string $fallback): string
@@ -1034,6 +1195,36 @@ function field_ops_update_work_order_state(array $input): array
 
     $insuranceFee = field_ops_money($input['insurance_fee'] ?? 0);
 
+    $now = date('Y-m-d H:i:s');
+
+    $submittedAt = $existingWorkOrder['submitted_at'] ?? null;
+    $approvedAt = $existingWorkOrder['approved_at'] ?? null;
+    $paidAt = $existingWorkOrder['paid_at'] ?? null;
+
+    if (
+        $submittedAt === null
+        && in_array($status, ['SUBMITTED', 'APPROVED', 'PAID'], true)
+    ) {
+        $submittedAt = $now;
+    }
+
+    if (
+        $approvedAt === null
+        && in_array($status, ['APPROVED', 'PAID'], true)
+    ) {
+        $approvedAt = $now;
+    }
+
+    if (
+        $paidAt === null
+        && (
+            $status === 'PAID'
+            || $paymentStatus === 'PAID'
+        )
+    ) {
+        $paidAt = $now;
+    }
+
     db()->prepare("
         UPDATE field_work_orders
         SET status = ?,
@@ -1050,6 +1241,9 @@ function field_ops_update_work_order_state(array $input): array
             drive_minutes = ?,
             onsite_minutes = ?,
             admin_minutes = ?,
+            submitted_at = ?,
+            approved_at = ?,
+            paid_at = ?,
             updated_at = NOW()
         WHERE work_order_id = ?
         LIMIT 1
@@ -1068,6 +1262,9 @@ function field_ops_update_work_order_state(array $input): array
         field_ops_int($input['drive_minutes'] ?? 0),
         field_ops_int($input['onsite_minutes'] ?? 0),
         field_ops_int($input['admin_minutes'] ?? 0),
+        $submittedAt,
+        $approvedAt,
+        $paidAt,
         $workOrderId,
     ]);
 

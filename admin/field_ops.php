@@ -67,6 +67,10 @@ $workOrderFilters = [
     'scheduled' => 'Scheduled',
     'in_progress' => 'In Progress',
     'completed' => 'Completed',
+    'ready_to_submit' => 'Ready to submit',
+    'awaiting_approval' => 'Awaiting approval',
+    'payment_pending' => 'Payment pending',
+    'payment_overdue' => 'Payment overdue',
     'unpaid' => 'Unpaid',
 ];
 
@@ -118,6 +122,11 @@ $workOrders = array_values(array_filter($allWorkOrders, static function (array $
         && !$isTerminal
     );
 
+    $receivableState = (string)(
+        field_ops_receivable_state($wo)['state']
+        ?? 'ACTIVE_WORK'
+    );
+
     return match ($workOrderFilter) {
         'today' => $isToday,
         'upcoming' => $isUpcoming,
@@ -127,6 +136,18 @@ $workOrders = array_values(array_filter($allWorkOrders, static function (array $
         'scheduled' => $status === 'SCHEDULED',
         'in_progress' => in_array($status, ['CHECKED_IN', 'IN_PROGRESS'], true),
         'completed' => in_array($status, ['RELEASED_BY_LEAD', 'CHECKED_OUT', 'SUBMITTED', 'APPROVED', 'PAID'], true),
+        'ready_to_submit' => $receivableState === 'READY_TO_SUBMIT',
+        'awaiting_approval' => $receivableState === 'AWAITING_APPROVAL',
+        'payment_pending' => in_array(
+            $receivableState,
+            [
+                'PAYMENT_TERMS_REVIEW',
+                'PAYMENT_PENDING',
+                'PAYMENT_DUE_SOON',
+            ],
+            true
+        ),
+        'payment_overdue' => $receivableState === 'PAYMENT_OVERDUE',
         'unpaid' => $paymentStatus !== 'PAID',
         default => true,
     };
@@ -240,9 +261,22 @@ $scheduleIntelligence = [
     'unpaid' => 0,
 ];
 
+$receivableIntelligence = [
+    'ready_to_submit' => 0,
+    'awaiting_approval' => 0,
+    'payment_pending' => 0,
+    'payment_overdue' => 0,
+];
+
 foreach ($allWorkOrders as $wo) {
     $status = strtoupper((string)($wo['status'] ?? ''));
     $paymentStatus = strtoupper((string)($wo['payment_status'] ?? ''));
+
+    $receivableState = (string)(
+        field_ops_receivable_state($wo)['state']
+        ?? 'ACTIVE_WORK'
+    );
+
     $scheduledStartRaw = trim((string)($wo['scheduled_start_at'] ?? ''));
     $scheduledStart = null;
 
@@ -291,7 +325,32 @@ foreach ($allWorkOrders as $wo) {
     if ($paymentStatus !== 'PAID') {
         $scheduleIntelligence['unpaid']++;
     }
+
+    if ($receivableState === 'READY_TO_SUBMIT') {
+        $receivableIntelligence['ready_to_submit']++;
+    } elseif ($receivableState === 'AWAITING_APPROVAL') {
+        $receivableIntelligence['awaiting_approval']++;
+    } elseif (
+        in_array(
+            $receivableState,
+            [
+                'PAYMENT_TERMS_REVIEW',
+                'PAYMENT_PENDING',
+                'PAYMENT_DUE_SOON',
+            ],
+            true
+        )
+    ) {
+        $receivableIntelligence['payment_pending']++;
+    } elseif ($receivableState === 'PAYMENT_OVERDUE') {
+        $receivableIntelligence['payment_overdue']++;
+    }
 }
+
+$filterIntelligence = (
+    $scheduleIntelligence
+    + $receivableIntelligence
+);
 
 $discardedWorkOrders = field_ops_discarded_work_orders(10);
 
@@ -352,6 +411,26 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
     .stat-value { font-size: 28px; font-weight: 950; }
     .stat-label { color: var(--muted); font-size: 13px; }
 
+    .stat-card-total {
+      border-top: 3px solid rgba(96,165,250,.82);
+    }
+
+    .stat-card-active {
+      border-top: 3px solid rgba(34,211,238,.82);
+    }
+
+    .stat-card-gross {
+      border-top: 3px solid rgba(167,139,250,.82);
+    }
+
+    .stat-card-net {
+      border-top: 3px solid rgba(74,222,128,.82);
+    }
+
+    .stat-card-stock {
+      border-top: 3px solid rgba(251,146,60,.82);
+    }
+
     .attention-grid {
       grid-template-columns: repeat(4, minmax(0, 1fr));
       margin: 18px 0 0;
@@ -404,6 +483,27 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
 
     .attention-card-unpaid {
       border-top: 3px solid rgba(250,204,21,.84);
+    }
+
+    .receivable-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      margin: 0 0 18px;
+    }
+
+    .receivable-card-ready {
+      border-top: 3px solid rgba(45,212,191,.84);
+    }
+
+    .receivable-card-approval {
+      border-top: 3px solid rgba(167,139,250,.84);
+    }
+
+    .receivable-card-pending {
+      border-top: 3px solid rgba(56,189,248,.84);
+    }
+
+    .receivable-card-overdue {
+      border-top: 3px solid rgba(248,113,113,.9);
     }
 
     .attention-value {
@@ -654,13 +754,15 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
     #work-order-filters { scroll-margin-top:24px; }
     @media (max-width: 1000px) {
       .stats,
-      .attention-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .attention-grid,
+      .receivable-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .forms, .form-grid { grid-template-columns: 1fr; }
       .full { grid-column: auto; }
     }
     @media (max-width: 620px) {
       .stats,
-      .attention-grid { grid-template-columns: 1fr; }
+      .attention-grid,
+      .receivable-grid { grid-template-columns: 1fr; }
       .topbar { align-items: flex-start; flex-direction: column; }
     }
   
@@ -751,11 +853,49 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
   </section>
 
   <section class="grid stats">
-    <article class="card"><div class="stat-value"><?= (int)$summary['total_work_orders'] ?></div><div class="stat-label">Total W/O</div></article>
-    <article class="card"><div class="stat-value"><?= (int)$summary['active_work_orders'] ?></div><div class="stat-label">Active W/O</div></article>
-    <article class="card"><div class="stat-value"><?= $fmtMoney($summary['gross_total']) ?></div><div class="stat-label">Gross tracked</div></article>
-    <article class="card"><div class="stat-value"><?= $fmtMoney($summary['estimated_net_total']) ?></div><div class="stat-label">Estimated net</div></article>
-    <article class="card"><div class="stat-value"><?= (int)$summary['low_stock_count'] ?></div><div class="stat-label">Low stock items</div></article>
+    <article class="card stat-card-total"><div class="stat-value"><?= (int)$summary['total_work_orders'] ?></div><div class="stat-label">Total W/O</div></article>
+    <article class="card stat-card-active"><div class="stat-value"><?= (int)$summary['active_work_orders'] ?></div><div class="stat-label">Active W/O</div></article>
+    <article class="card stat-card-gross"><div class="stat-value"><?= $fmtMoney($summary['gross_total']) ?></div><div class="stat-label">Gross tracked</div></article>
+    <article class="card stat-card-net"><div class="stat-value"><?= $fmtMoney($summary['estimated_net_total']) ?></div><div class="stat-label">Estimated net</div></article>
+    <article class="card stat-card-stock"><div class="stat-value"><?= (int)$summary['low_stock_count'] ?></div><div class="stat-label">Low stock items</div></article>
+  </section>
+
+  <section class="grid receivable-grid" aria-label="Field Ops receivable summary">
+    <a
+      class="attention-card receivable-card-ready <?= $workOrderFilter === 'ready_to_submit' ? 'active' : '' ?>"
+      href="<?= $h(BASE_URL) ?>/admin/field_ops.php?work_order_filter=ready_to_submit#work-order-filters"
+    >
+      <span class="attention-value"><?= (int)$receivableIntelligence['ready_to_submit'] ?></span>
+      <span class="attention-label">Ready to submit</span>
+      <span class="attention-description">Field work complete</span>
+    </a>
+
+    <a
+      class="attention-card receivable-card-approval <?= $workOrderFilter === 'awaiting_approval' ? 'active' : '' ?>"
+      href="<?= $h(BASE_URL) ?>/admin/field_ops.php?work_order_filter=awaiting_approval#work-order-filters"
+    >
+      <span class="attention-value"><?= (int)$receivableIntelligence['awaiting_approval'] ?></span>
+      <span class="attention-label">Awaiting approval</span>
+      <span class="attention-description">Submitted to buyer</span>
+    </a>
+
+    <a
+      class="attention-card receivable-card-pending <?= $workOrderFilter === 'payment_pending' ? 'active' : '' ?>"
+      href="<?= $h(BASE_URL) ?>/admin/field_ops.php?work_order_filter=payment_pending#work-order-filters"
+    >
+      <span class="attention-value"><?= (int)$receivableIntelligence['payment_pending'] ?></span>
+      <span class="attention-label">Payment pending</span>
+      <span class="attention-description">Review, scheduled, or due soon</span>
+    </a>
+
+    <a
+      class="attention-card receivable-card-overdue <?= $workOrderFilter === 'payment_overdue' ? 'active' : '' ?>"
+      href="<?= $h(BASE_URL) ?>/admin/field_ops.php?work_order_filter=payment_overdue#work-order-filters"
+    >
+      <span class="attention-value"><?= (int)$receivableIntelligence['payment_overdue'] ?></span>
+      <span class="attention-label">Payment overdue</span>
+      <span class="attention-description">Expected payment date passed</span>
+    </a>
   </section>
 
   <section class="grid forms">
@@ -990,8 +1130,8 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
           aria-current="<?= $workOrderFilter === $filterKey ? 'page' : 'false' ?>"
         >
           <?= $h($filterLabel) ?>
-          <?php if (isset($scheduleIntelligence[$filterKey])): ?>
-            <span class="filter-count"><?= (int)$scheduleIntelligence[$filterKey] ?></span>
+          <?php if (isset($filterIntelligence[$filterKey])): ?>
+            <span class="filter-count"><?= (int)$filterIntelligence[$filterKey] ?></span>
           <?php endif; ?>
         </a>
       <?php endforeach; ?>
