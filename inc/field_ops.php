@@ -443,7 +443,15 @@ function field_ops_receivable_state(
         $workOrder['expected_payment_at'] ?? null
     );
 
-    if ($expectedPaymentAt !== null) {
+    $paymentLifecycleStarted = (
+        $status === 'APPROVED'
+        || $paymentStatus === 'PENDING'
+    );
+
+    if (
+        $paymentLifecycleStarted
+        && $expectedPaymentAt !== null
+    ) {
         $today = $now->setTime(0, 0);
         $dueDate = $expectedPaymentAt->setTime(0, 0);
 
@@ -1195,6 +1203,59 @@ function field_ops_update_work_order_state(array $input): array
 
     $insuranceFee = field_ops_money($input['insurance_fee'] ?? 0);
 
+    $expectedPaymentAt = $existingWorkOrder['expected_payment_at']
+        ?? null;
+
+    if (array_key_exists('expected_payment_at', $input)) {
+        $expectedPaymentInput = trim(
+            (string)$input['expected_payment_at']
+        );
+
+        $expectedPaymentAt = null;
+
+        if ($expectedPaymentInput !== '') {
+            $expectedPaymentDate = DateTimeImmutable::createFromFormat(
+                '!Y-m-d',
+                $expectedPaymentInput
+            );
+
+            $dateErrors = DateTimeImmutable::getLastErrors();
+
+            if (
+                $expectedPaymentDate === false
+                || (
+                    is_array($dateErrors)
+                    && (
+                        $dateErrors['warning_count'] > 0
+                        || $dateErrors['error_count'] > 0
+                    )
+                )
+                || $expectedPaymentDate->format('Y-m-d')
+                    !== $expectedPaymentInput
+            ) {
+                return [
+                    'ok' => false,
+                    'errors' => [
+                        'Expected payment date must use YYYY-MM-DD.',
+                    ],
+                ];
+            }
+
+            $expectedPaymentAt = $expectedPaymentDate->format(
+                'Y-m-d 00:00:00'
+            );
+        }
+    }
+
+    $paymentTermsText = $existingWorkOrder['payment_terms_text']
+        ?? null;
+
+    if (array_key_exists('payment_terms_text', $input)) {
+        $paymentTermsText = trim(
+            (string)$input['payment_terms_text']
+        ) ?: null;
+    }
+
     $now = date('Y-m-d H:i:s');
 
     $submittedAt = $existingWorkOrder['submitted_at'] ?? null;
@@ -1241,6 +1302,8 @@ function field_ops_update_work_order_state(array $input): array
             drive_minutes = ?,
             onsite_minutes = ?,
             admin_minutes = ?,
+            expected_payment_at = ?,
+            payment_terms_text = ?,
             submitted_at = ?,
             approved_at = ?,
             paid_at = ?,
@@ -1262,6 +1325,8 @@ function field_ops_update_work_order_state(array $input): array
         field_ops_int($input['drive_minutes'] ?? 0),
         field_ops_int($input['onsite_minutes'] ?? 0),
         field_ops_int($input['admin_minutes'] ?? 0),
+        $expectedPaymentAt,
+        $paymentTermsText,
         $submittedAt,
         $approvedAt,
         $paidAt,

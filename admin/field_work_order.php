@@ -101,6 +101,30 @@ $onedriveStatus = onedrive_connection_status();
 $canCreateInvoice = field_ops_can_invoice_work_order($wo);
 $defaultRevenueAccountId = field_ops_default_revenue_account_id();
 
+$receivable = field_ops_receivable_state($wo);
+
+$receivableState = (string)(
+    $receivable['state']
+    ?? 'ACTIVE_WORK'
+);
+
+$receivableExpectedAt = field_ops_receivable_datetime(
+    $receivable['expected_payment_at']
+    ?? null
+);
+
+$receivableStateClass = match ($receivableState) {
+    'READY_TO_SUBMIT' => 'receivable-state-ready',
+    'AWAITING_APPROVAL' => 'receivable-state-approval',
+    'PAYMENT_TERMS_REVIEW' => 'receivable-state-review',
+    'PAYMENT_PENDING' => 'receivable-state-pending',
+    'PAYMENT_DUE_SOON' => 'receivable-state-due',
+    'PAYMENT_OVERDUE' => 'receivable-state-overdue',
+    'PAID' => 'receivable-state-paid',
+    'CLOSED' => 'receivable-state-closed',
+    default => 'receivable-state-active',
+};
+
 ?>
 <!doctype html>
 <html lang="en">
@@ -141,6 +165,71 @@ $defaultRevenueAccountId = field_ops_default_revenue_account_id();
     .card { border:1px solid var(--line); background:var(--panel); border-radius:18px; padding:18px; box-shadow:0 20px 60px rgba(0,0,0,.22); }
     .stat-value { font-size:28px; font-weight:950; }
     .stat-label { color:var(--muted); font-size:13px; }
+
+    .receivable-state {
+      display:grid;
+      gap:5px;
+      margin:0 0 18px;
+      border-top:3px solid var(--line);
+    }
+
+    .receivable-state-label {
+      font-size:12px;
+      font-weight:950;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+    }
+
+    .receivable-state-description {
+      color:var(--muted);
+      font-size:13px;
+    }
+
+    .receivable-state-meta {
+      display:flex;
+      gap:10px 18px;
+      flex-wrap:wrap;
+      margin-top:3px;
+      color:var(--muted);
+      font-size:12px;
+    }
+
+    .receivable-state-active {
+      border-top-color:rgba(96,165,250,.82);
+    }
+
+    .receivable-state-ready {
+      border-top-color:rgba(45,212,191,.84);
+    }
+
+    .receivable-state-approval {
+      border-top-color:rgba(167,139,250,.84);
+    }
+
+    .receivable-state-review {
+      border-top-color:rgba(250,204,21,.84);
+    }
+
+    .receivable-state-pending {
+      border-top-color:rgba(56,189,248,.84);
+    }
+
+    .receivable-state-due {
+      border-top-color:rgba(251,146,60,.86);
+    }
+
+    .receivable-state-overdue {
+      border-top-color:rgba(248,113,113,.9);
+    }
+
+    .receivable-state-paid {
+      border-top-color:rgba(74,222,128,.86);
+    }
+
+    .receivable-state-closed {
+      border-top-color:rgba(148,163,184,.58);
+    }
+
     .flash-success,.flash-error { border-radius:14px; padding:12px 14px; margin:12px 0; border:1px solid var(--line); }
     .flash-success { background:rgba(34,197,94,.13); color:var(--green); }
     .flash-error { background:rgba(239,68,68,.13); color:var(--red); }
@@ -209,6 +298,35 @@ $defaultRevenueAccountId = field_ops_default_revenue_account_id();
   <?php if ($flashSuccess !== ''): ?><div class="flash-success"><?= $h($flashSuccess) ?></div><?php endif; ?>
   <?php if ($flashError !== ''): ?><div class="flash-error"><?= $h($flashError) ?></div><?php endif; ?>
 
+  <section class="card receivable-state <?= $h($receivableStateClass) ?>" aria-label="Current receivable state">
+    <div class="receivable-state-label">
+      <?= $h($receivable['label'] ?? $receivableState) ?>
+    </div>
+
+    <div class="receivable-state-description">
+      <?= $h($receivable['description'] ?? '') ?>
+    </div>
+
+    <?php if (
+        $receivableExpectedAt !== null
+        || !empty($wo['payment_terms_text'])
+    ): ?>
+      <div class="receivable-state-meta">
+        <?php if ($receivableExpectedAt !== null): ?>
+          <span>
+            Expected <?= $h($receivableExpectedAt->format('M j, Y')) ?>
+          </span>
+        <?php endif; ?>
+
+        <?php if (!empty($wo['payment_terms_text'])): ?>
+          <span>
+            Terms: <?= $h($wo['payment_terms_text']) ?>
+          </span>
+        <?php endif; ?>
+      </div>
+    <?php endif; ?>
+  </section>
+
   <section class="grid stats">
     <article class="card"><div class="stat-value"><?= $fmtMoney($totals['gross'] ?? 0) ?></div><div class="stat-label">Gross</div></article>
     <article class="card"><div class="stat-value"><?= $fmtMoney($totals['material_cost'] ?? 0) ?></div><div class="stat-label">Materials cost</div></article>
@@ -263,6 +381,29 @@ $defaultRevenueAccountId = field_ops_default_revenue_account_id();
             placeholder="2026-07-06 19:00"
           >
           <span style="font-size:11px;color:var(--muted);margin-top:-4px;">24-hour format: YYYY-MM-DD HH:MM</span>
+        </label>
+
+        <label>
+          Expected payment date
+          <input
+            type="date"
+            name="expected_payment_at"
+            value="<?= $h(substr((string)($wo['expected_payment_at'] ?? ''), 0, 10)) ?>"
+          >
+          <span class="field-hint">
+            Use the W/O's actual expected payment date.
+          </span>
+        </label>
+
+        <label class="full">
+          Payment terms / FN notes
+          <textarea
+            name="payment_terms_text"
+            placeholder="Example: Payment processed on the third Friday after approval."
+          ><?= $h($wo['payment_terms_text'] ?? '') ?></textarea>
+          <span class="field-hint">
+            Preserve the payment wording from the work order when available.
+          </span>
         </label>
 
         <label>Gross pay <input name="gross_pay" inputmode="decimal" value="<?= $h($moneyInput($wo['gross_pay'])) ?>"></label>
