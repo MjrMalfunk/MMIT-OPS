@@ -175,6 +175,7 @@ $tasks = [
             '-d',
             'display_errors=0',
             $root . '/scripts/field_ops_fn_radar_cron.php',
+            '--host=' . $host,
             '--import-limit=100',
             '--apply-limit=200',
         ],

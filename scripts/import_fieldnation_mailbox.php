@@ -1,5 +1,27 @@
 <?php
-$_SERVER['HTTP_HOST'] = $_SERVER['HTTP_HOST'] ?? 'ops-test.midwestmanagedit.com';
+$host = trim(
+    (string)(getenv('MMIT_CLI_HTTP_HOST') ?: '')
+);
+
+foreach ($argv ?? [] as $argument) {
+    if (
+        preg_match(
+            '/^--host=(.+)$/',
+            $argument,
+            $match
+        )
+    ) {
+        $host = trim($match[1]);
+        break;
+    }
+}
+
+$_SERVER['HTTP_HOST'] = $host !== ''
+    ? $host
+    : (
+        $_SERVER['HTTP_HOST']
+        ?? 'ops-test.midwestmanagedit.com'
+    );
 $_SERVER['HTTPS'] = $_SERVER['HTTPS'] ?? 'on';
 $_SERVER['REQUEST_URI'] = $_SERVER['REQUEST_URI'] ?? '/';
 
@@ -8,8 +30,37 @@ require __DIR__ . '/../inc/bootstrap.php';
 require __DIR__ . '/../inc/field_ops.php';
 ob_end_clean();
 
+$importLimit = 25;
+
+foreach ($argv ?? [] as $index => $argument) {
+    if (
+        preg_match(
+            '/^--import-limit=(\d+)$/',
+            $argument,
+            $match
+        )
+    ) {
+        $importLimit = max(
+            1,
+            min(100, (int)$match[1])
+        );
+
+        continue;
+    }
+
+    if (
+        $index === 1
+        && ctype_digit((string)$argument)
+    ) {
+        $importLimit = max(
+            1,
+            min(100, (int)$argument)
+        );
+    }
+}
+
 $options = [
-    'limit' => isset($argv[1]) ? max(1, min(100, (int)$argv[1])) : 25,
+    'limit' => $importLimit,
 ];
 
 $result = field_ops_import_fieldnation_mailbox($options);

@@ -1,8 +1,29 @@
 <?php
 declare(strict_types=1);
 
-$_SERVER['HTTP_HOST'] = $_SERVER['HTTP_HOST']
-    ?? 'ops-test.midwestmanagedit.com';
+$host = trim(
+    (string)(getenv('MMIT_CLI_HTTP_HOST') ?: '')
+);
+
+foreach ($argv ?? [] as $argument) {
+    if (
+        preg_match(
+            '/^--host=(.+)$/',
+            $argument,
+            $match
+        )
+    ) {
+        $host = trim($match[1]);
+        break;
+    }
+}
+
+$_SERVER['HTTP_HOST'] = $host !== ''
+    ? $host
+    : (
+        $_SERVER['HTTP_HOST']
+        ?? 'ops-test.midwestmanagedit.com'
+    );
 
 $_SERVER['HTTPS'] = $_SERVER['HTTPS']
     ?? 'on';
@@ -35,6 +56,7 @@ foreach ($argv ?? [] as $argument) {
 }
 
 echo 'Field Ops FN radar automation starting.', PHP_EOL;
+echo 'Host: ', (string)$_SERVER['HTTP_HOST'], PHP_EOL;
 
 $import = field_ops_import_fieldnation_mailbox([
     'limit' => $importLimit,
