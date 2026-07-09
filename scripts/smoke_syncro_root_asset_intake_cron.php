@@ -106,7 +106,7 @@ PHP;
         . "        ['id' => 106, 'name' => 'WIN11-DEPLOY', 'os' => 'Windows 11 Pro', 'policy_folder_id' => 5029833],\n"
         . "        ['id' => 107, 'name' => 'WIN11-PROD', 'os' => 'Windows 11 Pro', 'policy_folder_id' => 5029835],\n"
         . "    ]]]; }\n"
-        . "    if (\$method === 'PUT' && preg_match('/^customer_assets\\/(101|102)$/', \$path) && isset(\$payload['properties'])) { \$GLOBALS['smoke_cron_stamped'][(int)basename(\$path)] = (array)\$payload['properties']; return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => ['id' => (int)basename(\$path)]]]; }\n"
+        . "    if (\$method === 'PUT' && preg_match('/^customer_assets\\/(101|102)$/', \$path) && isset(\$payload['properties'])) { \$id = (int)basename(\$path); \$GLOBALS['smoke_cron_stamped'][\$id] = array_replace((array)(\$GLOBALS['smoke_cron_stamped'][\$id] ?? []), (array)\$payload['properties']); return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => ['id' => \$id]]]; }\n"
         . "    if (\$method === 'GET' && preg_match('/^customer_assets\\/(101|102)$/', \$path)) { \$id = (int)basename(\$path); return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => ['id' => \$id, 'properties' => \$GLOBALS['smoke_cron_stamped'][\$id] ?? []]]]; }\n"
         . "    if (\$method === 'PUT' && \$path === 'customer_assets/101' && (\$payload['policy_folder_id'] ?? null) === 5029833) { return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => ['id' => 101, 'policy_folder_id' => 5029833]]]; }\n"
         . "    if (\$method === 'PUT' && \$path === 'customer_assets/102' && (\$payload['policy_folder_id'] ?? null) === 5029834) { return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => ['id' => 102, 'policy_folder_id' => 5029834]]]; }\n"
@@ -152,7 +152,7 @@ smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), 'Pre Activation
 smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), '[DRY_RUN_READY] #101'), 'Supported workstation root asset should be routed in dry-run', $failed);
 smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), '[DRY_RUN_READY] #102'), 'Supported server root asset should be routed in dry-run', $failed);
 smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), '"MMIT Service Tier":"Protect"'), 'Dry-run output should include MMIT Service Tier in onboarding fields', $failed);
-smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), 'API field value sources') && str_contains((string)($dryRun['stdout'] ?? ''), 'MMIT Service Tier'), 'Dry-run output should show best-effort Service Tier field value source metadata', $failed);
+smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), 'API field value sources') && str_contains((string)($dryRun['stdout'] ?? ''), 'MMIT Service Tier'), 'Dry-run output should show required Service Tier field value source metadata', $failed);
 smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), '"api_value":"Protect IT"') && str_contains((string)($dryRun['stdout'] ?? ''), '"used_option_id":false'), 'Dry-run output should show Service Tier Protect resolved to the writable dropdown label', $failed);
 smoke_cron_check(substr_count((string)($dryRun['stdout'] ?? ''), '[MANUAL_REVIEW]') === 6, 'macOS/Linux/unknown root assets should remain manual review', $failed);
 smoke_cron_check(str_contains((string)($dryRun['stdout'] ?? ''), '[UNCHANGED_DEPLOY] #106'), 'Deploy assets should be skipped', $failed);
@@ -191,10 +191,10 @@ $calls = json_decode((string)@file_get_contents($callsPath), true) ?: [];
 smoke_cron_check(($apply['exit_code'] ?? null) === 0, 'Explicit apply with staging override should complete successfully', $failed);
 smoke_cron_check(str_contains((string)($apply['stdout'] ?? ''), 'WARNING: OPS staging Syncro POST/PUT/PATCH writes are enabled'), 'Staging override should print controlled write warning', $failed);
 smoke_cron_check(str_contains((string)($apply['stdout'] ?? ''), '[MOVED] #101') && str_contains((string)($apply['stdout'] ?? ''), '[MOVED] #102'), 'Staging override should allow controlled PUT moves', $failed);
-smoke_cron_check(count(array_filter($calls, static fn(array $call): bool => ($call['method'] ?? '') === 'PUT')) === 6, 'Apply override should issue expected required-field, optional Service Tier, and move PUT calls', $failed);
+smoke_cron_check(count(array_filter($calls, static fn(array $call): bool => ($call['method'] ?? '') === 'PUT')) === 6, 'Apply override should issue expected core-field, required Service Tier, and move PUT calls', $failed);
 $applyFieldCalls = array_values(array_filter($calls, static fn(array $call): bool => ($call['method'] ?? '') === 'PUT' && isset($call['payload']['properties'])));
-smoke_cron_check(count($applyFieldCalls) === 4, 'Apply override should stamp required onboarding fields and best-effort Service Tier fields before folder moves', $failed);
-smoke_cron_check(!array_key_exists('MMIT Service Tier', $applyFieldCalls[0]['payload']['properties'] ?? []) && (($applyFieldCalls[1]['payload']['properties']['MMIT Service Tier'] ?? null) === 'Protect IT'), 'Apply override should write Service Tier Protect writable dropdown label as a separate best-effort field payload', $failed);
+smoke_cron_check(count($applyFieldCalls) === 4, 'Apply override should stamp core onboarding fields and required Service Tier fields before verification and folder moves', $failed);
+smoke_cron_check(!array_key_exists('MMIT Service Tier', $applyFieldCalls[0]['payload']['properties'] ?? []) && (($applyFieldCalls[1]['payload']['properties']['MMIT Service Tier'] ?? null) === 'Protect IT'), 'Apply override should write Service Tier Protect writable dropdown label as a separate required field payload', $failed);
 smoke_cron_check(($applyFieldCalls[0]['payload']['properties']['MMIT Onboarding Status'] ?? null) === 'NOT_READY', 'Apply override required field payload should preserve onboarding status NOT_READY', $failed);
 smoke_cron_check(array_key_exists('MMIT Asset Role', $applyFieldCalls[0]['payload']['properties'] ?? []), 'Apply override required field payload should preserve Asset Role field', $failed);
 smoke_cron_check(!array_filter($calls, static fn(array $call): bool => ($call['method'] ?? '') === 'DELETE'), 'Cron runner should never issue DELETE calls', $failed);

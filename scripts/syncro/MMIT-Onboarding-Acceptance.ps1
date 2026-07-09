@@ -143,9 +143,11 @@ function Get-MMITOnboardingRoute {
 
     $serviceTierText = ConvertTo-MMITText $serviceTierRaw
     if ($serviceTierText -eq '') {
-        $routeValidationLines.Add('Service Tier missing; manual label recommended; not blocking movement.')
+        $routeValidationFailures.Add('ServiceTier')
+        $routeValidationLines.Add('Route validation: FAIL - missing ServiceTier')
     } elseif (-not $serviceTierValid) {
-        $routeValidationLines.Add(("Service Tier label warning: unrecognized ServiceTier '{0}'; not blocking movement." -f $serviceTierText))
+        $routeValidationFailures.Add('ServiceTier')
+        $routeValidationLines.Add(("Route validation: FAIL - unrecognized ServiceTier '{0}'" -f $serviceTierText))
     }
 
     $assetRoleText = ConvertTo-MMITText $assetRoleRaw

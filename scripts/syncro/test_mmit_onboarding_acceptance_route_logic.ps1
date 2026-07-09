@@ -115,9 +115,9 @@ $missingRouteFields = @{
 $missingRouteDecision = Get-MMITOnboardingDecision -CustomFields $missingRouteFields -CheckResults @{ Defender = 'PASS'; ScoutDNS = 'PASS'; Huntress = 'FAIL'; CoveAgent = 'FAIL'; CoveBackupComplete = 'FAIL' }
 Assert-Equal $missingRouteDecision.Status 'NOT_READY' 'Missing route values status'
 Assert-Equal $missingRouteDecision.ReadyToMove 'No' 'Missing route values ready to move'
-Assert-Equal ($missingRouteDecision.Failures -contains 'ServiceTier') $false 'Missing route ServiceTier failure excluded'
+Assert-Equal ($missingRouteDecision.Failures -contains 'ServiceTier') $true 'Missing route ServiceTier failure included'
 Assert-Equal ($missingRouteDecision.Failures -contains 'AssetRole') $true 'Missing route AssetRole failure included'
-Assert-Equal ($missingRouteDecision.Summary -like '*Service Tier missing; manual label recommended; not blocking movement.*') $true 'Missing ServiceTier warning summary line'
+Assert-Equal ($missingRouteDecision.Summary -like '*Route validation: FAIL - missing ServiceTier*') $true 'Missing ServiceTier failure summary line'
 Assert-Equal ($missingRouteDecision.Summary -like '*Route validation: FAIL - missing AssetRole*') $true 'Missing AssetRole summary line'
 
 $invalidRouteFields = @{
@@ -127,7 +127,8 @@ $invalidRouteFields = @{
 }
 $invalidRouteDecision = Get-MMITOnboardingDecision -CustomFields $invalidRouteFields -CheckResults @{ Defender = 'PASS'; ScoutDNS = 'PASS'; Huntress = 'FAIL'; CoveAgent = 'FAIL'; CoveBackupComplete = 'FAIL' }
 Assert-Equal $invalidRouteDecision.Status 'NOT_READY' 'Invalid route values status'
-Assert-Equal ($invalidRouteDecision.Summary -like "*Service Tier label warning: unrecognized ServiceTier 'Unknown IT'; not blocking movement.*") $true 'Invalid ServiceTier warning summary line'
+Assert-Equal ($invalidRouteDecision.Failures -contains 'ServiceTier') $true 'Invalid route ServiceTier failure included'
+Assert-Equal ($invalidRouteDecision.Summary -like "*Route validation: FAIL - unrecognized ServiceTier 'Unknown IT'*") $true 'Invalid ServiceTier failure summary line'
 Assert-Equal ($invalidRouteDecision.Summary -like "*Route validation: FAIL - unrecognized AssetRole 'Kiosk'*") $true 'Invalid AssetRole summary line'
 
 $manageDnsReadyFields = @{

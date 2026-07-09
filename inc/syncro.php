@@ -505,18 +505,11 @@ function syncro_asset_onboarding_field_names(): array
     ];
 }
 
-function syncro_optional_asset_onboarding_metadata_field_names(): array
-{
-    $fields = syncro_asset_onboarding_field_names();
-    return [
-        $fields['service_tier'],
-    ];
-}
-
 function syncro_required_asset_onboarding_field_names(): array
 {
     $fields = syncro_asset_onboarding_field_names();
     return [
+        $fields['service_tier'],
         $fields['asset_role'],
         $fields['backup_required'],
         $fields['dns_filtering_required'],
@@ -548,21 +541,21 @@ function syncro_prepare_asset_onboarding_api_field_values(array $fields): array
     return syncro_prepare_asset_onboarding_api_field_payload($fields, true)['fields'];
 }
 
-function syncro_service_tier_best_effort_warning_message(): string
+function syncro_service_tier_required_failure_message(): string
 {
-    return 'MMIT Service Tier update skipped/failed; continuing because OPS package and Syncro policy assignment are authoritative.';
+    return 'MMIT Service Tier is required; asset must remain at the customer root until the tier can be prepared, stamped, and verified.';
 }
 
 function syncro_split_asset_onboarding_api_fields(array $fields): array
 {
     $serviceTierName = syncro_asset_onboarding_field_names()['service_tier'] ?? '';
-    $required = $fields;
-    $optional = [];
-    if ($serviceTierName !== '' && array_key_exists($serviceTierName, $required)) {
-        $optional[$serviceTierName] = $required[$serviceTierName];
-        unset($required[$serviceTierName]);
+    $core = $fields;
+    $serviceTier = [];
+    if ($serviceTierName !== '' && array_key_exists($serviceTierName, $core)) {
+        $serviceTier[$serviceTierName] = $core[$serviceTierName];
+        unset($core[$serviceTierName]);
     }
-    return ['required' => $required, 'optional' => $optional];
+    return ['core' => $core, 'service_tier' => $serviceTier];
 }
 
 function syncro_custom_field_numeric_option_value(mixed $value): bool
@@ -951,12 +944,12 @@ function syncro_prepare_asset_onboarding_api_field_payload(array $fields, bool $
         ];
         if (empty($resolved['ok'])) {
             unset($fields[$serviceTierName]);
-            $warning = syncro_service_tier_best_effort_warning_message();
-            $sources[$serviceTierName]['warning'] = $warning;
-            $sources[$serviceTierName]['error'] = (string)($resolved['error'] ?? 'Unable to resolve Syncro option ID for MMIT Service Tier.');
+            $message = syncro_service_tier_required_failure_message();
+            $sources[$serviceTierName]['required_failure'] = $message;
+            $sources[$serviceTierName]['error'] = (string)($resolved['error'] ?? $message);
             $sources[$serviceTierName]['available_option_maps'] = $resolved['available_option_maps'] ?? [];
-            syncro_debug_log('service_tier_update_best_effort_skipped', [
-                'message' => $warning,
+            syncro_debug_log('service_tier_required_value_unresolved', [
+                'message' => $message,
                 'field' => $serviceTierName,
                 'source' => (string)($resolved['source'] ?? 'unresolved_option_id'),
             ]);
@@ -1392,14 +1385,11 @@ function syncro_route_root_asset_intake(array $asset, array $folderMap, int $roo
     $apiFieldPreparation = syncro_prepare_asset_onboarding_api_field_payload($fieldPayload, false);
     $apiFieldPayload = (array)($apiFieldPreparation['fields'] ?? []);
     $splitApiFields = syncro_split_asset_onboarding_api_fields($apiFieldPayload);
-    $requiredApiFieldPayload = (array)$splitApiFields['required'];
-    $optionalApiFieldPayload = (array)$splitApiFields['optional'];
-    $fieldValidation = syncro_validate_required_asset_onboarding_fields($requiredApiFieldPayload);
+    $coreApiFieldPayload = (array)$splitApiFields['core'];
+    $serviceTierApiFieldPayload = (array)$splitApiFields['service_tier'];
+    $fieldValidation = syncro_validate_required_asset_onboarding_fields($apiFieldPayload);
     $warnings = [];
     $serviceTierName = syncro_asset_onboarding_field_names()['service_tier'] ?? '';
-    if ($serviceTierName !== '' && array_key_exists($serviceTierName, $fieldPayload) && !$optionalApiFieldPayload) {
-        $warnings[] = syncro_service_tier_best_effort_warning_message();
-    }
     $planned = $base + [
         'status' => $dryRun ? 'DRY_RUN_READY' : 'APPLYING',
         'action' => $dryRun ? 'would_stamp_and_move' : 'stamp_and_move',
@@ -1408,9 +1398,9 @@ function syncro_route_root_asset_intake(array $asset, array $folderMap, int $roo
         'onboarding_fields' => $fieldPayload,
         'onboarding_requirements' => $fieldBuild['requirements'] ?? [],
         'tier_result' => $fieldBuild['tier_result'] ?? [],
-        'field_update_payload' => ['properties' => $requiredApiFieldPayload],
-        'optional_field_update_payload' => $optionalApiFieldPayload ? ['properties' => $optionalApiFieldPayload] : [],
-        'field_update_payload_keys' => $fieldValidation['field_payload_keys'] ?? array_keys($requiredApiFieldPayload),
+        'field_update_payload' => ['properties' => $coreApiFieldPayload],
+        'service_tier_field_update_payload' => $serviceTierApiFieldPayload ? ['properties' => $serviceTierApiFieldPayload] : [],
+        'field_update_payload_keys' => $fieldValidation['field_payload_keys'] ?? array_keys($coreApiFieldPayload),
         'field_update_value_sources' => $apiFieldPreparation['value_sources'] ?? [],
         'asset_update_payload' => ['policy_folder_id' => $targetFolderId],
         'warnings' => $warnings,
@@ -1418,11 +1408,21 @@ function syncro_route_root_asset_intake(array $asset, array $folderMap, int $roo
     ];
     if (empty($fieldValidation['ok'])) {
         $missing = array_map('strval', (array)($fieldValidation['missing'] ?? []));
+        $serviceTierMissing = $serviceTierName !== ''
+            && in_array($serviceTierName, $missing, true);
+
         return $finish(array_merge($planned, [
             'ok' => false,
-            'status' => 'FIELD_STAMP_FAILED',
+            'status' => $serviceTierMissing
+                ? 'SERVICE_TIER_REQUIRED'
+                : 'FIELD_STAMP_FAILED',
+            'action' => $serviceTierMissing
+                ? 'manual_review'
+                : ($planned['action'] ?? 'manual_review'),
             'field_validation' => $fieldValidation,
-            'message' => 'Syncro onboarding field payload is missing required fields; asset was not moved: ' . implode(', ', $missing),
+            'message' => $serviceTierMissing
+                ? 'MMIT Service Tier is required and could not be prepared for Syncro; asset remains at the customer root for manual review.'
+                : 'Syncro onboarding field payload is missing required fields; asset was not moved: ' . implode(', ', $missing),
         ]));
     }
 
@@ -1430,12 +1430,39 @@ function syncro_route_root_asset_intake(array $asset, array $folderMap, int $roo
         return $finish($planned);
     }
 
-    $stamp = syncro_update_customer_asset_onboarding_fields($assetId, $requiredApiFieldPayload);
+    $stamp = syncro_update_customer_asset_onboarding_fields($assetId, $coreApiFieldPayload);
     if (empty($stamp['ok'])) {
         $message = !empty($stamp['staging_blocked'])
             ? 'Staging mode blocked the controlled asset onboarding field update; set SYNCRO_ALLOW_STAGING_WRITES=true only for controlled staging apply tests.'
             : ('Syncro onboarding field update failed; asset was not moved: ' . implode(' ', array_map('strval', (array)($stamp['errors'] ?? ['Unknown Syncro error.']))));
         return $finish(array_merge($planned, ['ok' => false, 'status' => !empty($stamp['staging_blocked']) ? 'STAGING_BLOCKED' : 'FIELD_STAMP_FAILED', 'field_response' => $stamp, 'response' => $stamp, 'message' => $message]));
+    }
+
+    if (!$serviceTierApiFieldPayload || $serviceTierName === '' || !array_key_exists($serviceTierName, $serviceTierApiFieldPayload)) {
+        return $finish(array_merge($planned, [
+            'ok' => false,
+            'status' => 'SERVICE_TIER_REQUIRED',
+            'action' => 'manual_review',
+            'field_response' => $stamp,
+            'message' => 'MMIT Service Tier is required and could not be prepared for Syncro; asset was not moved.',
+        ]));
+    }
+
+    $serviceTierStamp = syncro_update_customer_asset_onboarding_fields($assetId, $serviceTierApiFieldPayload);
+
+    if (empty($serviceTierStamp['ok'])) {
+        $message = !empty($serviceTierStamp['staging_blocked'])
+            ? 'Staging mode blocked the required MMIT Service Tier update; asset was not moved.'
+            : ('Required MMIT Service Tier update failed; asset was not moved: ' . implode(' ', array_map('strval', (array)($serviceTierStamp['errors'] ?? ['Unknown Syncro error.']))));
+
+        return $finish(array_merge($planned, [
+            'ok' => false,
+            'status' => !empty($serviceTierStamp['staging_blocked']) ? 'STAGING_BLOCKED' : 'SERVICE_TIER_STAMP_FAILED',
+            'field_response' => $stamp,
+            'service_tier_field_response' => $serviceTierStamp,
+            'response' => $serviceTierStamp,
+            'message' => $message,
+        ]));
     }
 
     $verifyFields = syncro_fetch_customer_asset($assetId);
@@ -1452,7 +1479,7 @@ function syncro_route_root_asset_intake(array $asset, array $folderMap, int $roo
         ]));
     }
 
-    $fieldPersistence = syncro_verify_asset_onboarding_field_persistence((array)($verifyFields['asset'] ?? []), $fieldPayload, $requiredApiFieldPayload);
+    $fieldPersistence = syncro_verify_asset_onboarding_field_persistence((array)($verifyFields['asset'] ?? []), $fieldPayload, $apiFieldPayload);
     if (empty($fieldPersistence['ok'])) {
         $missing = implode(', ', array_map('strval', (array)($fieldPersistence['missing'] ?? [])));
         $message = 'Syncro onboarding field persistence verification failed after field stamping; asset was not moved.'
@@ -1467,30 +1494,15 @@ function syncro_route_root_asset_intake(array $asset, array $folderMap, int $roo
         ]));
     }
 
-    $serviceTierStamp = ['ok' => true, 'skipped' => true];
-    if ($optionalApiFieldPayload) {
-        $serviceTierStamp = syncro_update_customer_asset_onboarding_fields($assetId, $optionalApiFieldPayload);
-        if (empty($serviceTierStamp['ok'])) {
-            $warning = syncro_service_tier_best_effort_warning_message();
-            $warnings[] = $warning;
-            syncro_debug_log('service_tier_update_best_effort_failed', [
-                'message' => $warning,
-                'asset_id' => $assetId,
-                'errors' => array_map('syncro_mask_secrets', (array)($serviceTierStamp['errors'] ?? [])),
-                'status' => $serviceTierStamp['status'] ?? null,
-            ]);
-        }
-    }
-
     $move = syncro_update_customer_asset_policy_folder($assetId, $targetFolderId);
     if (empty($move['ok'])) {
         $message = !empty($move['staging_blocked'])
             ? 'Staging mode blocked the controlled asset folder update after field stamping; set SYNCRO_ALLOW_STAGING_WRITES=true only for controlled staging apply tests.'
             : ('Syncro asset folder update failed after field stamping: ' . implode(' ', array_map('strval', (array)($move['errors'] ?? ['Unknown Syncro error.']))));
-        return $finish(array_merge($planned, ['ok' => false, 'status' => !empty($move['staging_blocked']) ? 'STAGING_BLOCKED' : 'MOVE_FAILED', 'field_response' => $stamp, 'optional_field_response' => $serviceTierStamp, 'warnings' => $warnings, 'response' => $move, 'message' => $message]));
+        return $finish(array_merge($planned, ['ok' => false, 'status' => !empty($move['staging_blocked']) ? 'STAGING_BLOCKED' : 'MOVE_FAILED', 'field_response' => $stamp, 'service_tier_field_response' => $serviceTierStamp, 'warnings' => $warnings, 'response' => $move, 'message' => $message]));
     }
 
-    return $finish(array_merge($planned, ['status' => 'MOVED', 'field_response' => $stamp, 'optional_field_response' => $serviceTierStamp, 'warnings' => $warnings, 'field_persistence' => $fieldPersistence, 'response' => $move, 'message' => 'Stamped onboarding fields, verified required onboarding field persistence, and moved ' . $assetName . ' to ' . $targetLabel . ' using safe PUT /api/v1/customer_assets/{asset_id}.']));
+    return $finish(array_merge($planned, ['status' => 'MOVED', 'field_response' => $stamp, 'service_tier_field_response' => $serviceTierStamp, 'warnings' => $warnings, 'field_persistence' => $fieldPersistence, 'response' => $move, 'message' => 'Stamped onboarding fields, verified required onboarding field persistence, and moved ' . $assetName . ' to ' . $targetLabel . ' using safe PUT /api/v1/customer_assets/{asset_id}.']));
 }
 
 function syncro_client_columns_ready(): bool
