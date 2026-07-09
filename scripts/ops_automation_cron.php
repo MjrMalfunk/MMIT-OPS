@@ -145,6 +145,21 @@ $tasks = [
         ],
     ],
     [
+        'key' => 'syncro-ready-mover',
+        'name' => 'Syncro ready asset mover',
+        'every_minutes' => 5,
+        'command' => [
+            '/bin/timeout',
+            '240',
+            $php,
+            '-d',
+            'display_errors=0',
+            $root . '/scripts/syncro_auto_move_ready_assets_cron.php',
+            '--host=' . $host,
+            '--apply',
+        ],
+    ],
+    [
         'key' => 'fn-radar',
         'name' => 'Field Ops FN radar',
         'every_minutes' => 5,
