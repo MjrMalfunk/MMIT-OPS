@@ -146,6 +146,7 @@ function field_ops_ensure_schema(): void
         'invoice_created_at' => "DATETIME NULL",
 
         'insurance_fee' => "DECIMAL(12,2) NOT NULL DEFAULT 0.00",
+        'deleted_at' => "DATETIME NULL",
         'delete_reason' => "VARCHAR(255) NULL",
         'source_system' => "VARCHAR(80) NULL",
         'source_message_id' => "VARCHAR(190) NULL",
