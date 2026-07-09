@@ -207,6 +207,9 @@ function syncro_auto_move_empty_totals(): array
         'clients_scanned' => 0,
         'assets_scanned' => 0,
         'workstation_candidates' => 0,
+        'workstation_ticket_blocked' => 0,
+        'workstation_finalize_candidates' => 0,
+        'workstation_finalized' => 0,
         'workstation_moved' => 0,
         'servers_ready_disabled' => 0,
         'skipped' => 0,
@@ -738,6 +741,107 @@ function syncro_auto_move_workstation_candidate(array $asset, array $folderMap):
     ];
 }
 
+function syncro_auto_move_workstation_finalization_candidate(
+    array $asset,
+    array $folderMap
+): array {
+    $assetId = syncro_asset_id($asset);
+    $assetName = syncro_asset_name($asset);
+
+    $currentFolderId =
+        syncro_asset_policy_folder_id($asset);
+
+    $fields = syncro_extract_asset_custom_fields(
+        $asset
+    );
+
+    $status = syncro_auto_move_field(
+        $fields,
+        'MMIT Onboarding Status'
+    );
+
+    $ready = syncro_auto_move_field(
+        $fields,
+        'MMIT Ready To Move'
+    );
+
+    $target = syncro_auto_move_field(
+        $fields,
+        'MMIT Production Folder Target'
+    );
+
+    $completedAt = syncro_auto_move_field(
+        $fields,
+        'MMIT Onboarding Completed At'
+    );
+
+    $lane = syncro_auto_move_asset_supported_windows_lane(
+        $asset
+    );
+
+    $errors = [];
+
+    if ($assetId <= 0) {
+        $errors[] = 'missing_asset_id';
+    }
+
+    if ($lane !== 'workstation') {
+        $errors[] =
+            'not_supported_windows_workstation';
+    }
+
+    if (
+        $currentFolderId
+        !== (int)$folderMap[
+            'production_workstations_folder_id'
+        ]
+    ) {
+        $errors[] =
+            'not_in_production_workstations';
+    }
+
+    if (strtoupper(trim($status)) !== 'READY') {
+        $errors[] =
+            'onboarding_status_not_ready';
+    }
+
+    if (!syncro_auto_move_truthy($ready)) {
+        $errors[] =
+            'ready_to_move_not_truthy';
+    }
+
+    if (
+        syncro_auto_move_normalize_target($target)
+        !== 'production/workstations'
+    ) {
+        $errors[] =
+            'target_not_production_workstations';
+    }
+
+    if (trim($completedAt) !== '') {
+        $errors[] =
+            'onboarding_already_completed';
+    }
+
+    return [
+        'ok' => $errors === [],
+        'errors' => $errors,
+        'asset_id' => $assetId,
+        'asset_name' => $assetName,
+        'current_folder_id' => $currentFolderId,
+        'target_folder_id' => (int)$folderMap[
+            'production_workstations_folder_id'
+        ],
+        'fields' => [
+            'status' => $status,
+            'ready_to_move' => $ready,
+            'target' => $target,
+            'completed_at' => $completedAt,
+        ],
+        'lane' => $lane,
+    ];
+}
+
 function syncro_auto_move_server_candidate(array $asset, array $folderMap): array
 {
     $assetId = syncro_asset_id($asset);
@@ -766,52 +870,283 @@ function syncro_auto_move_server_candidate(array $asset, array $folderMap): arra
     ];
 }
 
-function syncro_auto_move_move_workstation(int $clientId, int $syncroCustomerId, array $asset, array $candidate): array
-{
-    $assetId = (int)$candidate['asset_id'];
-    $assetName = (string)$candidate['asset_name'];
-    $fieldsFromAsset = syncro_extract_asset_custom_fields($asset);
-    $readyTicketId = syncro_auto_move_ready_ticket_id_from_asset($fieldsFromAsset);
-    $targetFolderId = (int)$candidate['target_folder_id'];
-    $move = syncro_update_customer_asset_policy_folder($assetId, $targetFolderId);
-    if (empty($move['ok'])) {
-        return ['ok' => false, 'status' => 'MOVE_FAILED', 'errors' => $move['errors'] ?? ['Syncro move failed.'], 'move' => $move];
+function syncro_auto_move_verify_asset_folder(
+    int $assetId,
+    int $targetFolderId,
+    int $maxAttempts = 3,
+    int $delayMicroseconds = 500000
+): array {
+    $maxAttempts = max(
+        1,
+        min(5, $maxAttempts)
+    );
+
+    $delayMicroseconds = max(
+        0,
+        $delayMicroseconds
+    );
+
+    $lastFetch = null;
+    $lastFolderId = null;
+
+    for (
+        $attempt = 1;
+        $attempt <= $maxAttempts;
+        $attempt++
+    ) {
+        $fetch = syncro_fetch_customer_asset(
+            $assetId
+        );
+
+        $lastFetch = $fetch;
+
+        if (!empty($fetch['ok'])) {
+            $verifiedAsset = (array)(
+                $fetch['asset'] ?? []
+            );
+
+            $lastFolderId =
+                syncro_asset_policy_folder_id(
+                    $verifiedAsset
+                );
+
+            if ($lastFolderId === $targetFolderId) {
+                return [
+                    'ok' => true,
+                    'status' => 'MOVE_VERIFIED',
+                    'asset_id' => $assetId,
+                    'target_folder_id' =>
+                        $targetFolderId,
+                    'verified_folder_id' =>
+                        $lastFolderId,
+                    'attempts' => $attempt,
+                    'asset' => $verifiedAsset,
+                    'fetch' => $fetch,
+                ];
+            }
+        }
+
+        if (
+            $attempt < $maxAttempts
+            && $delayMicroseconds > 0
+        ) {
+            usleep($delayMicroseconds);
+        }
     }
 
-    $completedAt = gmdate('Y-m-d\TH:i:s\Z');
-    $resultText = 'Moved to Production/Workstations by OPS Syncro auto mover at ' . $completedAt . '.';
-    $fields = syncro_auto_move_update_completion_fields($assetId, $resultText, $completedAt);
-    $ticket = syncro_auto_move_find_open_ticket($syncroCustomerId, $assetId, $assetName, $readyTicketId);
-    $ticketComment = ['ok' => true, 'skipped' => true];
-    $ticketIdBackfill = ['ok' => true, 'skipped' => true, 'reason' => 'ticket_not_found'];
-    $ticketId = 0;
-    $ticketNumber = 0;
-    if ($ticket) {
-        $ticketIdentity = syncro_auto_move_ticket_identity($ticket);
-        $ticketId = (int)$ticketIdentity['ticket_id'];
-        $ticketNumber = (int)$ticketIdentity['ticket_number'];
-        $ticketIdBackfill = syncro_auto_move_backfill_ready_ticket_id($clientId, $syncroCustomerId, $assetId, $assetName, $readyTicketId, $ticketId, $ticketNumber);
-        $ticketComment = syncro_auto_move_add_ticket_comment($ticketId, $ticketNumber, $resultText . ' Asset #' . $assetId . ' moved to Production/Workstations policy_folder_id #' . $targetFolderId . '.');
-        syncro_auto_move_log_ticket_comment_result([
-            'client_id' => $clientId,
-            'syncro_customer_id' => $syncroCustomerId,
-            'asset_id' => $assetId,
-            'asset_name' => $assetName,
+    $errors = [];
+
+    if (
+        !is_array($lastFetch)
+        || empty($lastFetch['ok'])
+    ) {
+        $errors = (array)(
+            $lastFetch['errors']
+            ?? [
+                'Unable to reread Syncro asset '
+                . 'after folder move.',
+            ]
+        );
+    } else {
+        $errors[] = sprintf(
+            'Syncro asset folder verification '
+            . 'returned policy_folder_id #%s; '
+            . 'expected #%d.',
+            $lastFolderId === null
+                ? 'NULL'
+                : (string)$lastFolderId,
+            $targetFolderId
+        );
+    }
+
+    return [
+        'ok' => false,
+        'status' => 'MOVE_VERIFY_FAILED',
+        'asset_id' => $assetId,
+        'target_folder_id' => $targetFolderId,
+        'verified_folder_id' => $lastFolderId,
+        'attempts' => $maxAttempts,
+        'errors' => $errors,
+        'fetch' => $lastFetch,
+    ];
+}
+
+function syncro_auto_move_move_workstation(
+    int $clientId,
+    int $syncroCustomerId,
+    array $asset,
+    array $candidate,
+    array $ticket
+): array {
+    $assetId = (int)$candidate['asset_id'];
+    $assetName = (string)$candidate['asset_name'];
+
+    $fieldsFromAsset = syncro_extract_asset_custom_fields($asset);
+
+    $readyTicketId = syncro_auto_move_ready_ticket_id_from_asset(
+        $fieldsFromAsset
+    );
+
+    $ticketIdentity = syncro_auto_move_ticket_identity($ticket);
+
+    $ticketId = (int)$ticketIdentity['ticket_id'];
+    $ticketNumber = (int)$ticketIdentity['ticket_number'];
+
+    if ($ticketId <= 0) {
+        return [
+            'ok' => false,
+            'status' => 'READY_MOVE_TICKET_ID_REQUIRED',
+            'errors' => [
+                'Matching ready-move ticket has no internal Syncro ticket ID.',
+            ],
+            'ticket_found' => true,
+            'ticket_id' => 0,
+            'ticket_number' => $ticketNumber,
+        ];
+    }
+
+    $targetFolderId = (int)$candidate['target_folder_id'];
+
+    $move = syncro_update_customer_asset_policy_folder(
+        $assetId,
+        $targetFolderId
+    );
+
+    if (empty($move['ok'])) {
+        return [
+            'ok' => false,
+            'status' => 'MOVE_FAILED',
+            'errors' => $move['errors'] ?? [
+                'Syncro move failed.',
+            ],
+            'move' => $move,
+            'ticket_found' => true,
             'ticket_id' => $ticketId,
             'ticket_number' => $ticketNumber,
-            'action' => 'workstation_moved',
-        ], $ticketComment);
+        ];
     }
+
+    $verify = syncro_auto_move_verify_asset_folder(
+        $assetId,
+        $targetFolderId
+    );
+
+    if (empty($verify['ok'])) {
+        return [
+            'ok' => false,
+            'status' => 'MOVE_VERIFY_FAILED',
+            'errors' => $verify['errors'] ?? [
+                'Syncro folder move could not be verified.',
+            ],
+            'move' => $move,
+            'verify' => $verify,
+            'ticket_found' => true,
+            'ticket_id' => $ticketId,
+            'ticket_number' => $ticketNumber,
+        ];
+    }
+
+    return syncro_auto_move_finalize_workstation(
+        $clientId,
+        $syncroCustomerId,
+        $assetId,
+        $assetName,
+        $readyTicketId,
+        $ticketId,
+        $ticketNumber,
+        $targetFolderId,
+        $move,
+        $verify
+    );
+}
+
+function syncro_auto_move_finalize_workstation(
+    int $clientId,
+    int $syncroCustomerId,
+    int $assetId,
+    string $assetName,
+    int $readyTicketId,
+    int $ticketId,
+    int $ticketNumber,
+    int $targetFolderId,
+    array $move,
+    array $verify
+): array {
+    $completedAt = gmdate('Y-m-d\TH:i:s\Z');
+
+    $resultText =
+        'Moved to Production/Workstations by OPS Syncro auto mover at '
+        . $completedAt
+        . '.';
+
+    $fields = syncro_auto_move_update_completion_fields(
+        $assetId,
+        $resultText,
+        $completedAt
+    );
+
+    if (empty($fields['ok'])) {
+        return [
+            'ok' => false,
+            'status' => !empty($fields['staging_blocked'])
+                ? 'STAGING_BLOCKED'
+                : 'COMPLETION_FIELD_UPDATE_FAILED',
+            'message' =>
+                'Production folder move was verified, but '
+                . 'MMIT completion fields could not be persisted.',
+            'errors' => $fields['errors'] ?? [
+                'Unable to persist MMIT auto-move completion fields.',
+            ],
+            'move' => $move,
+            'verify' => $verify,
+            'field_update' => $fields,
+            'ticket_found' => true,
+            'ticket_id' => $ticketId,
+            'ticket_number' => $ticketNumber,
+        ];
+    }
+
+    $ticketIdBackfill = syncro_auto_move_backfill_ready_ticket_id(
+        $clientId,
+        $syncroCustomerId,
+        $assetId,
+        $assetName,
+        $readyTicketId,
+        $ticketId,
+        $ticketNumber
+    );
+
+    $ticketComment = syncro_auto_move_add_ticket_comment(
+        $ticketId,
+        $ticketNumber,
+        $resultText
+            . ' Asset #'
+            . $assetId
+            . ' moved to Production/Workstations policy_folder_id #'
+            . $targetFolderId
+            . '.'
+    );
+
+    syncro_auto_move_log_ticket_comment_result([
+        'client_id' => $clientId,
+        'syncro_customer_id' => $syncroCustomerId,
+        'asset_id' => $assetId,
+        'asset_name' => $assetName,
+        'ticket_id' => $ticketId,
+        'ticket_number' => $ticketNumber,
+        'action' => 'workstation_moved',
+    ], $ticketComment);
 
     return [
         'ok' => true,
         'status' => 'MOVED',
         'message' => $resultText,
         'move' => $move,
+        'verify' => $verify,
         'field_update' => $fields,
         'ticket_id_backfill' => $ticketIdBackfill,
         'ticket_comment' => $ticketComment,
-        'ticket_found' => $ticket !== null,
+        'ticket_found' => true,
         'ticket_id' => $ticketId,
         'ticket_number' => $ticketNumber,
     ];
@@ -923,6 +1258,250 @@ function syncro_auto_move_process_client(array $client, bool $dryRun): array
             continue;
         }
 
+        $finalizationCandidate =
+            syncro_auto_move_workstation_finalization_candidate(
+                $asset,
+                $folderMap
+            );
+
+        if (!empty($finalizationCandidate['ok'])) {
+            $summary['workstation_finalize_candidates']++;
+
+            $fieldsFromAsset =
+                syncro_extract_asset_custom_fields($asset);
+
+            $readyTicketId =
+                syncro_auto_move_ready_ticket_id_from_asset(
+                    $fieldsFromAsset
+                );
+
+            $ticket = syncro_auto_move_find_open_ticket(
+                $syncroCustomerId,
+                (int)$finalizationCandidate['asset_id'],
+                (string)$finalizationCandidate['asset_name'],
+                $readyTicketId
+            );
+
+            if ($ticket === null) {
+                $summary['workstation_ticket_blocked']++;
+                $summary['skipped']++;
+
+                syncro_auto_move_log(
+                    'READY_MOVE_TICKET_REQUIRED',
+                    [
+                        'client_id' => $clientId,
+                        'syncro_customer_id' =>
+                            $syncroCustomerId,
+                        'asset_id' =>
+                            $finalizationCandidate['asset_id'],
+                        'asset_name' =>
+                            $finalizationCandidate['asset_name'],
+                        'source_folder_id' =>
+                            $finalizationCandidate[
+                                'current_folder_id'
+                            ],
+                        'target_folder_id' =>
+                            $finalizationCandidate[
+                                'target_folder_id'
+                            ],
+                        'ready_ticket_id_field' =>
+                            $readyTicketId,
+                        'action' =>
+                            'workstation_finalization_recovery',
+                        'mode' =>
+                            $dryRun ? 'dry-run' : 'apply',
+                    ]
+                );
+
+                continue;
+            }
+
+            $ticketIdentity =
+                syncro_auto_move_ticket_identity($ticket);
+
+            $ticketId =
+                (int)$ticketIdentity['ticket_id'];
+
+            $ticketNumber =
+                (int)$ticketIdentity['ticket_number'];
+
+            if ($ticketId <= 0) {
+                $summary['workstation_ticket_blocked']++;
+                $summary['skipped']++;
+
+                syncro_auto_move_log(
+                    'READY_MOVE_TICKET_ID_REQUIRED',
+                    [
+                        'client_id' => $clientId,
+                        'syncro_customer_id' =>
+                            $syncroCustomerId,
+                        'asset_id' =>
+                            $finalizationCandidate['asset_id'],
+                        'asset_name' =>
+                            $finalizationCandidate['asset_name'],
+                        'ticket_number' => $ticketNumber,
+                        'action' =>
+                            'workstation_finalization_recovery',
+                        'mode' =>
+                            $dryRun ? 'dry-run' : 'apply',
+                    ]
+                );
+
+                continue;
+            }
+
+            if ($dryRun) {
+                syncro_auto_move_log(
+                    'WOULD_FINALIZE',
+                    [
+                        'client_id' => $clientId,
+                        'syncro_customer_id' =>
+                            $syncroCustomerId,
+                        'asset_id' =>
+                            $finalizationCandidate['asset_id'],
+                        'asset_name' =>
+                            $finalizationCandidate['asset_name'],
+                        'current_folder_id' =>
+                            $finalizationCandidate[
+                                'current_folder_id'
+                            ],
+                        'target_folder_id' =>
+                            $finalizationCandidate[
+                                'target_folder_id'
+                            ],
+                        'ticket_found' => true,
+                        'ticket_id' => $ticketId,
+                        'ticket_number' => $ticketNumber,
+                    ]
+                );
+
+                continue;
+            }
+
+            $moveContext = [
+                'ok' => true,
+                'status' => 'MOVE_ALREADY_VERIFIED',
+                'asset_id' =>
+                    (int)$finalizationCandidate['asset_id'],
+                'target_folder_id' =>
+                    (int)$finalizationCandidate[
+                        'target_folder_id'
+                    ],
+                'skipped' => true,
+            ];
+
+            $verifyContext = [
+                'ok' => true,
+                'status' => 'MOVE_ALREADY_VERIFIED',
+                'asset_id' =>
+                    (int)$finalizationCandidate['asset_id'],
+                'target_folder_id' =>
+                    (int)$finalizationCandidate[
+                        'target_folder_id'
+                    ],
+                'verified_folder_id' =>
+                    (int)$finalizationCandidate[
+                        'current_folder_id'
+                    ],
+                'attempts' => 0,
+            ];
+
+            $finalization =
+                syncro_auto_move_finalize_workstation(
+                    $clientId,
+                    $syncroCustomerId,
+                    (int)$finalizationCandidate['asset_id'],
+                    (string)$finalizationCandidate['asset_name'],
+                    $readyTicketId,
+                    $ticketId,
+                    $ticketNumber,
+                    (int)$finalizationCandidate[
+                        'target_folder_id'
+                    ],
+                    $moveContext,
+                    $verifyContext
+                );
+
+            if (!empty($finalization['ok'])) {
+                $summary['workstation_finalized']++;
+
+                syncro_auto_move_log(
+                    'FINALIZED',
+                    [
+                        'client_id' => $clientId,
+                        'syncro_customer_id' =>
+                            $syncroCustomerId,
+                        'asset_id' =>
+                            $finalizationCandidate['asset_id'],
+                        'asset_name' =>
+                            $finalizationCandidate['asset_name'],
+                        'folder_id' =>
+                            $finalizationCandidate[
+                                'current_folder_id'
+                            ],
+                        'ticket_found' => true,
+                        'ticket_id' => $ticketId,
+                        'ticket_number' => $ticketNumber,
+                        'recovery' => true,
+                    ]
+                );
+            } elseif (
+                ($finalization['status'] ?? '')
+                === 'STAGING_BLOCKED'
+                || !empty(
+                    $finalization[
+                        'field_update'
+                    ]['staging_blocked']
+                )
+            ) {
+                $summary['skipped']++;
+
+                syncro_auto_move_log(
+                    'STAGING_WRITE_BLOCKED',
+                    [
+                        'client_id' => $clientId,
+                        'syncro_customer_id' =>
+                            $syncroCustomerId,
+                        'asset_id' =>
+                            $finalizationCandidate['asset_id'],
+                        'asset_name' =>
+                            $finalizationCandidate['asset_name'],
+                        'action' =>
+                            'workstation_finalization_recovery',
+                        'errors' =>
+                            $finalization['errors'] ?? [],
+                    ]
+                );
+            } else {
+                $summary['failures']++;
+
+                syncro_auto_move_log(
+                    'FINALIZATION_FAILED',
+                    [
+                        'client_id' => $clientId,
+                        'syncro_customer_id' =>
+                            $syncroCustomerId,
+                        'asset_id' =>
+                            $finalizationCandidate['asset_id'],
+                        'asset_name' =>
+                            $finalizationCandidate['asset_name'],
+                        'folder_id' =>
+                            $finalizationCandidate[
+                                'current_folder_id'
+                            ],
+                        'ticket_id' => $ticketId,
+                        'ticket_number' => $ticketNumber,
+                        'status' =>
+                            $finalization['status'] ?? null,
+                        'errors' =>
+                            $finalization['errors'] ?? [],
+                    ]
+                );
+            }
+
+            continue;
+        }
+
         $candidate = syncro_auto_move_workstation_candidate($asset, $folderMap);
         if (empty($candidate['ok'])) {
             $summary['skipped']++;
@@ -930,6 +1509,59 @@ function syncro_auto_move_process_client(array $client, bool $dryRun): array
         }
 
         $summary['workstation_candidates']++;
+
+        $fieldsFromAsset = syncro_extract_asset_custom_fields($asset);
+
+        $readyTicketId = syncro_auto_move_ready_ticket_id_from_asset(
+            $fieldsFromAsset
+        );
+
+        $ticket = syncro_auto_move_find_open_ticket(
+            $syncroCustomerId,
+            (int)$candidate['asset_id'],
+            (string)$candidate['asset_name'],
+            $readyTicketId
+        );
+
+        if ($ticket === null) {
+            $summary['workstation_ticket_blocked']++;
+            $summary['skipped']++;
+
+            syncro_auto_move_log('READY_MOVE_TICKET_REQUIRED', [
+                'client_id' => $clientId,
+                'syncro_customer_id' => $syncroCustomerId,
+                'asset_id' => $candidate['asset_id'],
+                'asset_name' => $candidate['asset_name'],
+                'source_folder_id' => $candidate['current_folder_id'],
+                'target_folder_id' => $candidate['target_folder_id'],
+                'ready_ticket_id_field' => $readyTicketId,
+                'mode' => $dryRun ? 'dry-run' : 'apply',
+            ]);
+
+            continue;
+        }
+
+        $ticketIdentity = syncro_auto_move_ticket_identity($ticket);
+
+        $ticketId = (int)$ticketIdentity['ticket_id'];
+        $ticketNumber = (int)$ticketIdentity['ticket_number'];
+
+        if ($ticketId <= 0) {
+            $summary['workstation_ticket_blocked']++;
+            $summary['skipped']++;
+
+            syncro_auto_move_log('READY_MOVE_TICKET_ID_REQUIRED', [
+                'client_id' => $clientId,
+                'syncro_customer_id' => $syncroCustomerId,
+                'asset_id' => $candidate['asset_id'],
+                'asset_name' => $candidate['asset_name'],
+                'ticket_number' => $ticketNumber,
+                'mode' => $dryRun ? 'dry-run' : 'apply',
+            ]);
+
+            continue;
+        }
+
         if ($dryRun) {
             syncro_auto_move_log('WOULD_MOVE', [
                 'client_id' => $clientId,
@@ -938,11 +1570,21 @@ function syncro_auto_move_process_client(array $client, bool $dryRun): array
                 'asset_name' => $candidate['asset_name'],
                 'source_folder_id' => $candidate['current_folder_id'],
                 'target_folder_id' => $candidate['target_folder_id'],
+                'ticket_found' => true,
+                'ticket_id' => $ticketId,
+                'ticket_number' => $ticketNumber,
             ]);
+
             continue;
         }
 
-        $move = syncro_auto_move_move_workstation($clientId, $syncroCustomerId, $asset, $candidate);
+        $move = syncro_auto_move_move_workstation(
+            $clientId,
+            $syncroCustomerId,
+            $asset,
+            $candidate,
+            $ticket
+        );
         if (!empty($move['ok'])) {
             $summary['workstation_moved']++;
             syncro_auto_move_log('MOVED', [
