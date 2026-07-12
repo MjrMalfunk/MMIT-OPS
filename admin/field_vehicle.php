@@ -135,6 +135,20 @@ if (
     $editEventId = 0;
 }
 
+$editComponentId = (int)($_GET['edit_component'] ?? 0);
+
+$editComponent = $editComponentId > 0
+    ? field_vehicle_component_find($editComponentId)
+    : null;
+
+if (
+    $editComponent
+    && (int)$editComponent['vehicle_id'] !== $vehicleId
+) {
+    $editComponent = null;
+    $editComponentId = 0;
+}
+
 $isQuickFuel = $vehicle
     && !$editEvent
     && strtolower(trim((string)($_GET['quick'] ?? ''))) === 'fuel';
@@ -207,6 +221,43 @@ $maintenanceStatuses = field_vehicle_maintenance_statuses();
 $components = $vehicle
     ? field_vehicle_components($vehicleId)
     : [];
+
+$componentDefaultType = array_key_first($componentTypes) ?: 'OTHER';
+
+$componentFormDefaults = [
+    'component_type' => (string)(
+        $editComponent['component_type']
+        ?? $componentDefaultType
+    ),
+    'status' => (string)(
+        $editComponent['status']
+        ?? 'BASELINE_NEEDED'
+    ),
+    'component_name' => (string)(
+        $editComponent['component_name']
+        ?? ''
+    ),
+    'baseline_date' => (string)(
+        $editComponent['baseline_date']
+        ?? ''
+    ),
+    'baseline_odometer' => (string)(
+        $editComponent['baseline_odometer']
+        ?? ($vehicle['current_odometer'] ?? '')
+    ),
+    'warranty_until_date' => (string)(
+        $editComponent['warranty_until_date']
+        ?? ''
+    ),
+    'warranty_until_miles' => (string)(
+        $editComponent['warranty_until_miles']
+        ?? ''
+    ),
+    'notes' => (string)(
+        $editComponent['notes']
+        ?? ''
+    ),
+];
 
 $maintenanceItems = $vehicle
     ? field_vehicle_maintenance_items($vehicleId, true)
@@ -434,9 +485,20 @@ $vehicleValue = static function (
       resize: vertical;
     }
 
+    select {
+      color-scheme: light;
+    }
+
     select option {
-      background: #f8fafc;
-      color: #0f172a;
+      background: #eff6ff;
+      color: #082f49;
+      font-weight: 800;
+    }
+
+    select option:checked,
+    select option:hover {
+      background: #bfdbfe;
+      color: #082f49;
     }
 
     .checkbox {
@@ -1108,12 +1170,13 @@ $vehicleValue = static function (
                   <th>Baseline</th>
                   <th>Warranty</th>
                   <th>Notes</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
               <?php if (!$components): ?>
                 <tr>
-                  <td colspan="5" class="muted">
+                  <td colspan="6" class="muted">
                     No component baselines yet.
                   </td>
                 </tr>
@@ -1163,6 +1226,15 @@ $vehicleValue = static function (
                   </td>
 
                   <td><?= nl2br($h($component['notes'] ?? '')) ?></td>
+
+                  <td>
+                    <a
+                      class="btn btn-table"
+                      href="<?= $h(BASE_URL) ?>/admin/field_vehicle.php?id=<?= (int)$vehicleId ?>&edit_component=<?= (int)$component['component_id'] ?>#component-baseline-form"
+                    >
+                      Edit
+                    </a>
+                  </td>
                 </tr>
               <?php endforeach; ?>
               </tbody>
@@ -1354,25 +1426,38 @@ $vehicleValue = static function (
           </p>
         </section>
 
-        <section class="card">
-          <h2>Add component baseline</h2>
+        <section class="card" id="component-baseline-form">
+          <h2>
+            <?= $editComponent ? 'Edit component baseline' : 'Add component baseline' ?>
+          </h2>
 
           <p class="section-copy">
             Use this for reset/replaced parts, unknown chassis systems, and
             inspection baselines.
           </p>
 
-          <form method="post" class="form-grid">
+          <?php if ($editComponent): ?>
+            <div class="edit-state">
+              Editing component baseline #<?= (int)$editComponentId ?>.
+              Save changes or cancel to return to normal entry.
+            </div>
+          <?php endif; ?>
+
+          <form method="post" class="form-grid" autocomplete="off">
             <?= csrf_field() ?>
 
             <input type="hidden" name="action" value="save_component">
             <input type="hidden" name="vehicle_id" value="<?= (int)$vehicleId ?>">
+            <input type="hidden" name="component_id" value="<?= (int)$editComponentId ?>">
 
             <label>
               Component type
               <select name="component_type">
                 <?php foreach ($componentTypes as $key => $label): ?>
-                  <option value="<?= $h($key) ?>">
+                  <option
+                    value="<?= $h($key) ?>"
+                    <?= $componentFormDefaults['component_type'] === (string)$key ? 'selected' : '' ?>
+                  >
                     <?= $h($label) ?>
                   </option>
                 <?php endforeach; ?>
@@ -1385,7 +1470,7 @@ $vehicleValue = static function (
                 <?php foreach ($componentStatuses as $key => $label): ?>
                   <option
                     value="<?= $h($key) ?>"
-                    <?= $key === 'BASELINE_NEEDED' ? 'selected' : '' ?>
+                    <?= $componentFormDefaults['status'] === (string)$key ? 'selected' : '' ?>
                   >
                     <?= $h($label) ?>
                   </option>
@@ -1397,13 +1482,18 @@ $vehicleValue = static function (
               Component name
               <input
                 name="component_name"
+                value="<?= $h($componentFormDefaults['component_name']) ?>"
                 placeholder="Replacement engine, battery, front brakes..."
               >
             </label>
 
             <label>
               Baseline date
-              <input type="date" name="baseline_date">
+              <input
+                type="date"
+                name="baseline_date"
+                value="<?= $h($componentFormDefaults['baseline_date']) ?>"
+              >
             </label>
 
             <label>
@@ -1411,18 +1501,26 @@ $vehicleValue = static function (
               <input
                 name="baseline_odometer"
                 inputmode="decimal"
-                value="<?= $h($vehicle['current_odometer'] ?? '') ?>"
+                value="<?= $h($componentFormDefaults['baseline_odometer']) ?>"
               >
             </label>
 
             <label>
               Warranty until date
-              <input type="date" name="warranty_until_date">
+              <input
+                type="date"
+                name="warranty_until_date"
+                value="<?= $h($componentFormDefaults['warranty_until_date']) ?>"
+              >
             </label>
 
             <label>
               Warranty until miles
-              <input name="warranty_until_miles" inputmode="decimal">
+              <input
+                name="warranty_until_miles"
+                inputmode="decimal"
+                value="<?= $h($componentFormDefaults['warranty_until_miles']) ?>"
+              >
             </label>
 
             <label class="full">
@@ -1430,13 +1528,22 @@ $vehicleValue = static function (
               <textarea
                 name="notes"
                 placeholder="What was replaced, inspected, reset, or still unknown?"
-              ></textarea>
+              ><?= $h($componentFormDefaults['notes']) ?></textarea>
             </label>
 
             <div class="full">
               <button class="btn btn-primary" type="submit">
-                Add component baseline
+                <?= $editComponent ? 'Save component baseline' : 'Add component baseline' ?>
               </button>
+
+              <?php if ($editComponent): ?>
+                <a
+                  class="btn"
+                  href="<?= $h(BASE_URL) ?>/admin/field_vehicle.php?id=<?= (int)$vehicleId ?>"
+                >
+                  Cancel
+                </a>
+              <?php endif; ?>
             </div>
           </form>
         </section>
