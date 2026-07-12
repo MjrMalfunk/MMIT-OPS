@@ -149,6 +149,20 @@ if (
     $editComponentId = 0;
 }
 
+$editMaintenanceItemId = (int)($_GET['edit_maintenance_item'] ?? 0);
+
+$editMaintenanceItem = $editMaintenanceItemId > 0
+    ? field_vehicle_maintenance_item_find($editMaintenanceItemId)
+    : null;
+
+if (
+    $editMaintenanceItem
+    && (int)$editMaintenanceItem['vehicle_id'] !== $vehicleId
+) {
+    $editMaintenanceItem = null;
+    $editMaintenanceItemId = 0;
+}
+
 $isQuickFuel = $vehicle
     && !$editEvent
     && strtolower(trim((string)($_GET['quick'] ?? ''))) === 'fuel';
@@ -262,6 +276,60 @@ $componentFormDefaults = [
 $maintenanceItems = $vehicle
     ? field_vehicle_maintenance_items($vehicleId, true)
     : [];
+
+$maintenanceFormDefaults = [
+    'item_name' => (string)(
+        $editMaintenanceItem['item_name']
+        ?? ''
+    ),
+    'subsystem' => (string)(
+        $editMaintenanceItem['subsystem']
+        ?? ''
+    ),
+    'component_id' => (string)(
+        $editMaintenanceItem['component_id']
+        ?? ''
+    ),
+    'schedule_source' => (string)(
+        $editMaintenanceItem['schedule_source']
+        ?? 'MANUAL'
+    ),
+    'clock_type' => (string)(
+        $editMaintenanceItem['clock_type']
+        ?? 'VEHICLE'
+    ),
+    'interval_miles' => (string)(
+        $editMaintenanceItem['interval_miles']
+        ?? ''
+    ),
+    'interval_months' => (string)(
+        $editMaintenanceItem['interval_months']
+        ?? ''
+    ),
+    'baseline_odometer' => (string)(
+        $editMaintenanceItem['baseline_odometer']
+        ?? ($vehicle['current_odometer'] ?? '')
+    ),
+    'baseline_date' => (string)(
+        $editMaintenanceItem['baseline_date']
+        ?? ''
+    ),
+    'estimated_service_cost' => (string)(
+        $editMaintenanceItem['estimated_service_cost']
+        ?? ''
+    ),
+    'status' => (string)(
+        $editMaintenanceItem['status']
+        ?? ''
+    ),
+    'active' => $editMaintenanceItem
+        ? !empty($editMaintenanceItem['active'])
+        : true,
+    'notes' => (string)(
+        $editMaintenanceItem['notes']
+        ?? ''
+    ),
+];
 
 $maintenanceSummary = $vehicle
     ? field_vehicle_maintenance_summary($vehicleId)
@@ -1260,12 +1328,13 @@ $vehicleValue = static function (
                   <th>Interval</th>
                   <th>Next due</th>
                   <th>Reserve</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
               <?php if (!$maintenanceItems): ?>
                 <tr>
-                  <td colspan="6" class="muted">
+                  <td colspan="7" class="muted">
                     No maintenance items yet.
                   </td>
                 </tr>
@@ -1342,6 +1411,15 @@ $vehicleValue = static function (
                     <div class="muted">
                       <?= $fmtCpm($itemReserveCpm) ?>/mi
                     </div>
+                  </td>
+
+                  <td>
+                    <a
+                      class="btn btn-table"
+                      href="<?= $h(BASE_URL) ?>/admin/field_vehicle.php?id=<?= (int)$vehicleId ?>&edit_maintenance_item=<?= (int)$item['maintenance_item_id'] ?>#maintenance-item-form"
+                    >
+                      Edit
+                    </a>
                   </td>
                 </tr>
               <?php endforeach; ?>
@@ -1548,25 +1626,36 @@ $vehicleValue = static function (
           </form>
         </section>
 
-        <section class="card">
-          <h2>Add maintenance item</h2>
+        <section class="card" id="maintenance-item-form">
+          <h2>
+            <?= $editMaintenanceItem ? 'Edit maintenance item' : 'Add maintenance item' ?>
+          </h2>
 
           <p class="section-copy">
             Add scheduled services. AFEE calculates next due mileage/date and
             scheduled reserve per mile from cost ÷ interval.
           </p>
 
-          <form method="post" class="form-grid">
+          <?php if ($editMaintenanceItem): ?>
+            <div class="edit-state">
+              Editing maintenance item #<?= (int)$editMaintenanceItemId ?>.
+              Save changes or cancel to return to normal entry.
+            </div>
+          <?php endif; ?>
+
+          <form method="post" class="form-grid" autocomplete="off">
             <?= csrf_field() ?>
 
             <input type="hidden" name="action" value="save_maintenance_item">
             <input type="hidden" name="vehicle_id" value="<?= (int)$vehicleId ?>">
+            <input type="hidden" name="maintenance_item_id" value="<?= (int)$editMaintenanceItemId ?>">
 
             <label class="full">
               Maintenance item
               <input
                 name="item_name"
                 required
+                value="<?= $h($maintenanceFormDefaults['item_name']) ?>"
                 placeholder="Oil and filter service"
               >
             </label>
@@ -1575,6 +1664,7 @@ $vehicleValue = static function (
               Subsystem
               <input
                 name="subsystem"
+                value="<?= $h($maintenanceFormDefaults['subsystem']) ?>"
                 placeholder="Engine, tires, brakes..."
               >
             </label>
@@ -1584,7 +1674,10 @@ $vehicleValue = static function (
               <select name="component_id">
                 <option value="">None</option>
                 <?php foreach ($components as $component): ?>
-                  <option value="<?= (int)$component['component_id'] ?>">
+                  <option
+                    value="<?= (int)$component['component_id'] ?>"
+                    <?= $maintenanceFormDefaults['component_id'] === (string)$component['component_id'] ? 'selected' : '' ?>
+                  >
                     <?= $h($component['component_name']) ?>
                   </option>
                 <?php endforeach; ?>
@@ -1597,7 +1690,7 @@ $vehicleValue = static function (
                 <?php foreach ($maintenanceSources as $key => $label): ?>
                   <option
                     value="<?= $h($key) ?>"
-                    <?= $key === 'MANUAL' ? 'selected' : '' ?>
+                    <?= $maintenanceFormDefaults['schedule_source'] === (string)$key ? 'selected' : '' ?>
                   >
                     <?= $h($label) ?>
                   </option>
@@ -1611,7 +1704,7 @@ $vehicleValue = static function (
                 <?php foreach ($maintenanceClockTypes as $key => $label): ?>
                   <option
                     value="<?= $h($key) ?>"
-                    <?= $key === 'VEHICLE' ? 'selected' : '' ?>
+                    <?= $maintenanceFormDefaults['clock_type'] === (string)$key ? 'selected' : '' ?>
                   >
                     <?= $h($label) ?>
                   </option>
@@ -1624,6 +1717,7 @@ $vehicleValue = static function (
               <input
                 name="interval_miles"
                 inputmode="decimal"
+                value="<?= $h($maintenanceFormDefaults['interval_miles']) ?>"
                 placeholder="5000"
               >
             </label>
@@ -1633,6 +1727,7 @@ $vehicleValue = static function (
               <input
                 name="interval_months"
                 inputmode="numeric"
+                value="<?= $h($maintenanceFormDefaults['interval_months']) ?>"
                 placeholder="6"
               >
             </label>
@@ -1642,13 +1737,17 @@ $vehicleValue = static function (
               <input
                 name="baseline_odometer"
                 inputmode="decimal"
-                value="<?= $h($vehicle['current_odometer'] ?? '') ?>"
+                value="<?= $h($maintenanceFormDefaults['baseline_odometer']) ?>"
               >
             </label>
 
             <label>
               Baseline date
-              <input type="date" name="baseline_date">
+              <input
+                type="date"
+                name="baseline_date"
+                value="<?= $h($maintenanceFormDefaults['baseline_date']) ?>"
+              >
             </label>
 
             <label>
@@ -1656,6 +1755,7 @@ $vehicleValue = static function (
               <input
                 name="estimated_service_cost"
                 inputmode="decimal"
+                value="<?= $h($maintenanceFormDefaults['estimated_service_cost']) ?>"
                 placeholder="107.42"
               >
             </label>
@@ -1665,7 +1765,10 @@ $vehicleValue = static function (
               <select name="status">
                 <option value="">Auto-calculate</option>
                 <?php foreach ($maintenanceStatuses as $key => $label): ?>
-                  <option value="<?= $h($key) ?>">
+                  <option
+                    value="<?= $h($key) ?>"
+                    <?= $maintenanceFormDefaults['status'] === (string)$key ? 'selected' : '' ?>
+                  >
                     <?= $h($label) ?>
                   </option>
                 <?php endforeach; ?>
@@ -1673,7 +1776,12 @@ $vehicleValue = static function (
             </label>
 
             <label class="checkbox">
-              <input type="checkbox" name="active" value="1" checked>
+              <input
+                type="checkbox"
+                name="active"
+                value="1"
+                <?= !empty($maintenanceFormDefaults['active']) ? 'checked' : '' ?>
+              >
               Active maintenance item
             </label>
 
@@ -1682,13 +1790,22 @@ $vehicleValue = static function (
               <textarea
                 name="notes"
                 placeholder="Manufacturer interval, warranty requirement, or shop recommendation."
-              ></textarea>
+              ><?= $h($maintenanceFormDefaults['notes']) ?></textarea>
             </label>
 
             <div class="full">
               <button class="btn btn-primary" type="submit">
-                Add maintenance item
+                <?= $editMaintenanceItem ? 'Save maintenance item' : 'Add maintenance item' ?>
               </button>
+
+              <?php if ($editMaintenanceItem): ?>
+                <a
+                  class="btn"
+                  href="<?= $h(BASE_URL) ?>/admin/field_vehicle.php?id=<?= (int)$vehicleId ?>"
+                >
+                  Cancel
+                </a>
+              <?php endif; ?>
             </div>
           </form>
         </section>
