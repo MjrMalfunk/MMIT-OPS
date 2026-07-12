@@ -76,6 +76,41 @@ function field_vehicle_maintenance_statuses(): array
     ];
 }
 
+/**
+ * Parse admin-entered decimal values.
+ *
+ * PHP's raw float cast turns "100,000" into 100, so normalize
+ * human-formatted numbers before storing odometer, miles, and cost fields.
+ */
+function field_vehicle_maintenance_decimal_or_null(mixed $value): ?float
+{
+    $raw = trim((string)$value);
+
+    if ($raw === '') {
+        return null;
+    }
+
+    $normalized = str_replace([',', ' '], '', $raw);
+
+    if ($normalized === '' || !is_numeric($normalized)) {
+        return null;
+    }
+
+    return (float)$normalized;
+}
+
+/**
+ * Parse optional integer-like values from admin forms.
+ */
+function field_vehicle_maintenance_int_or_null(mixed $value): ?int
+{
+    $parsed = field_vehicle_maintenance_decimal_or_null($value);
+
+    return $parsed !== null
+        ? max(0, (int)$parsed)
+        : null;
+}
+
 function field_vehicle_maintenance_ensure_schema(): void
 {
     field_vehicles_ensure_schema();
@@ -217,8 +252,9 @@ function field_vehicle_component_save(array $input): array
     $baselineDate = trim((string)($input['baseline_date'] ?? ''));
     $baselineDate = $baselineDate !== '' ? $baselineDate : null;
 
-    $baselineOdometer = trim((string)($input['baseline_odometer'] ?? ''));
-    $baselineOdometer = $baselineOdometer !== '' ? (float)$baselineOdometer : null;
+    $baselineOdometer = field_vehicle_maintenance_decimal_or_null(
+        $input['baseline_odometer'] ?? null
+    );
 
     $baselineEventId = (int)($input['baseline_vehicle_event_id'] ?? 0);
     $baselineEventId = $baselineEventId > 0 ? $baselineEventId : null;
@@ -226,8 +262,9 @@ function field_vehicle_component_save(array $input): array
     $warrantyUntilDate = trim((string)($input['warranty_until_date'] ?? ''));
     $warrantyUntilDate = $warrantyUntilDate !== '' ? $warrantyUntilDate : null;
 
-    $warrantyUntilMiles = trim((string)($input['warranty_until_miles'] ?? ''));
-    $warrantyUntilMiles = $warrantyUntilMiles !== '' ? (float)$warrantyUntilMiles : null;
+    $warrantyUntilMiles = field_vehicle_maintenance_decimal_or_null(
+        $input['warranty_until_miles'] ?? null
+    );
 
     $notes = trim((string)($input['notes'] ?? ''));
 
@@ -502,14 +539,17 @@ function field_vehicle_maintenance_item_save(array $input): array
         $clockType = 'VEHICLE';
     }
 
-    $intervalMiles = trim((string)($input['interval_miles'] ?? ''));
-    $intervalMiles = $intervalMiles !== '' ? (float)$intervalMiles : null;
+    $intervalMiles = field_vehicle_maintenance_decimal_or_null(
+        $input['interval_miles'] ?? null
+    );
 
-    $intervalMonths = trim((string)($input['interval_months'] ?? ''));
-    $intervalMonths = $intervalMonths !== '' ? (int)$intervalMonths : null;
+    $intervalMonths = field_vehicle_maintenance_int_or_null(
+        $input['interval_months'] ?? null
+    );
 
-    $baselineOdometer = trim((string)($input['baseline_odometer'] ?? ''));
-    $baselineOdometer = $baselineOdometer !== '' ? (float)$baselineOdometer : null;
+    $baselineOdometer = field_vehicle_maintenance_decimal_or_null(
+        $input['baseline_odometer'] ?? null
+    );
 
     $baselineDate = trim((string)($input['baseline_date'] ?? ''));
     $baselineDate = $baselineDate !== '' ? $baselineDate : null;
@@ -517,7 +557,9 @@ function field_vehicle_maintenance_item_save(array $input): array
     $lastVehicleEventId = (int)($input['last_vehicle_event_id'] ?? 0);
     $lastVehicleEventId = $lastVehicleEventId > 0 ? $lastVehicleEventId : null;
 
-    $estimatedServiceCost = (float)($input['estimated_service_cost'] ?? 0);
+    $estimatedServiceCost = field_vehicle_maintenance_decimal_or_null(
+        $input['estimated_service_cost'] ?? null
+    ) ?? 0.0;
 
     $due = field_vehicle_maintenance_next_due(
         $baselineOdometer,

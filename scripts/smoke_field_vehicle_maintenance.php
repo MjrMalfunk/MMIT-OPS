@@ -63,6 +63,30 @@ $componentResult = field_vehicle_component_save([
 
 ok(!empty($componentResult['component_id']), 'component baseline can be created');
 
+$commaComponentResult = field_vehicle_component_save([
+    'vehicle_id' => (string)$vehicleId,
+    'component_type' => 'BATTERY',
+    'component_name' => 'Comma parse battery',
+    'status' => 'RESET',
+    'baseline_date' => '2026-07-10',
+    'baseline_odometer' => '79,461',
+    'warranty_until_miles' => '100,000',
+]);
+
+$commaComponent = field_vehicle_component_find(
+    (int)$commaComponentResult['component_id']
+);
+
+ok(
+    (float)$commaComponent['baseline_odometer'] === 79461.0,
+    'comma-formatted baseline odometer parses correctly'
+);
+
+ok(
+    (float)$commaComponent['warranty_until_miles'] === 100000.0,
+    'comma-formatted warranty miles parse correctly'
+);
+
 $maintenanceResult = field_vehicle_maintenance_item_save([
     'vehicle_id' => (string)$vehicleId,
     'component_id' => (string)$componentResult['component_id'],
@@ -85,7 +109,7 @@ ok((string)$maintenanceResult['status'] === 'CURRENT', 'maintenance status deriv
 
 $summary = field_vehicle_maintenance_summary($vehicleId);
 
-ok($summary['components_total'] === 1, 'summary counts components');
+ok($summary['components_total'] === 2, 'summary counts components');
 ok($summary['maintenance_total'] === 1, 'summary counts maintenance items');
 ok(abs($summary['estimated_scheduled_reserve_cpm'] - 0.0215) < 0.0001, 'scheduled reserve CPM derives from cost / interval miles');
 

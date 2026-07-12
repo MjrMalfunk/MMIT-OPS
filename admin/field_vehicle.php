@@ -3,10 +3,12 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../inc/bootstrap.php';
 require_once __DIR__ . '/../inc/field_vehicles.php';
+require_once __DIR__ . '/../inc/field_vehicle_maintenance.php';
 
 require_login();
 
 field_vehicles_ensure_schema();
+field_vehicle_maintenance_ensure_schema();
 
 $h = static fn(mixed $value): string =>
     htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
@@ -41,6 +43,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             isset($user['id']) ? (int)$user['id'] : null
         ),
 
+        'save_component' => (static function (): array {
+            try {
+                return [
+                    'ok' => true,
+                    ...field_vehicle_component_save($_POST),
+                ];
+            } catch (Throwable $e) {
+                return [
+                    'ok' => false,
+                    'errors' => [$e->getMessage()],
+                ];
+            }
+        })(),
+
+        'save_maintenance_item' => (static function (): array {
+            try {
+                return [
+                    'ok' => true,
+                    ...field_vehicle_maintenance_item_save($_POST),
+                ];
+            } catch (Throwable $e) {
+                return [
+                    'ok' => false,
+                    'errors' => [$e->getMessage()],
+                ];
+            }
+        })(),
+
         default => [
             'ok' => false,
             'errors' => ['Unknown vehicle action.'],
@@ -58,6 +88,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'save_event' => !empty($result['updated'])
                 ? 'Vehicle event updated.'
                 : 'Vehicle event added.',
+            'save_component' => !empty($result['updated'])
+                ? 'Component baseline updated.'
+                : 'Component baseline added.',
+            'save_maintenance_item' => !empty($result['updated'])
+                ? 'Maintenance item updated.'
+                : 'Maintenance item added.',
             default => 'Saved.',
         };
 
@@ -99,6 +135,10 @@ if (
     $editEventId = 0;
 }
 
+$isQuickFuel = $vehicle
+    && !$editEvent
+    && strtolower(trim((string)($_GET['quick'] ?? ''))) === 'fuel';
+
 $model = $vehicle
     ? field_vehicle_cost_model($vehicleId)
     : null;
@@ -107,12 +147,74 @@ $events = $vehicle
     ? field_vehicle_events($vehicleId)
     : [];
 
+$lastFuelVendor = '';
+
+foreach ($events as $existingEvent) {
+    if (
+        (string)($existingEvent['event_type'] ?? '') === 'FUEL'
+        && trim((string)($existingEvent['vendor'] ?? '')) !== ''
+    ) {
+        $lastFuelVendor = trim((string)$existingEvent['vendor']);
+        break;
+    }
+}
+
+$eventFormDefaults = [
+    'event_type' => (string)(
+        $editEvent['event_type']
+        ?? ($isQuickFuel ? 'FUEL' : 'FUEL')
+    ),
+    'cost_treatment' => (string)(
+        $editEvent['cost_treatment']
+        ?? 'NORMAL'
+    ),
+    'event_date' => (string)(
+        $editEvent['event_date']
+        ?? date('Y-m-d')
+    ),
+    'odometer' => (string)(
+        $editEvent['odometer']
+        ?? ($vehicle['current_odometer'] ?? '')
+    ),
+    'description' => (string)(
+        $editEvent['description']
+        ?? ($isQuickFuel ? 'Fuel fill-up' : '')
+    ),
+    'vendor' => (string)(
+        $editEvent['vendor']
+        ?? ($isQuickFuel ? $lastFuelVendor : '')
+    ),
+    'amount' => $editEvent['amount'] ?? '',
+    'gallons' => $editEvent['gallons'] ?? '',
+    'fuel_price_per_gallon' => $editEvent['fuel_price_per_gallon'] ?? '',
+    'amortize_over_miles' => $editEvent['amortize_over_miles'] ?? '',
+    'notes' => (string)($editEvent['notes'] ?? ''),
+];
+
 $spend = $vehicle
     ? field_vehicle_spend_summary($vehicleId)
     : null;
 
 $eventTypes = field_vehicle_event_types();
 $costTreatments = field_vehicle_cost_treatments();
+
+$componentTypes = field_vehicle_component_types();
+$componentStatuses = field_vehicle_component_statuses();
+$maintenanceSources = field_vehicle_maintenance_sources();
+$maintenanceClockTypes = field_vehicle_maintenance_clock_types();
+$maintenanceStatuses = field_vehicle_maintenance_statuses();
+
+$components = $vehicle
+    ? field_vehicle_components($vehicleId)
+    : [];
+
+$maintenanceItems = $vehicle
+    ? field_vehicle_maintenance_items($vehicleId, true)
+    : [];
+
+$maintenanceSummary = $vehicle
+    ? field_vehicle_maintenance_summary($vehicleId)
+    : null;
 
 $vehicleValue = static function (
     ?array $vehicle,
@@ -457,6 +559,66 @@ $vehicleValue = static function (
       font-weight: 800;
     }
 
+    .quick-state {
+      margin-bottom: 14px;
+      padding: 10px 12px;
+      border: 1px solid rgba(134,239,172,.35);
+      border-radius: 12px;
+      background: rgba(22,163,74,.12);
+      color: #bbf7d0;
+      font-size: 12px;
+      font-weight: 800;
+      line-height: 1.45;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 900;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .status-current,
+    .status-reset,
+    .status-serviced,
+    .status-inspected {
+      color: var(--green);
+      background: rgba(22,163,74,.12);
+    }
+
+    .status-due-soon,
+    .status-watch,
+    .status-baseline-needed,
+    .status-unknown {
+      color: var(--yellow);
+      background: rgba(234,179,8,.12);
+    }
+
+    .status-due,
+    .status-overdue,
+    .status-failed {
+      color: var(--red);
+      background: rgba(239,68,68,.12);
+    }
+
+    .section-copy {
+      margin: -4px 0 16px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .mini-table td,
+    .mini-table th {
+      vertical-align: top;
+    }
+
     @media (max-width: 980px) {
       .layout {
         grid-template-columns: 1fr;
@@ -497,6 +659,15 @@ $vehicleValue = static function (
     </div>
 
     <div class="actions">
+      <?php if ($vehicle): ?>
+        <a
+          class="btn btn-primary"
+          href="<?= $h(BASE_URL) ?>/admin/field_vehicle.php?id=<?= (int)$vehicleId ?>&quick=fuel#vehicle-event-form"
+        >
+          Quick Fuel
+        </a>
+      <?php endif; ?>
+
       <a
         class="btn"
         href="<?= $h(BASE_URL) ?>/admin/field_vehicles.php"
@@ -884,6 +1055,228 @@ $vehicleValue = static function (
             </table>
           </div>
         </section>
+
+        <section class="card">
+          <h2>Maintenance health</h2>
+
+          <div class="stats">
+            <div class="stat">
+              <div class="stat-value">
+                <?= (int)($maintenanceSummary['components_baseline_needed'] ?? 0) ?>
+              </div>
+              <div class="stat-label">Component baselines needed</div>
+            </div>
+
+            <div class="stat">
+              <div class="stat-value">
+                <?= (int)($maintenanceSummary['maintenance_due'] ?? 0) ?>
+              </div>
+              <div class="stat-label">Maintenance due</div>
+            </div>
+
+            <div class="stat">
+              <div class="stat-value">
+                <?= (int)($maintenanceSummary['maintenance_due_soon'] ?? 0) ?>
+              </div>
+              <div class="stat-label">Due soon</div>
+            </div>
+
+            <div class="stat">
+              <div class="stat-value">
+                <?= $fmtCpm($maintenanceSummary['estimated_scheduled_reserve_cpm'] ?? 0) ?>
+              </div>
+              <div class="stat-label">Scheduled reserve / mile</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Component baselines</h2>
+
+          <p class="section-copy">
+            Tracks which parts are reset, serviced, unknown, or still need a
+            baseline inspection. This keeps the replacement engine clock
+            separate from the older chassis clock.
+          </p>
+
+          <div class="event-table-wrap">
+            <table class="mini-table">
+              <thead>
+                <tr>
+                  <th>Component</th>
+                  <th>Status</th>
+                  <th>Baseline</th>
+                  <th>Warranty</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+              <?php if (!$components): ?>
+                <tr>
+                  <td colspan="5" class="muted">
+                    No component baselines yet.
+                  </td>
+                </tr>
+              <?php endif; ?>
+
+              <?php foreach ($components as $component): ?>
+                <?php
+                  $componentStatus = (string)$component['status'];
+                  $componentClass = strtolower(str_replace('_', '-', $componentStatus));
+                ?>
+                <tr>
+                  <td>
+                    <strong><?= $h($component['component_name']) ?></strong>
+                    <div class="muted">
+                      <?= $h($componentTypes[(string)$component['component_type']] ?? $component['component_type']) ?>
+                    </div>
+                  </td>
+
+                  <td>
+                    <span class="status-pill status-<?= $h($componentClass) ?>">
+                      <?= $h($componentStatuses[$componentStatus] ?? $componentStatus) ?>
+                    </span>
+                  </td>
+
+                  <td>
+                    <?php if (!empty($component['baseline_date'])): ?>
+                      <strong><?= $h($component['baseline_date']) ?></strong>
+                    <?php endif; ?>
+
+                    <?php if ($component['baseline_odometer'] !== null): ?>
+                      <div class="muted">
+                        <?= number_format((float)$component['baseline_odometer'], 0) ?> mi
+                      </div>
+                    <?php endif; ?>
+                  </td>
+
+                  <td>
+                    <?php if (!empty($component['warranty_until_date'])): ?>
+                      <strong><?= $h($component['warranty_until_date']) ?></strong>
+                    <?php endif; ?>
+
+                    <?php if ($component['warranty_until_miles'] !== null): ?>
+                      <div class="muted">
+                        <?= number_format((float)$component['warranty_until_miles'], 0) ?> mi
+                      </div>
+                    <?php endif; ?>
+                  </td>
+
+                  <td><?= nl2br($h($component['notes'] ?? '')) ?></td>
+                </tr>
+              <?php endforeach; ?>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Maintenance plan</h2>
+
+          <p class="section-copy">
+            Scheduled work with mileage/date intervals, due status, and
+            estimated reserve impact.
+          </p>
+
+          <div class="event-table-wrap">
+            <table class="mini-table">
+              <thead>
+                <tr>
+                  <th>Item</th>
+                  <th>Status</th>
+                  <th>Clock</th>
+                  <th>Interval</th>
+                  <th>Next due</th>
+                  <th>Reserve</th>
+                </tr>
+              </thead>
+              <tbody>
+              <?php if (!$maintenanceItems): ?>
+                <tr>
+                  <td colspan="6" class="muted">
+                    No maintenance items yet.
+                  </td>
+                </tr>
+              <?php endif; ?>
+
+              <?php foreach ($maintenanceItems as $item): ?>
+                <?php
+                  $itemStatus = (string)$item['status'];
+                  $itemClass = strtolower(str_replace('_', '-', $itemStatus));
+                  $itemIntervalMiles = (float)($item['interval_miles'] ?? 0);
+                  $itemCost = (float)($item['estimated_service_cost'] ?? 0);
+                  $itemReserveCpm = $itemIntervalMiles > 0
+                      ? $itemCost / $itemIntervalMiles
+                      : 0;
+                ?>
+                <tr>
+                  <td>
+                    <strong><?= $h($item['item_name']) ?></strong>
+
+                    <?php if (!empty($item['subsystem'])): ?>
+                      <div class="muted"><?= $h($item['subsystem']) ?></div>
+                    <?php endif; ?>
+
+                    <?php if (!empty($item['component_name'])): ?>
+                      <div class="muted">
+                        Component: <?= $h($item['component_name']) ?>
+                      </div>
+                    <?php endif; ?>
+                  </td>
+
+                  <td>
+                    <span class="status-pill status-<?= $h($itemClass) ?>">
+                      <?= $h($maintenanceStatuses[$itemStatus] ?? $itemStatus) ?>
+                    </span>
+                  </td>
+
+                  <td>
+                    <?= $h($maintenanceClockTypes[(string)$item['clock_type']] ?? $item['clock_type']) ?>
+                    <div class="muted">
+                      <?= $h($maintenanceSources[(string)$item['schedule_source']] ?? $item['schedule_source']) ?>
+                    </div>
+                  </td>
+
+                  <td>
+                    <?php if ($item['interval_miles'] !== null): ?>
+                      <strong>
+                        <?= number_format((float)$item['interval_miles'], 0) ?> mi
+                      </strong>
+                    <?php endif; ?>
+
+                    <?php if ($item['interval_months'] !== null): ?>
+                      <div class="muted">
+                        <?= (int)$item['interval_months'] ?> months
+                      </div>
+                    <?php endif; ?>
+                  </td>
+
+                  <td>
+                    <?php if ($item['next_due_odometer'] !== null): ?>
+                      <strong>
+                        <?= number_format((float)$item['next_due_odometer'], 0) ?> mi
+                      </strong>
+                    <?php endif; ?>
+
+                    <?php if (!empty($item['next_due_date'])): ?>
+                      <div class="muted">
+                        <?= $h($item['next_due_date']) ?>
+                      </div>
+                    <?php endif; ?>
+                  </td>
+
+                  <td>
+                    <strong><?= $fmtMoney($itemCost) ?></strong>
+                    <div class="muted">
+                      <?= $fmtCpm($itemReserveCpm) ?>/mi
+                    </div>
+                  </td>
+                </tr>
+              <?php endforeach; ?>
+              </tbody>
+            </table>
+          </div>
+        </section>
       <?php endif; ?>
     </div>
 
@@ -962,18 +1355,262 @@ $vehicleValue = static function (
         </section>
 
         <section class="card">
+          <h2>Add component baseline</h2>
+
+          <p class="section-copy">
+            Use this for reset/replaced parts, unknown chassis systems, and
+            inspection baselines.
+          </p>
+
+          <form method="post" class="form-grid">
+            <?= csrf_field() ?>
+
+            <input type="hidden" name="action" value="save_component">
+            <input type="hidden" name="vehicle_id" value="<?= (int)$vehicleId ?>">
+
+            <label>
+              Component type
+              <select name="component_type">
+                <?php foreach ($componentTypes as $key => $label): ?>
+                  <option value="<?= $h($key) ?>">
+                    <?= $h($label) ?>
+                  </option>
+                <?php endforeach; ?>
+              </select>
+            </label>
+
+            <label>
+              Status
+              <select name="status">
+                <?php foreach ($componentStatuses as $key => $label): ?>
+                  <option
+                    value="<?= $h($key) ?>"
+                    <?= $key === 'BASELINE_NEEDED' ? 'selected' : '' ?>
+                  >
+                    <?= $h($label) ?>
+                  </option>
+                <?php endforeach; ?>
+              </select>
+            </label>
+
+            <label class="full">
+              Component name
+              <input
+                name="component_name"
+                placeholder="Replacement engine, battery, front brakes..."
+              >
+            </label>
+
+            <label>
+              Baseline date
+              <input type="date" name="baseline_date">
+            </label>
+
+            <label>
+              Baseline odometer
+              <input
+                name="baseline_odometer"
+                inputmode="decimal"
+                value="<?= $h($vehicle['current_odometer'] ?? '') ?>"
+              >
+            </label>
+
+            <label>
+              Warranty until date
+              <input type="date" name="warranty_until_date">
+            </label>
+
+            <label>
+              Warranty until miles
+              <input name="warranty_until_miles" inputmode="decimal">
+            </label>
+
+            <label class="full">
+              Notes
+              <textarea
+                name="notes"
+                placeholder="What was replaced, inspected, reset, or still unknown?"
+              ></textarea>
+            </label>
+
+            <div class="full">
+              <button class="btn btn-primary" type="submit">
+                Add component baseline
+              </button>
+            </div>
+          </form>
+        </section>
+
+        <section class="card">
+          <h2>Add maintenance item</h2>
+
+          <p class="section-copy">
+            Add scheduled services. AFEE calculates next due mileage/date and
+            scheduled reserve per mile from cost ÷ interval.
+          </p>
+
+          <form method="post" class="form-grid">
+            <?= csrf_field() ?>
+
+            <input type="hidden" name="action" value="save_maintenance_item">
+            <input type="hidden" name="vehicle_id" value="<?= (int)$vehicleId ?>">
+
+            <label class="full">
+              Maintenance item
+              <input
+                name="item_name"
+                required
+                placeholder="Oil and filter service"
+              >
+            </label>
+
+            <label>
+              Subsystem
+              <input
+                name="subsystem"
+                placeholder="Engine, tires, brakes..."
+              >
+            </label>
+
+            <label>
+              Component baseline
+              <select name="component_id">
+                <option value="">None</option>
+                <?php foreach ($components as $component): ?>
+                  <option value="<?= (int)$component['component_id'] ?>">
+                    <?= $h($component['component_name']) ?>
+                  </option>
+                <?php endforeach; ?>
+              </select>
+            </label>
+
+            <label>
+              Schedule source
+              <select name="schedule_source">
+                <?php foreach ($maintenanceSources as $key => $label): ?>
+                  <option
+                    value="<?= $h($key) ?>"
+                    <?= $key === 'MANUAL' ? 'selected' : '' ?>
+                  >
+                    <?= $h($label) ?>
+                  </option>
+                <?php endforeach; ?>
+              </select>
+            </label>
+
+            <label>
+              Clock type
+              <select name="clock_type">
+                <?php foreach ($maintenanceClockTypes as $key => $label): ?>
+                  <option
+                    value="<?= $h($key) ?>"
+                    <?= $key === 'VEHICLE' ? 'selected' : '' ?>
+                  >
+                    <?= $h($label) ?>
+                  </option>
+                <?php endforeach; ?>
+              </select>
+            </label>
+
+            <label>
+              Interval miles
+              <input
+                name="interval_miles"
+                inputmode="decimal"
+                placeholder="5000"
+              >
+            </label>
+
+            <label>
+              Interval months
+              <input
+                name="interval_months"
+                inputmode="numeric"
+                placeholder="6"
+              >
+            </label>
+
+            <label>
+              Baseline odometer
+              <input
+                name="baseline_odometer"
+                inputmode="decimal"
+                value="<?= $h($vehicle['current_odometer'] ?? '') ?>"
+              >
+            </label>
+
+            <label>
+              Baseline date
+              <input type="date" name="baseline_date">
+            </label>
+
+            <label>
+              Estimated service cost
+              <input
+                name="estimated_service_cost"
+                inputmode="decimal"
+                placeholder="107.42"
+              >
+            </label>
+
+            <label>
+              Status override
+              <select name="status">
+                <option value="">Auto-calculate</option>
+                <?php foreach ($maintenanceStatuses as $key => $label): ?>
+                  <option value="<?= $h($key) ?>">
+                    <?= $h($label) ?>
+                  </option>
+                <?php endforeach; ?>
+              </select>
+            </label>
+
+            <label class="checkbox">
+              <input type="checkbox" name="active" value="1" checked>
+              Active maintenance item
+            </label>
+
+            <label class="full">
+              Notes
+              <textarea
+                name="notes"
+                placeholder="Manufacturer interval, warranty requirement, or shop recommendation."
+              ></textarea>
+            </label>
+
+            <div class="full">
+              <button class="btn btn-primary" type="submit">
+                Add maintenance item
+              </button>
+            </div>
+          </form>
+        </section>
+
+        <section class="card" id="vehicle-event-form">
           <h2>
-            <?= $editEvent ? 'Edit vehicle event' : 'Add vehicle event' ?>
+            <?php if ($editEvent): ?>
+              Edit vehicle event
+            <?php elseif ($isQuickFuel): ?>
+              Quick fuel entry
+            <?php else: ?>
+              Add vehicle event
+            <?php endif; ?>
           </h2>
 
           <?php if ($editEvent): ?>
             <div class="edit-state">
-              Editing event #<?= (int)$editEvent['vehicle_event_id'] ?>.
-              Changes update the existing vehicle-history record.
+              Editing existing vehicle event #<?= (int)$editEventId ?>.
+              Save changes or cancel to return to normal entry.
+            </div>
+          <?php elseif ($isQuickFuel): ?>
+            <div class="quick-state">
+              Pump-mode shortcut: enter odometer, total, gallons, and
+              price per gallon. Use notes when the receipt is missing or
+              values are reconstructed.
             </div>
           <?php endif; ?>
 
-          <form method="post" class="form-grid">
+          <form method="post" class="form-grid" autocomplete="off">
             <?= csrf_field() ?>
 
             <input
@@ -991,7 +1628,7 @@ $vehicleValue = static function (
             <input
               type="hidden"
               name="vehicle_event_id"
-              value="<?= (int)($editEvent['vehicle_event_id'] ?? 0) ?>"
+              value="<?= (int)$editEventId ?>"
             >
 
             <label>
@@ -1000,10 +1637,7 @@ $vehicleValue = static function (
                 <?php foreach ($eventTypes as $key => $label): ?>
                   <option
                     value="<?= $h($key) ?>"
-                    <?= (string)($editEvent['event_type'] ?? 'FUEL') === $key
-                        ? 'selected'
-                        : ''
-                    ?>
+                    <?= $eventFormDefaults['event_type'] === $key ? 'selected' : '' ?>
                   >
                     <?= $h($label) ?>
                   </option>
@@ -1017,10 +1651,7 @@ $vehicleValue = static function (
                 <?php foreach ($costTreatments as $key => $label): ?>
                   <option
                     value="<?= $h($key) ?>"
-                    <?= (string)($editEvent['cost_treatment'] ?? 'NORMAL') === $key
-                        ? 'selected'
-                        : ''
-                    ?>
+                    <?= $eventFormDefaults['cost_treatment'] === $key ? 'selected' : '' ?>
                   >
                     <?= $h($label) ?>
                   </option>
@@ -1033,8 +1664,8 @@ $vehicleValue = static function (
               <input
                 type="date"
                 name="event_date"
-                value="<?= $h($editEvent['event_date'] ?? date('Y-m-d')) ?>"
                 required
+                value="<?= $h($eventFormDefaults['event_date']) ?>"
               >
             </label>
 
@@ -1043,11 +1674,7 @@ $vehicleValue = static function (
               <input
                 name="odometer"
                 inputmode="decimal"
-                value="<?= $h(
-                  $editEvent['odometer']
-                  ?? $vehicle['current_odometer']
-                  ?? ''
-              ) ?>"
+                value="<?= $h($eventFormDefaults['odometer']) ?>"
               >
             </label>
 
@@ -1056,8 +1683,8 @@ $vehicleValue = static function (
               <input
                 name="description"
                 required
-                value="<?= $h($editEvent['description'] ?? '') ?>"
-                placeholder="Post-engine replacement oil service"
+                value="<?= $h($eventFormDefaults['description']) ?>"
+                placeholder="Fuel fill-up, oil change, repair..."
               >
             </label>
 
@@ -1065,8 +1692,8 @@ $vehicleValue = static function (
               Vendor
               <input
                 name="vendor"
-                value="<?= $h($editEvent['vendor'] ?? '') ?>"
-                placeholder="Glenbrook Hyundai"
+                value="<?= $h($eventFormDefaults['vendor']) ?>"
+                placeholder="Costco, Kroger, Glenbrook Hyundai..."
               >
             </label>
 
@@ -1075,8 +1702,8 @@ $vehicleValue = static function (
               <input
                 name="amount"
                 inputmode="decimal"
-                value="<?= $h($editEvent['amount'] ?? '') ?>"
-                placeholder="0.00"
+                value="<?= $h($eventFormDefaults['amount']) ?>"
+                placeholder="33.50"
               >
             </label>
 
@@ -1085,7 +1712,7 @@ $vehicleValue = static function (
               <input
                 name="gallons"
                 inputmode="decimal"
-                value="<?= $h($editEvent['gallons'] ?? '') ?>"
+                value="<?= $h($eventFormDefaults['gallons']) ?>"
                 placeholder="Fuel events only"
               >
             </label>
@@ -1095,7 +1722,7 @@ $vehicleValue = static function (
               <input
                 name="fuel_price_per_gallon"
                 inputmode="decimal"
-                value="<?= $h($editEvent['fuel_price_per_gallon'] ?? '') ?>"
+                value="<?= $h($eventFormDefaults['fuel_price_per_gallon']) ?>"
                 placeholder="Auto-calculated if blank"
               >
             </label>
@@ -1105,7 +1732,7 @@ $vehicleValue = static function (
               <input
                 name="amortize_over_miles"
                 inputmode="decimal"
-                value="<?= $h($editEvent['amortize_over_miles'] ?? '') ?>"
+                value="<?= $h($eventFormDefaults['amortize_over_miles']) ?>"
                 placeholder="Used for AMORTIZED treatment"
               >
             </label>
@@ -1114,24 +1741,27 @@ $vehicleValue = static function (
               Notes
               <textarea
                 name="notes"
-                placeholder="Warranty, inspection findings, parts, follow-up, etc."
-              ><?= $h($editEvent['notes'] ?? '') ?></textarea>
+                placeholder="Receipt status, warranty notes, inspection findings, parts, follow-up, etc."
+              ><?= $h($eventFormDefaults['notes']) ?></textarea>
             </label>
 
             <div class="full">
               <button class="btn btn-primary" type="submit">
-                <?= $editEvent
-                    ? 'Save event changes'
-                    : 'Add vehicle event'
-                ?>
+                <?php if ($editEvent): ?>
+                  Save event changes
+                <?php elseif ($isQuickFuel): ?>
+                  Save fuel entry
+                <?php else: ?>
+                  Add vehicle event
+                <?php endif; ?>
               </button>
 
-              <?php if ($editEvent): ?>
+              <?php if ($editEvent || $isQuickFuel): ?>
                 <a
                   class="btn"
                   href="<?= $h(BASE_URL) ?>/admin/field_vehicle.php?id=<?= (int)$vehicleId ?>"
                 >
-                  Cancel edit
+                  Cancel
                 </a>
               <?php endif; ?>
             </div>
