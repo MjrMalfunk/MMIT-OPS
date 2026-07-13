@@ -470,6 +470,10 @@ $vehicleValue = static function (
 
     * { box-sizing: border-box; }
 
+    [hidden] {
+      display: none !important;
+    }
+
     body {
       margin: 0;
       background: var(--bg);
@@ -1844,21 +1848,29 @@ $vehicleValue = static function (
               >
             </label>
 
-            <label data-fuel-receipt-field>
+            <label
+              data-fuel-receipt-field
+              <?= $receiptPreset !== 'FUEL' ? 'hidden' : '' ?>
+            >
               Gallons
               <input
                 name="gallons"
                 inputmode="decimal"
                 placeholder="Optional fuel draft data"
+                <?= $receiptPreset !== 'FUEL' ? 'disabled' : '' ?>
               >
             </label>
 
-            <label data-fuel-receipt-field>
+            <label
+              data-fuel-receipt-field
+              <?= $receiptPreset !== 'FUEL' ? 'hidden' : '' ?>
+            >
               Fuel price / gallon
               <input
                 name="fuel_price_per_gallon"
                 inputmode="decimal"
                 placeholder="Auto-calculates if blank"
+                <?= $receiptPreset !== 'FUEL' ? 'disabled' : '' ?>
               >
             </label>
 
