@@ -367,6 +367,32 @@ $receiptVehicleEventCategoryMap = field_vehicle_receipt_vehicle_event_category_m
 $receiptRouteTargets = field_vehicle_receipt_route_targets();
 $receiptRouteStatuses = field_vehicle_receipt_route_statuses();
 
+$receiptPreset = field_vehicle_receipt_clean_category(
+    (string)($_GET['receipt_preset'] ?? $_GET['receipt'] ?? 'FUEL')
+);
+
+$receiptPresetLabels = [
+    'FUEL' => 'Fuel',
+    'TOOLS' => 'Tools',
+    'SUPPLIES' => 'Supplies',
+    'JOB_MATERIALS' => 'Job materials',
+    'EQUIPMENT' => 'Equipment',
+    'BUSINESS_EXPENSE' => 'Business expense',
+];
+
+$receiptPresetHints = [
+    'FUEL' => 'Gas receipt with odometer, gallons, and pump data.',
+    'TOOLS' => 'Small tools, adapters, bits, cables, and kit items.',
+    'SUPPLIES' => 'Consumables like wipes, water, bags, tape, and cleaners.',
+    'JOB_MATERIALS' => 'Client/job materials that may belong to Field Ops.',
+    'EQUIPMENT' => 'Dash cam, mounts, chargers, lighting, and durable gear.',
+    'BUSINESS_EXPENSE' => 'General business receipt evidence.',
+];
+
+if (!isset($receiptPresetLabels[$receiptPreset])) {
+    $receiptPreset = 'FUEL';
+}
+
 $receiptDrafts = $vehicle
     ? field_vehicle_receipt_drafts($vehicleId)
     : [];
@@ -853,6 +879,43 @@ $vehicleValue = static function (
       min-width: 0;
     }
 
+    .receipt-preset-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin: -4px 0 16px;
+    }
+
+    .receipt-preset {
+      display: grid;
+      gap: 4px;
+      min-height: 70px;
+      padding: 11px 12px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(2,6,23,.25);
+      color: var(--text);
+      text-decoration: none;
+    }
+
+    .receipt-preset strong {
+      color: white;
+      font-size: 13px;
+      font-weight: 950;
+    }
+
+    .receipt-preset span {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .receipt-preset-active {
+      border-color: rgba(96,165,250,.82);
+      background: rgba(37,99,235,.25);
+      box-shadow: inset 0 0 0 1px rgba(96,165,250,.25);
+    }
+
     .mini-table td,
     .mini-table th {
       vertical-align: top;
@@ -879,6 +942,10 @@ $vehicleValue = static function (
       }
 
       .receipt-route-form {
+        grid-template-columns: 1fr;
+      }
+
+      .receipt-preset-grid {
         grid-template-columns: 1fr;
       }
     }
@@ -1714,6 +1781,23 @@ $vehicleValue = static function (
             <?php endif; ?>
           <?php endif; ?>
 
+          <div class="receipt-preset-grid" aria-label="Receipt capture presets">
+            <?php foreach ($receiptPresetLabels as $presetKey => $presetLabel): ?>
+              <?php
+                $presetKey = (string)$presetKey;
+                $presetActive = $receiptPreset === $presetKey;
+              ?>
+              <a
+                class="receipt-preset <?= $presetActive ? 'receipt-preset-active' : '' ?>"
+                href="<?= $h(BASE_URL) ?>/admin/field_vehicle.php?id=<?= (int)$vehicleId ?>&receipt_preset=<?= urlencode($presetKey) ?>#receipt-drafts"
+                <?= $presetActive ? 'aria-current="true"' : '' ?>
+              >
+                <strong><?= $h($presetLabel) ?></strong>
+                <span><?= $h($receiptPresetHints[$presetKey] ?? '') ?></span>
+              </a>
+            <?php endforeach; ?>
+          </div>
+
           <form method="post" class="form-grid" enctype="multipart/form-data" autocomplete="off">
             <?= csrf_field() ?>
 
@@ -1722,11 +1806,11 @@ $vehicleValue = static function (
 
             <label>
               Category
-              <select name="receipt_category">
+              <select name="receipt_category" data-receipt-category-select>
                 <?php foreach ($receiptCategories as $key => $label): ?>
                   <option
                     value="<?= $h($key) ?>"
-                    <?= $key === 'FUEL' ? 'selected' : '' ?>
+                    <?= $key === $receiptPreset ? 'selected' : '' ?>
                   >
                     <?= $h($label) ?>
                   </option>
@@ -1760,7 +1844,7 @@ $vehicleValue = static function (
               >
             </label>
 
-            <label>
+            <label data-fuel-receipt-field>
               Gallons
               <input
                 name="gallons"
@@ -1769,7 +1853,7 @@ $vehicleValue = static function (
               >
             </label>
 
-            <label>
+            <label data-fuel-receipt-field>
               Fuel price / gallon
               <input
                 name="fuel_price_per_gallon"
@@ -2445,5 +2529,35 @@ $vehicleValue = static function (
     </div>
   </div>
 </main>
+
+<script>
+(() => {
+  const category = document.querySelector('[data-receipt-category-select]');
+  const fuelFields = document.querySelectorAll('[data-fuel-receipt-field]');
+
+  if (!category || fuelFields.length === 0) {
+    return;
+  }
+
+  const syncFuelFields = () => {
+    const isFuel = category.value === 'FUEL';
+
+    fuelFields.forEach((field) => {
+      field.hidden = !isFuel;
+
+      field.querySelectorAll('input').forEach((input) => {
+        input.disabled = !isFuel;
+
+        if (!isFuel) {
+          input.value = '';
+        }
+      });
+    });
+  };
+
+  category.addEventListener('change', syncFuelFields);
+  syncFuelFields();
+})();
+</script>
 </body>
 </html>
