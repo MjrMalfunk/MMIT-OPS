@@ -1330,3 +1330,95 @@ function field_vehicle_route_receipt_draft(
         'routed_by' => $routedBy,
     ];
 }
+
+function field_vehicle_update_expense_draft_status(
+    int $expenseDraftId,
+    string $expenseStatus,
+    mixed $notes = null
+): array {
+    field_vehicle_receipt_expense_drafts_ensure_schema();
+
+    $expenseDraftId = max(0, $expenseDraftId);
+    $expenseStatus = strtoupper(trim($expenseStatus));
+
+    $statuses = field_vehicle_receipt_expense_draft_statuses();
+
+    if ($expenseDraftId <= 0) {
+        return [
+            'ok' => false,
+            'errors' => ['Expense draft ID is required.'],
+        ];
+    }
+
+    if (!array_key_exists($expenseStatus, $statuses)) {
+        return [
+            'ok' => false,
+            'errors' => ['Choose a valid expense draft status.'],
+        ];
+    }
+
+    $st = db()->prepare("
+        SELECT *
+        FROM field_receipt_expense_drafts
+        WHERE expense_draft_id = ?
+          AND deleted_at IS NULL
+        LIMIT 1
+    ");
+    $st->execute([$expenseDraftId]);
+
+    $draft = $st->fetch(PDO::FETCH_ASSOC);
+
+    if (!is_array($draft)) {
+        return [
+            'ok' => false,
+            'errors' => ['Expense draft not found.'],
+        ];
+    }
+
+    $currentStatus = strtoupper(
+        trim((string)($draft['expense_status'] ?? 'DRAFT'))
+    ) ?: 'DRAFT';
+
+    if ($currentStatus === 'EXPORTED' && $expenseStatus !== 'EXPORTED') {
+        return [
+            'ok' => false,
+            'errors' => ['Exported expense drafts cannot be changed here.'],
+        ];
+    }
+
+    $notes = trim((string)$notes);
+    $existingNotes = trim((string)($draft['notes'] ?? ''));
+
+    if ($notes !== '') {
+        $timestamp = date('Y-m-d H:i:s');
+        $statusNote = "[{$timestamp}] Status {$currentStatus} → {$expenseStatus}: {$notes}";
+        $mergedNotes = trim(
+            $existingNotes !== ''
+                ? $existingNotes . "\n\n" . $statusNote
+                : $statusNote
+        );
+    } else {
+        $mergedNotes = $existingNotes !== '' ? $existingNotes : null;
+    }
+
+    db()->prepare("
+        UPDATE field_receipt_expense_drafts
+        SET expense_status = ?,
+            notes = ?,
+            updated_at = NOW()
+        WHERE expense_draft_id = ?
+          AND deleted_at IS NULL
+        LIMIT 1
+    ")->execute([
+        $expenseStatus,
+        $mergedNotes,
+        $expenseDraftId,
+    ]);
+
+    return [
+        'ok' => true,
+        'expense_draft_id' => $expenseDraftId,
+        'expense_status' => $expenseStatus,
+    ];
+}
+

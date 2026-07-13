@@ -232,6 +232,27 @@ smoke_ok(!empty($duplicateExpenseDraft['already_exists']), 'expense draft creati
 $expenseDraftsByReceipt = field_vehicle_receipt_expense_drafts_by_receipt_ids([$businessReceiptId]);
 smoke_ok(isset($expenseDraftsByReceipt[$businessReceiptId]), 'expense drafts index by receipt id');
 
+$statusUpdate = field_vehicle_update_expense_draft_status(
+    (int)$expenseDraft['expense_draft_id'],
+    'READY',
+    'Smoke ready test'
+);
+smoke_ok(!empty($statusUpdate['ok']), 'expense draft status can update to ready');
+
+$statusUpdateVoid = field_vehicle_update_expense_draft_status(
+    (int)$expenseDraft['expense_draft_id'],
+    'VOID',
+    'Smoke void test'
+);
+smoke_ok(!empty($statusUpdateVoid['ok']), 'expense draft status can update to void');
+
+$badStatusUpdate = field_vehicle_update_expense_draft_status(
+    (int)$expenseDraft['expense_draft_id'],
+    'NOPE',
+    null
+);
+smoke_ok(empty($badStatusUpdate['ok']), 'invalid expense draft status is rejected');
+
 $summary = field_vehicle_receipt_route_summary($vehicleId);
 smoke_ok((int)$summary['total'] >= 2, 'route summary counts receipt drafts');
 smoke_ok((int)$summary['linked'] >= 1, 'route summary counts linked receipts');

@@ -39,6 +39,56 @@ $notesForDisplay = static function (mixed $notes): string {
 
 $expenseStatuses = field_vehicle_receipt_expense_draft_statuses();
 
+$user = current_user() ?: [];
+$flashSuccess = '';
+$flashError = '';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    csrf_validate_or_die();
+
+    $action = trim((string)($_POST['action'] ?? ''));
+
+    $result = match ($action) {
+        'update_expense_draft_status' => field_vehicle_update_expense_draft_status(
+            (int)($_POST['expense_draft_id'] ?? 0),
+            (string)($_POST['expense_status'] ?? ''),
+            $_POST['status_notes'] ?? null
+        ),
+
+        default => [
+            'ok' => false,
+            'errors' => ['Unknown expense draft action.'],
+        ],
+    };
+
+    if (!empty($result['ok'])) {
+        $_SESSION['flash_msg'] = 'Expense draft status updated.';
+
+        $redirect = (string)($_POST['return_to'] ?? '');
+        $fallback = BASE_URL . '/admin/field_expense_drafts.php';
+
+        if (
+            $redirect === ''
+            || !str_starts_with($redirect, BASE_URL . '/admin/field_expense_drafts.php')
+        ) {
+            $redirect = $fallback;
+        }
+
+        header('Location: ' . $redirect);
+        exit;
+    }
+
+    $flashError = implode(
+        ' ',
+        (array)($result['errors'] ?? ['Expense draft action failed.'])
+    );
+}
+
+if (!empty($_SESSION['flash_msg'])) {
+    $flashSuccess = (string)$_SESSION['flash_msg'];
+    unset($_SESSION['flash_msg']);
+}
+
 $vehicles = field_vehicles(true);
 
 $vehicleOptions = [
@@ -320,6 +370,26 @@ $statusShortcuts = [
       background: var(--panel);
     }
 
+    .flash-success,
+    .flash-error {
+      margin-bottom: 16px;
+      padding: 13px 16px;
+      border-radius: 14px;
+      font-weight: 800;
+    }
+
+    .flash-success {
+      color: var(--green);
+      border: 1px solid rgba(34,197,94,.4);
+      background: rgba(21,128,61,.18);
+    }
+
+    .flash-error {
+      color: var(--red);
+      border: 1px solid rgba(248,113,113,.4);
+      background: rgba(153,27,27,.2);
+    }
+
     .stack {
       display: grid;
       gap: 16px;
@@ -483,6 +553,13 @@ $statusShortcuts = [
       background: rgba(239,68,68,.12);
     }
 
+    .status-action-form {
+      display: grid;
+      gap: 8px;
+      min-width: 220px;
+      margin-top: 8px;
+    }
+
     @media (max-width: 1100px) {
       .stats {
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -533,6 +610,14 @@ $statusShortcuts = [
       </a>
     </div>
   </div>
+
+  <?php if ($flashSuccess !== ''): ?>
+    <div class="flash-success"><?= $h($flashSuccess) ?></div>
+  <?php endif; ?>
+
+  <?php if ($flashError !== ''): ?>
+    <div class="flash-error"><?= $h($flashError) ?></div>
+  <?php endif; ?>
 
   <div class="stack">
     <section class="card">
@@ -732,6 +817,36 @@ $statusShortcuts = [
                     Source vehicle
                   </a>
                 </div>
+
+                <?php if ($status !== 'EXPORTED'): ?>
+                  <form method="post" class="status-action-form">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="action" value="update_expense_draft_status">
+                    <input type="hidden" name="expense_draft_id" value="<?= $expenseDraftId ?>">
+                    <input type="hidden" name="return_to" value="<?= $h(BASE_URL . '/admin/field_expense_drafts.php' . (!empty($_SERVER['QUERY_STRING']) ? '?' . $_SERVER['QUERY_STRING'] : '')) ?>">
+
+                    <select name="expense_status">
+                      <?php foreach ($expenseStatuses as $statusKey => $statusLabel): ?>
+                        <?php if ($statusKey === 'EXPORTED') { continue; } ?>
+                        <option
+                          value="<?= $h($statusKey) ?>"
+                          <?= $status === (string)$statusKey ? 'selected' : '' ?>
+                        >
+                          <?= $h($statusLabel) ?>
+                        </option>
+                      <?php endforeach; ?>
+                    </select>
+
+                    <input
+                      name="status_notes"
+                      placeholder="Optional status note"
+                    >
+
+                    <button class="btn btn-primary" type="submit">
+                      Update status
+                    </button>
+                  </form>
+                <?php endif; ?>
               </td>
             </tr>
           <?php endforeach; ?>
