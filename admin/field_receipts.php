@@ -232,6 +232,54 @@ $routeStatusOptions = [
     ...$routeStatuses,
 ];
 
+$routeStatusShortcuts = [
+    '' => 'All',
+    'UNROUTED' => 'Unrouted',
+    'REVIEWED' => 'Reviewed',
+    'LINKED' => 'Linked',
+    'IGNORED' => 'Ignored',
+];
+
+$receiptCenterUrl = static function (array $overrides = []) use ($filters): string {
+    $query = [];
+
+    foreach ($filters as $key => $value) {
+        if ($key === 'vehicle_id') {
+            if ((int)$value > 0) {
+                $query[$key] = (int)$value;
+            }
+
+            continue;
+        }
+
+        if ((string)$value !== '') {
+            $query[$key] = (string)$value;
+        }
+    }
+
+    foreach ($overrides as $key => $value) {
+        if ($key === 'vehicle_id') {
+            if ((int)$value > 0) {
+                $query[$key] = (int)$value;
+            } else {
+                unset($query[$key]);
+            }
+
+            continue;
+        }
+
+        if ((string)$value === '') {
+            unset($query[$key]);
+        } else {
+            $query[$key] = (string)$value;
+        }
+    }
+
+    return BASE_URL
+        . '/admin/field_receipts.php'
+        . ($query ? '?' . http_build_query($query) : '');
+};
+
 ?>
 <!doctype html>
 <html lang="en">
@@ -400,6 +448,35 @@ $routeStatusOptions = [
       grid-template-columns: repeat(6, minmax(0, 1fr));
       gap: 10px;
       align-items: end;
+    }
+
+    .shortcut-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    .shortcut-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 34px;
+      padding: 7px 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(2,6,23,.24);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+
+    .shortcut-link-active {
+      border-color: rgba(96,165,250,.82);
+      background: rgba(37,99,235,.25);
+      color: white;
     }
 
     label {
@@ -585,6 +662,19 @@ $routeStatusOptions = [
           <div class="stat-value"><?= $fmtMoney($summary['captured_value']) ?></div>
           <div class="stat-label">Captured value</div>
         </div>
+      </div>
+
+      <div class="shortcut-bar" aria-label="Route status shortcuts">
+        <?php foreach ($routeStatusShortcuts as $shortcutStatus => $shortcutLabel): ?>
+          <?php $shortcutActive = $filters['route_status'] === (string)$shortcutStatus; ?>
+          <a
+            class="shortcut-link <?= $shortcutActive ? 'shortcut-link-active' : '' ?>"
+            href="<?= $h($receiptCenterUrl(['route_status' => (string)$shortcutStatus])) ?>"
+            <?= $shortcutActive ? 'aria-current="page"' : '' ?>
+          >
+            <?= $h($shortcutLabel) ?>
+          </a>
+        <?php endforeach; ?>
       </div>
     </section>
 
