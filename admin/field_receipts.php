@@ -20,6 +20,57 @@ $categories = field_vehicle_receipt_categories();
 $routeTargets = field_vehicle_receipt_route_targets();
 $routeStatuses = field_vehicle_receipt_route_statuses();
 
+$user = current_user() ?: [];
+$flashSuccess = '';
+$flashError = '';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    csrf_validate_or_die();
+
+    $action = trim((string)($_POST['action'] ?? ''));
+
+    $result = match ($action) {
+        'route_receipt_draft' => field_vehicle_route_receipt_draft(
+            (int)($_POST['receipt_draft_id'] ?? 0),
+            (string)($_POST['route_target'] ?? ''),
+            $_POST['route_notes'] ?? null,
+            isset($user['id']) ? (int)$user['id'] : null
+        ),
+
+        default => [
+            'ok' => false,
+            'errors' => ['Unknown receipt action.'],
+        ],
+    };
+
+    if (!empty($result['ok'])) {
+        $_SESSION['flash_msg'] = 'Receipt routed and marked reviewed.';
+
+        $redirect = (string)($_POST['return_to'] ?? '');
+        $fallback = BASE_URL . '/admin/field_receipts.php';
+
+        if (
+            $redirect === ''
+            || !str_starts_with($redirect, BASE_URL . '/admin/field_receipts.php')
+        ) {
+            $redirect = $fallback;
+        }
+
+        header('Location: ' . $redirect);
+        exit;
+    }
+
+    $flashError = implode(
+        ' ',
+        (array)($result['errors'] ?? ['Receipt action failed.'])
+    );
+}
+
+if (!empty($_SESSION['flash_msg'])) {
+    $flashSuccess = (string)$_SESSION['flash_msg'];
+    unset($_SESSION['flash_msg']);
+}
+
 $receiptStatuses = [
     '' => 'All receipt statuses',
     'CAPTURED' => 'Captured',
@@ -293,6 +344,26 @@ $routeStatusOptions = [
       background: var(--panel);
     }
 
+    .flash-success,
+    .flash-error {
+      margin-bottom: 16px;
+      padding: 13px 16px;
+      border-radius: 14px;
+      font-weight: 800;
+    }
+
+    .flash-success {
+      color: var(--green);
+      border: 1px solid rgba(34,197,94,.4);
+      background: rgba(21,128,61,.18);
+    }
+
+    .flash-error {
+      color: var(--red);
+      border: 1px solid rgba(248,113,113,.4);
+      background: rgba(153,27,27,.2);
+    }
+
     .stack {
       display: grid;
       gap: 16px;
@@ -422,6 +493,12 @@ $routeStatusOptions = [
       background: rgba(239,68,68,.12);
     }
 
+    .quick-route-form {
+      display: grid;
+      gap: 8px;
+      min-width: 220px;
+    }
+
     @media (max-width: 1100px) {
       .stats {
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -472,6 +549,14 @@ $routeStatusOptions = [
       </a>
     </div>
   </div>
+
+  <?php if ($flashSuccess !== ''): ?>
+    <div class="flash-success"><?= $h($flashSuccess) ?></div>
+  <?php endif; ?>
+
+  <?php if ($flashError !== ''): ?>
+    <div class="flash-error"><?= $h($flashError) ?></div>
+  <?php endif; ?>
 
   <div class="stack">
     <section class="card">
@@ -617,6 +702,17 @@ $routeStatusOptions = [
                   $routeTarget = 'VEHICLE_EVENT';
               }
 
+              $isVehicleEventCategory = isset(
+                  field_vehicle_receipt_vehicle_event_category_map()[$category]
+              );
+
+              $canQuickRoute = empty($receipt['vehicle_event_id'])
+                  && !$isVehicleEventCategory;
+
+              $defaultRouteTarget = $routeTarget !== 'UNROUTED'
+                  ? $routeTarget
+                  : field_vehicle_receipt_default_route_target($category);
+
               $routeClass = match ($routeStatus) {
                   'LINKED',
                   'REVIEWED' => 'pill-green',
@@ -703,6 +799,37 @@ $routeStatusOptions = [
                     Review
                   </a>
                 </div>
+
+                <?php if ($canQuickRoute): ?>
+                  <form method="post" class="quick-route-form" style="margin-top:8px;">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="action" value="route_receipt_draft">
+                    <input type="hidden" name="receipt_draft_id" value="<?= $receiptId ?>">
+                    <input type="hidden" name="return_to" value="<?= $h(BASE_URL . '/admin/field_receipts.php' . (!empty($_SERVER['QUERY_STRING']) ? '?' . $_SERVER['QUERY_STRING'] : '')) ?>">
+
+                    <select name="route_target">
+                      <?php foreach ($routeTargets as $targetKey => $targetLabel): ?>
+                        <?php if (in_array($targetKey, ['UNROUTED', 'VEHICLE_EVENT'], true)) { continue; } ?>
+                        <option
+                          value="<?= $h($targetKey) ?>"
+                          <?= $defaultRouteTarget === (string)$targetKey ? 'selected' : '' ?>
+                        >
+                          <?= $h($targetLabel) ?>
+                        </option>
+                      <?php endforeach; ?>
+                    </select>
+
+                    <input
+                      name="route_notes"
+                      value="<?= $h($receipt['route_notes'] ?? '') ?>"
+                      placeholder="Optional route note"
+                    >
+
+                    <button class="btn btn-primary" type="submit">
+                      Quick route
+                    </button>
+                  </form>
+                <?php endif; ?>
               </td>
             </tr>
           <?php endforeach; ?>
