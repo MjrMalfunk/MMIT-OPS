@@ -30,6 +30,12 @@ smoke_ok(db_table_exists('field_vehicle_receipt_drafts'), 'field_vehicle_receipt
 smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'onedrive_web_url'), 'receipt draft OneDrive URL column exists');
 smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'parse_status'), 'receipt draft parse status column exists');
 
+$categories = field_vehicle_receipt_categories();
+smoke_ok(isset($categories['TOOLS']), 'receipt categories include tools');
+smoke_ok(isset($categories['SUPPLIES']), 'receipt categories include supplies');
+smoke_ok(isset($categories['JOB_MATERIALS']), 'receipt categories include job materials');
+smoke_ok(isset($categories['BUSINESS_EXPENSE']), 'receipt categories include business expense');
+
 $result = field_vehicle_save([
     'vehicle_name' => 'Smoke Receipt Vehicle ' . date('YmdHis'),
     'current_odometer' => '12345',
@@ -64,6 +70,21 @@ smoke_ok(str_contains($folder, 'Receipts/Fuel'), 'receipt folder uses Fuel categ
 $name = field_vehicle_receipt_onedrive_remote_name($draft);
 smoke_ok(str_contains($name, 'Costco'), 'receipt remote name includes vendor');
 smoke_ok(str_ends_with($name, '.jpg'), 'receipt remote name preserves extension');
+
+$toolDraft = $draft;
+$toolDraft['receipt_category'] = 'TOOLS';
+$toolFolder = field_vehicle_receipt_onedrive_folder_path($toolDraft);
+smoke_ok(str_contains($toolFolder, 'Receipts/Tools'), 'tools receipts route to Tools folder');
+
+$jobMaterialDraft = $draft;
+$jobMaterialDraft['receipt_category'] = 'JOB_MATERIALS';
+$jobMaterialFolder = field_vehicle_receipt_onedrive_folder_path($jobMaterialDraft);
+smoke_ok(str_contains($jobMaterialFolder, 'Receipts/Job Materials'), 'job material receipts route to Job Materials folder');
+
+$businessDraft = $draft;
+$businessDraft['receipt_category'] = 'BUSINESS_EXPENSE';
+$businessFolder = field_vehicle_receipt_onedrive_folder_path($businessDraft);
+smoke_ok(str_contains($businessFolder, 'Receipts/Business Expenses'), 'business receipts route to Business Expenses folder');
 
 db()->prepare("
     DELETE FROM field_vehicle_receipt_drafts

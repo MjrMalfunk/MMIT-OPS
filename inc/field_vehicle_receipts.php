@@ -16,7 +16,13 @@ function field_vehicle_receipt_categories(): array
         'FUEL' => 'Fuel',
         'MAINTENANCE' => 'Maintenance',
         'REPAIR' => 'Repair',
+        'PARTS' => 'Parts',
+        'TOOLS' => 'Tools',
+        'SUPPLIES' => 'Supplies',
+        'JOB_MATERIALS' => 'Job materials',
+        'EQUIPMENT' => 'Equipment',
         'WARRANTY' => 'Warranty / document',
+        'BUSINESS_EXPENSE' => 'Business expense',
         'OTHER' => 'Other',
     ];
 }
@@ -260,7 +266,13 @@ function field_vehicle_receipt_onedrive_folder_path(array $draft): string
         'FUEL' => 'Fuel',
         'MAINTENANCE' => 'Maintenance',
         'REPAIR' => 'Repairs',
+        'PARTS' => 'Parts',
+        'TOOLS' => 'Tools',
+        'SUPPLIES' => 'Supplies',
+        'JOB_MATERIALS' => 'Job Materials',
+        'EQUIPMENT' => 'Equipment',
         'WARRANTY' => 'Warranty',
+        'BUSINESS_EXPENSE' => 'Business Expenses',
         'OTHER' => 'Other',
     ];
 

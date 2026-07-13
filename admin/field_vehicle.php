@@ -1551,8 +1551,9 @@ $vehicleValue = static function (
           <h2>Receipt drafts</h2>
 
           <p class="section-copy">
-            Capture receipt evidence fast from your phone. OCR comes later;
-            this version preserves the file and drafts the metadata.
+            Capture receipt evidence fast from your phone: fuel, maintenance,
+            parts, tools, supplies, job materials, and business expenses. OCR
+            comes later; this version preserves the file and drafts the metadata.
           </p>
 
           <form method="post" class="form-grid" enctype="multipart/form-data" autocomplete="off">
@@ -1588,7 +1589,7 @@ $vehicleValue = static function (
               Vendor
               <input
                 name="vendor"
-                placeholder="Costco, Kroger, Glenbrook..."
+                placeholder="Costco, Kroger, Glenbrook, Lowes, Home Depot..."
               >
             </label>
 
