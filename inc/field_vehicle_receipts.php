@@ -261,6 +261,54 @@ function field_vehicle_find_receipt_draft(int $receiptDraftId): ?array
     return is_array($row) ? $row : null;
 }
 
+function field_vehicle_receipt_drafts_by_event_ids(
+    int $vehicleId,
+    array $eventIds
+): array {
+    field_vehicle_receipts_ensure_schema();
+
+    $eventIds = array_values(array_unique(array_filter(
+        array_map('intval', $eventIds),
+        static fn(int $eventId): bool => $eventId > 0
+    )));
+
+    if ($vehicleId <= 0 || !$eventIds) {
+        return [];
+    }
+
+    $placeholders = implode(',', array_fill(0, count($eventIds), '?'));
+    $params = [
+        $vehicleId,
+        ...$eventIds,
+    ];
+
+    $st = db()->prepare("
+        SELECT *
+        FROM field_vehicle_receipt_drafts
+        WHERE vehicle_id = ?
+          AND deleted_at IS NULL
+          AND vehicle_event_id IN ({$placeholders})
+        ORDER BY receipt_draft_id DESC
+    ");
+    $st->execute($params);
+
+    $rows = $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    $byEvent = [];
+
+    foreach ($rows as $row) {
+        $eventId = (int)($row['vehicle_event_id'] ?? 0);
+
+        if ($eventId <= 0) {
+            continue;
+        }
+
+        $byEvent[$eventId] ??= [];
+        $byEvent[$eventId][] = $row;
+    }
+
+    return $byEvent;
+}
+
 function field_vehicle_receipt_onedrive_root(): string
 {
     return defined('ONEDRIVE_FIELD_OPS_ROOT')
@@ -726,14 +774,6 @@ function field_vehicle_convert_receipt_draft_to_event(
         'Created from receipt draft #' . $receiptDraftId . '.',
     ];
 
-    if (!empty($draft['onedrive_web_url'])) {
-        $receiptLines[] = 'Receipt OneDrive URL: ' . (string)$draft['onedrive_web_url'];
-    }
-
-    if (!empty($draft['onedrive_folder_path'])) {
-        $receiptLines[] = 'Receipt folder: ' . (string)$draft['onedrive_folder_path'];
-    }
-
     $eventNotes = trim(
         ($notes !== '' ? $notes . "\n\n" : '')
         . implode("\n", $receiptLines)
@@ -784,4 +824,3 @@ function field_vehicle_convert_receipt_draft_to_event(
         'created' => true,
     ];
 }
-

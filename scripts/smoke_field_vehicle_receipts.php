@@ -127,6 +127,15 @@ smoke_ok((string)$event['event_type'] === 'FUEL', 'converted event keeps fuel ty
 smoke_ok((float)$event['amount'] === 33.50, 'converted event copies receipt amount');
 smoke_ok((float)$event['gallons'] === 11.36, 'converted event copies gallons');
 
+$linkedByEvent = field_vehicle_receipt_drafts_by_event_ids(
+    $vehicleId,
+    [(int)$convert['vehicle_event_id']]
+);
+smoke_ok(
+    isset($linkedByEvent[(int)$convert['vehicle_event_id']]),
+    'linked receipt helper indexes drafts by event'
+);
+
 $linked = field_vehicle_find_receipt_draft($fuelDraftId);
 smoke_ok((string)$linked['receipt_status'] === 'LINKED', 'converted draft is marked linked');
 smoke_ok((int)$linked['vehicle_event_id'] === (int)$convert['vehicle_event_id'], 'converted draft stores linked event id');

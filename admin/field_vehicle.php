@@ -361,6 +361,37 @@ $receiptDrafts = $vehicle
     ? field_vehicle_receipt_drafts($vehicleId)
     : [];
 
+$eventReceiptDrafts = $vehicle && $events
+    ? field_vehicle_receipt_drafts_by_event_ids(
+        $vehicleId,
+        array_map(
+            static fn(array $event): int =>
+                (int)($event['vehicle_event_id'] ?? 0),
+            $events
+        )
+    )
+    : [];
+
+$eventNotesForDisplay = static function (mixed $notes): string {
+    $lines = preg_split('/\R/', (string)$notes) ?: [];
+    $displayLines = [];
+
+    foreach ($lines as $line) {
+        $trimmed = trim($line);
+
+        if (
+            str_starts_with($trimmed, 'Receipt OneDrive URL:')
+            || str_starts_with($trimmed, 'Receipt folder:')
+        ) {
+            continue;
+        }
+
+        $displayLines[] = $line;
+    }
+
+    return trim(implode("\n", $displayLines));
+};
+
 $vehicleValue = static function (
     ?array $vehicle,
     string $key,
@@ -1172,6 +1203,11 @@ $vehicleValue = static function (
               <?php endif; ?>
 
               <?php foreach ($events as $event): ?>
+                <?php
+                  $eventId = (int)($event['vehicle_event_id'] ?? 0);
+                  $displayNotes = $eventNotesForDisplay($event['notes'] ?? '');
+                  $linkedEventReceipts = $eventReceiptDrafts[$eventId] ?? [];
+                ?>
                 <tr>
                   <td><?= $h($event['event_date']) ?></td>
 
@@ -1189,9 +1225,30 @@ $vehicleValue = static function (
                   <td>
                     <strong><?= $h($event['description']) ?></strong>
 
-                    <?php if (!empty($event['notes'])): ?>
+                    <?php if ($displayNotes !== ''): ?>
                       <div class="muted">
-                        <?= nl2br($h($event['notes'])) ?>
+                        <?= nl2br($h($displayNotes)) ?>
+                      </div>
+                    <?php endif; ?>
+
+                    <?php if ($linkedEventReceipts): ?>
+                      <div class="actions" style="margin-top:8px;">
+                        <?php foreach ($linkedEventReceipts as $linkedReceipt): ?>
+                          <span class="status-pill status-current">
+                            Receipt #<?= (int)$linkedReceipt['receipt_draft_id'] ?> linked
+                          </span>
+
+                          <?php if (!empty($linkedReceipt['onedrive_web_url'])): ?>
+                            <a
+                              class="btn btn-table"
+                              href="<?= $h($linkedReceipt['onedrive_web_url']) ?>"
+                              target="_blank"
+                              rel="noopener"
+                            >
+                              Open receipt #<?= (int)$linkedReceipt['receipt_draft_id'] ?>
+                            </a>
+                          <?php endif; ?>
+                        <?php endforeach; ?>
                       </div>
                     <?php endif; ?>
                   </td>
