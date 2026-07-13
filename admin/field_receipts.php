@@ -635,6 +635,10 @@ $receiptCenterUrl = static function (array $overrides = []) use ($filters): stri
         Capture receipt
       </a>
 
+      <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_expense_drafts.php">
+        Expense drafts
+      </a>
+
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_vehicles.php">
         Service vehicles
       </a>
