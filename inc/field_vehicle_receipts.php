@@ -194,6 +194,40 @@ function field_vehicle_receipts_ensure_schema(): void
             }
         }
     }
+
+    /*
+     * Backfill drafts converted before route_target / route_status existed.
+     * Without this, older LINKED drafts look unrouted in the summary.
+     */
+    if (
+        function_exists('db_column_exists')
+        && db_column_exists('field_vehicle_receipt_drafts', 'route_target')
+        && db_column_exists('field_vehicle_receipt_drafts', 'route_status')
+        && db_column_exists('field_vehicle_receipt_drafts', 'routed_at')
+    ) {
+        try {
+            $pdo->exec("
+                UPDATE field_vehicle_receipt_drafts
+                SET route_target = 'VEHICLE_EVENT',
+                    route_status = 'LINKED',
+                    routed_at = COALESCE(routed_at, updated_at, NOW())
+                WHERE deleted_at IS NULL
+                  AND vehicle_event_id IS NOT NULL
+                  AND receipt_status = 'LINKED'
+                  AND (
+                    route_target = 'UNROUTED'
+                    OR route_status = 'UNROUTED'
+                    OR route_target IS NULL
+                    OR route_status IS NULL
+                  )
+            ");
+        } catch (Throwable $e) {
+            error_log(
+                'Unable to backfill linked receipt draft route metadata: '
+                . $e->getMessage()
+            );
+        }
+    }
 }
 
 function field_vehicle_receipt_account_home(): string
@@ -300,6 +334,123 @@ function field_vehicle_find_receipt_draft(int $receiptDraftId): ?array
     $row = $st->fetch(PDO::FETCH_ASSOC);
 
     return is_array($row) ? $row : null;
+}
+
+function field_vehicle_receipt_route_summary(int $vehicleId): array
+{
+    field_vehicle_receipts_ensure_schema();
+
+    $summary = [
+        'total' => 0,
+        'unrouted' => 0,
+        'reviewed' => 0,
+        'linked' => 0,
+        'ignored' => 0,
+        'total_amount' => 0.0,
+        'by_route_target' => [],
+        'by_category' => [],
+        'by_receipt_status' => [],
+        'by_route_status' => [],
+    ];
+
+    if ($vehicleId <= 0) {
+        return $summary;
+    }
+
+    $st = db()->prepare("
+        SELECT
+            receipt_category,
+            receipt_status,
+            COALESCE(route_target, 'UNROUTED') AS route_target,
+            COALESCE(route_status, 'UNROUTED') AS route_status,
+            COUNT(*) AS draft_count,
+            COALESCE(SUM(amount), 0) AS total_amount
+        FROM field_vehicle_receipt_drafts
+        WHERE vehicle_id = ?
+          AND deleted_at IS NULL
+        GROUP BY receipt_category,
+                 receipt_status,
+                 route_target,
+                 route_status
+        ORDER BY draft_count DESC,
+                 receipt_category ASC
+    ");
+    $st->execute([$vehicleId]);
+
+    $rows = $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+    $bump = static function (
+        array &$bucket,
+        string $key,
+        int $count,
+        float $amount
+    ): void {
+        $bucket[$key] ??= [
+            'count' => 0,
+            'amount' => 0.0,
+        ];
+
+        $bucket[$key]['count'] += $count;
+        $bucket[$key]['amount'] = round(
+            (float)$bucket[$key]['amount'] + $amount,
+            2
+        );
+    };
+
+    foreach ($rows as $row) {
+        $count = (int)($row['draft_count'] ?? 0);
+        $amount = (float)($row['total_amount'] ?? 0);
+
+        $category = field_vehicle_receipt_clean_category(
+            (string)($row['receipt_category'] ?? 'OTHER')
+        );
+
+        $receiptStatus = strtoupper(
+            trim((string)($row['receipt_status'] ?? 'CAPTURED'))
+        ) ?: 'CAPTURED';
+
+        $routeTarget = strtoupper(
+            trim((string)($row['route_target'] ?? 'UNROUTED'))
+        ) ?: 'UNROUTED';
+
+        $routeStatus = strtoupper(
+            trim((string)($row['route_status'] ?? 'UNROUTED'))
+        ) ?: 'UNROUTED';
+
+        /*
+         * Defensive normalization for rows created before route metadata.
+         */
+        if ($receiptStatus === 'LINKED' && $routeStatus === 'UNROUTED') {
+            $routeStatus = 'LINKED';
+        }
+
+        if ($receiptStatus === 'LINKED' && $routeTarget === 'UNROUTED') {
+            $routeTarget = 'VEHICLE_EVENT';
+        }
+
+        $summary['total'] += $count;
+        $summary['total_amount'] = round(
+            (float)$summary['total_amount'] + $amount,
+            2
+        );
+
+        if ($routeStatus === 'REVIEWED') {
+            $summary['reviewed'] += $count;
+        } elseif ($routeStatus === 'LINKED') {
+            $summary['linked'] += $count;
+        } elseif ($routeStatus === 'IGNORED') {
+            $summary['ignored'] += $count;
+        } else {
+            $summary['unrouted'] += $count;
+        }
+
+        $bump($summary['by_category'], $category, $count, $amount);
+        $bump($summary['by_receipt_status'], $receiptStatus, $count, $amount);
+        $bump($summary['by_route_status'], $routeStatus, $count, $amount);
+        $bump($summary['by_route_target'], $routeTarget, $count, $amount);
+    }
+
+    return $summary;
 }
 
 function field_vehicle_receipt_drafts_by_event_ids(
@@ -952,4 +1103,3 @@ function field_vehicle_route_receipt_draft(
         'routed_by' => $routedBy,
     ];
 }
-

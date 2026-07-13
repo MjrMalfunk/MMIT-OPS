@@ -195,6 +195,27 @@ smoke_ok((string)$routedToolDraft['route_target'] === 'TOOL_ASSET', 'routed tool
 smoke_ok((string)$routedToolDraft['route_status'] === 'REVIEWED', 'routed tool draft stores reviewed status');
 smoke_ok(str_contains((string)$routedToolDraft['route_notes'], 'Smoke tool'), 'routed tool draft stores route notes');
 
+$summary = field_vehicle_receipt_route_summary($vehicleId);
+smoke_ok((int)$summary['total'] >= 2, 'route summary counts receipt drafts');
+smoke_ok((int)$summary['linked'] >= 1, 'route summary counts linked receipts');
+smoke_ok((int)$summary['reviewed'] >= 1, 'route summary counts reviewed receipts');
+smoke_ok(isset($summary['by_route_target']['VEHICLE_EVENT']), 'route summary includes vehicle event bucket');
+smoke_ok(isset($summary['by_route_target']['TOOL_ASSET']), 'route summary includes tool asset bucket');
+smoke_ok((float)$summary['total_amount'] >= 53.49, 'route summary totals receipt amount');
+
+db()->prepare("
+    UPDATE field_vehicle_receipt_drafts
+    SET route_target = 'UNROUTED',
+        route_status = 'UNROUTED',
+        routed_at = NULL
+    WHERE receipt_draft_id = ?
+    LIMIT 1
+")->execute([$fuelDraftId]);
+
+$legacySummary = field_vehicle_receipt_route_summary($vehicleId);
+smoke_ok((int)$legacySummary['linked'] >= 1, 'route summary normalizes legacy linked drafts');
+smoke_ok(isset($legacySummary['by_route_target']['VEHICLE_EVENT']), 'legacy linked drafts summarize as vehicle event');
+
 db()->prepare("
     DELETE FROM field_vehicle_receipt_drafts
     WHERE vehicle_id = ?

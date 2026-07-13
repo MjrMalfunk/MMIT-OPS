@@ -371,6 +371,10 @@ $receiptDrafts = $vehicle
     ? field_vehicle_receipt_drafts($vehicleId)
     : [];
 
+$receiptRouteSummary = $vehicle
+    ? field_vehicle_receipt_route_summary($vehicleId)
+    : null;
+
 $eventReceiptDrafts = $vehicle && $events
     ? field_vehicle_receipt_drafts_by_event_ids(
         $vehicleId,
@@ -1647,6 +1651,68 @@ $vehicleValue = static function (
             parts, tools, supplies, job materials, and business expenses. OCR
             comes later; this version preserves the file and drafts the metadata.
           </p>
+
+          <?php if ($receiptRouteSummary): ?>
+            <div class="stats" style="margin-bottom:16px;">
+              <div class="stat">
+                <div class="stat-value">
+                  <?= (int)($receiptRouteSummary['total'] ?? 0) ?>
+                </div>
+                <div class="stat-label">Receipt drafts</div>
+              </div>
+
+              <div class="stat">
+                <div class="stat-value">
+                  <?= (int)($receiptRouteSummary['unrouted'] ?? 0) ?>
+                </div>
+                <div class="stat-label">Unrouted</div>
+              </div>
+
+              <div class="stat">
+                <div class="stat-value">
+                  <?= (int)($receiptRouteSummary['reviewed'] ?? 0) ?>
+                </div>
+                <div class="stat-label">Reviewed</div>
+              </div>
+
+              <div class="stat">
+                <div class="stat-value">
+                  <?= (int)($receiptRouteSummary['linked'] ?? 0) ?>
+                </div>
+                <div class="stat-label">Linked</div>
+              </div>
+
+              <div class="stat">
+                <div class="stat-value">
+                  <?= (int)($receiptRouteSummary['ignored'] ?? 0) ?>
+                </div>
+                <div class="stat-label">Ignored</div>
+              </div>
+
+              <div class="stat">
+                <div class="stat-value">
+                  <?= $fmtMoney($receiptRouteSummary['total_amount'] ?? 0) ?>
+                </div>
+                <div class="stat-label">Captured value</div>
+              </div>
+            </div>
+
+            <?php if (!empty($receiptRouteSummary['by_route_target'])): ?>
+              <div class="receipt-meta" style="margin:-4px 0 16px;">
+                <?php foreach ($receiptRouteSummary['by_route_target'] as $routeTarget => $bucket): ?>
+                  <?php
+                    $routeTarget = (string)$routeTarget;
+                    $routeLabel = $receiptRouteTargets[$routeTarget] ?? $routeTarget;
+                  ?>
+                  <span>
+                    <?= $h($routeLabel) ?>:
+                    <?= (int)($bucket['count'] ?? 0) ?>
+                    / <?= $fmtMoney($bucket['amount'] ?? 0) ?>
+                  </span>
+                <?php endforeach; ?>
+              </div>
+            <?php endif; ?>
+          <?php endif; ?>
 
           <form method="post" class="form-grid" enctype="multipart/form-data" autocomplete="off">
             <?= csrf_field() ?>
