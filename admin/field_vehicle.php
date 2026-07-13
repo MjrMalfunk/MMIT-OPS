@@ -79,6 +79,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             isset($user['id']) ? (int)$user['id'] : null
         ),
 
+        'convert_receipt_draft' => field_vehicle_convert_receipt_draft_to_event(
+            (int)($_POST['receipt_draft_id'] ?? 0),
+            isset($user['id']) ? (int)$user['id'] : null
+        ),
+
         default => [
             'ok' => false,
             'errors' => ['Unknown vehicle action.'],
@@ -105,6 +110,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'capture_receipt_draft' => empty($result['warnings'])
                 ? 'Receipt draft captured and synced to OneDrive.'
                 : 'Receipt draft captured locally. OneDrive sync needs attention.',
+            'convert_receipt_draft' => !empty($result['already_linked'])
+                ? 'Receipt draft is already linked to a vehicle event.'
+                : 'Receipt draft converted to a vehicle event.',
             default => 'Saved.',
         };
 
@@ -347,6 +355,7 @@ $maintenanceSummary = $vehicle
     : null;
 
 $receiptCategories = field_vehicle_receipt_categories();
+$receiptVehicleEventCategoryMap = field_vehicle_receipt_vehicle_event_category_map();
 
 $receiptDrafts = $vehicle
     ? field_vehicle_receipt_drafts($vehicleId)
@@ -1686,6 +1695,7 @@ $vehicleValue = static function (
 
                   <span><?= $h($draft['upload_status']) ?></span>
                   <span><?= $h($draft['parse_status']) ?></span>
+                  <span><?= $h($draft['receipt_status']) ?></span>
                 </div>
 
                 <?php if (!empty($draft['notes'])): ?>
@@ -1707,6 +1717,29 @@ $vehicleValue = static function (
                   <?php else: ?>
                     <span class="muted">
                       Stored locally. OneDrive link pending.
+                    </span>
+                  <?php endif; ?>
+
+                  <?php if (!empty($draft['vehicle_event_id'])): ?>
+                    <a
+                      class="btn btn-table"
+                      href="<?= $h(BASE_URL) ?>/admin/field_vehicle.php?id=<?= (int)$vehicleId ?>&edit_event=<?= (int)$draft['vehicle_event_id'] ?>#vehicle-event-form"
+                    >
+                      Edit linked event
+                    </a>
+                  <?php elseif (isset($receiptVehicleEventCategoryMap[(string)$draft['receipt_category']])): ?>
+                    <form method="post" style="display:inline;">
+                      <?= csrf_field() ?>
+                      <input type="hidden" name="action" value="convert_receipt_draft">
+                      <input type="hidden" name="vehicle_id" value="<?= (int)$vehicleId ?>">
+                      <input type="hidden" name="receipt_draft_id" value="<?= (int)$draft['receipt_draft_id'] ?>">
+                      <button class="btn btn-table" type="submit">
+                        Create vehicle event
+                      </button>
+                    </form>
+                  <?php else: ?>
+                    <span class="muted">
+                      Receipt-only for now. Expense/equipment routing comes next.
                     </span>
                   <?php endif; ?>
                 </div>

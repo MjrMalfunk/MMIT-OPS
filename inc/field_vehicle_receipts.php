@@ -27,6 +27,37 @@ function field_vehicle_receipt_categories(): array
     ];
 }
 
+function field_vehicle_receipt_vehicle_event_category_map(): array
+{
+    return [
+        'FUEL' => [
+            'event_type' => 'FUEL',
+            'cost_treatment' => 'NORMAL',
+            'description' => 'Fuel receipt',
+        ],
+        'MAINTENANCE' => [
+            'event_type' => 'ROUTINE_MAINTENANCE',
+            'cost_treatment' => 'NORMAL',
+            'description' => 'Maintenance receipt',
+        ],
+        'REPAIR' => [
+            'event_type' => 'REPAIR',
+            'cost_treatment' => 'NORMAL',
+            'description' => 'Repair receipt',
+        ],
+        'WARRANTY' => [
+            'event_type' => 'OTHER',
+            'cost_treatment' => 'NORMAL',
+            'description' => 'Warranty document',
+        ],
+        'OTHER' => [
+            'event_type' => 'OTHER',
+            'cost_treatment' => 'NORMAL',
+            'description' => 'Vehicle receipt',
+        ],
+    ];
+}
+
 function field_vehicle_receipts_ensure_schema(): void
 {
     field_vehicles_ensure_schema();
@@ -629,3 +660,128 @@ function field_vehicle_capture_receipt_draft(
             : [],
     ];
 }
+
+function field_vehicle_convert_receipt_draft_to_event(
+    int $receiptDraftId,
+    ?int $createdBy = null
+): array {
+    field_vehicle_receipts_ensure_schema();
+
+    $draft = field_vehicle_find_receipt_draft($receiptDraftId);
+
+    if (!$draft) {
+        return [
+            'ok' => false,
+            'errors' => ['Receipt draft not found.'],
+        ];
+    }
+
+    $vehicleId = (int)($draft['vehicle_id'] ?? 0);
+
+    if ($vehicleId <= 0 || !field_vehicle_find($vehicleId)) {
+        return [
+            'ok' => false,
+            'errors' => ['Vehicle not found for receipt draft.'],
+        ];
+    }
+
+    if (!empty($draft['vehicle_event_id'])) {
+        return [
+            'ok' => true,
+            'vehicle_id' => $vehicleId,
+            'vehicle_event_id' => (int)$draft['vehicle_event_id'],
+            'already_linked' => true,
+        ];
+    }
+
+    $category = field_vehicle_receipt_clean_category(
+        (string)($draft['receipt_category'] ?? 'OTHER')
+    );
+
+    $map = field_vehicle_receipt_vehicle_event_category_map();
+
+    if (!isset($map[$category])) {
+        return [
+            'ok' => false,
+            'errors' => [
+                'This receipt category is receipt-only for now. Route it to expenses/equipment later.',
+            ],
+        ];
+    }
+
+    $eventDefaults = $map[$category];
+
+    $eventDate = field_vehicle_nullable_date($draft['receipt_date'] ?? null);
+
+    if ($eventDate === null) {
+        $eventDate = field_vehicle_nullable_date(
+            substr((string)($draft['created_at'] ?? ''), 0, 10)
+        );
+    }
+
+    $eventDate = $eventDate ?: date('Y-m-d');
+
+    $notes = trim((string)($draft['notes'] ?? ''));
+    $receiptLines = [
+        'Created from receipt draft #' . $receiptDraftId . '.',
+    ];
+
+    if (!empty($draft['onedrive_web_url'])) {
+        $receiptLines[] = 'Receipt OneDrive URL: ' . (string)$draft['onedrive_web_url'];
+    }
+
+    if (!empty($draft['onedrive_folder_path'])) {
+        $receiptLines[] = 'Receipt folder: ' . (string)$draft['onedrive_folder_path'];
+    }
+
+    $eventNotes = trim(
+        ($notes !== '' ? $notes . "\n\n" : '')
+        . implode("\n", $receiptLines)
+    );
+
+    $result = field_vehicle_save_event(
+        [
+            'vehicle_id' => $vehicleId,
+            'event_type' => (string)$eventDefaults['event_type'],
+            'cost_treatment' => (string)$eventDefaults['cost_treatment'],
+            'event_date' => $eventDate,
+            'odometer' => $draft['odometer'] ?? null,
+            'vendor' => $draft['vendor'] ?? null,
+            'description' => (string)$eventDefaults['description'],
+            'amount' => $draft['amount'] ?? 0,
+            'gallons' => $draft['gallons'] ?? null,
+            'fuel_price_per_gallon' => $draft['fuel_price_per_gallon'] ?? null,
+            'notes' => $eventNotes,
+        ],
+        $createdBy
+    );
+
+    if (empty($result['ok'])) {
+        return $result;
+    }
+
+    $vehicleEventId = (int)($result['vehicle_event_id'] ?? 0);
+
+    db()->prepare("
+        UPDATE field_vehicle_receipt_drafts
+        SET vehicle_event_id = ?,
+            receipt_status = 'LINKED',
+            updated_at = NOW()
+        WHERE receipt_draft_id = ?
+          AND vehicle_id = ?
+        LIMIT 1
+    ")->execute([
+        $vehicleEventId,
+        $receiptDraftId,
+        $vehicleId,
+    ]);
+
+    return [
+        'ok' => true,
+        'vehicle_id' => $vehicleId,
+        'vehicle_event_id' => $vehicleEventId,
+        'receipt_draft_id' => $receiptDraftId,
+        'created' => true,
+    ];
+}
+

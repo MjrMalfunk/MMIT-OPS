@@ -36,6 +36,10 @@ smoke_ok(isset($categories['SUPPLIES']), 'receipt categories include supplies');
 smoke_ok(isset($categories['JOB_MATERIALS']), 'receipt categories include job materials');
 smoke_ok(isset($categories['BUSINESS_EXPENSE']), 'receipt categories include business expense');
 
+$eventMap = field_vehicle_receipt_vehicle_event_category_map();
+smoke_ok(isset($eventMap['FUEL']), 'fuel receipt category can convert to vehicle event');
+smoke_ok(!isset($eventMap['TOOLS']), 'tools receipt category remains receipt-only');
+
 $result = field_vehicle_save([
     'vehicle_name' => 'Smoke Receipt Vehicle ' . date('YmdHis'),
     'current_odometer' => '12345',
@@ -85,6 +89,73 @@ $businessDraft = $draft;
 $businessDraft['receipt_category'] = 'BUSINESS_EXPENSE';
 $businessFolder = field_vehicle_receipt_onedrive_folder_path($businessDraft);
 smoke_ok(str_contains($businessFolder, 'Receipts/Business Expenses'), 'business receipts route to Business Expenses folder');
+
+$pdo = db();
+
+$pdo->prepare("
+    INSERT INTO field_vehicle_receipt_drafts (
+        vehicle_id,
+        receipt_status,
+        receipt_category,
+        receipt_date,
+        vendor,
+        amount,
+        gallons,
+        fuel_price_per_gallon,
+        odometer,
+        original_filename,
+        stored_filename,
+        storage_path,
+        mime_type,
+        file_size_bytes,
+        upload_status,
+        notes
+    ) VALUES (?, 'CAPTURED', 'FUEL', ?, 'Costco', 33.50, 11.360, 2.9490, 12400.0, 'fuel.jpg', 'fuel.jpg', ?, 'image/jpeg', 100, 'LOCAL_ONLY', 'Smoke fuel draft')
+")->execute([
+    $vehicleId,
+    date('Y-m-d'),
+    __FILE__,
+]);
+
+$fuelDraftId = (int)$pdo->lastInsertId();
+$convert = field_vehicle_convert_receipt_draft_to_event($fuelDraftId, null);
+smoke_ok(!empty($convert['ok']), 'fuel receipt draft converts to vehicle event');
+
+$event = field_vehicle_find_event((int)$convert['vehicle_event_id']);
+smoke_ok(is_array($event), 'converted vehicle event can be read');
+smoke_ok((string)$event['event_type'] === 'FUEL', 'converted event keeps fuel type');
+smoke_ok((float)$event['amount'] === 33.50, 'converted event copies receipt amount');
+smoke_ok((float)$event['gallons'] === 11.36, 'converted event copies gallons');
+
+$linked = field_vehicle_find_receipt_draft($fuelDraftId);
+smoke_ok((string)$linked['receipt_status'] === 'LINKED', 'converted draft is marked linked');
+smoke_ok((int)$linked['vehicle_event_id'] === (int)$convert['vehicle_event_id'], 'converted draft stores linked event id');
+
+$pdo->prepare("
+    INSERT INTO field_vehicle_receipt_drafts (
+        vehicle_id,
+        receipt_status,
+        receipt_category,
+        receipt_date,
+        vendor,
+        amount,
+        original_filename,
+        stored_filename,
+        storage_path,
+        mime_type,
+        file_size_bytes,
+        upload_status,
+        notes
+    ) VALUES (?, 'CAPTURED', 'TOOLS', ?, 'Home Depot', 19.99, 'tool.pdf', 'tool.pdf', ?, 'application/pdf', 100, 'LOCAL_ONLY', 'Smoke tool draft')
+")->execute([
+    $vehicleId,
+    date('Y-m-d'),
+    __FILE__,
+]);
+
+$toolDraftId = (int)$pdo->lastInsertId();
+$toolConvert = field_vehicle_convert_receipt_draft_to_event($toolDraftId, null);
+smoke_ok(empty($toolConvert['ok']), 'tool receipt draft does not convert to vehicle event yet');
 
 db()->prepare("
     DELETE FROM field_vehicle_receipt_drafts
