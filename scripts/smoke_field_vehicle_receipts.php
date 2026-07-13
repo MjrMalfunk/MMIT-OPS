@@ -29,6 +29,10 @@ field_vehicle_receipts_ensure_schema();
 smoke_ok(db_table_exists('field_vehicle_receipt_drafts'), 'field_vehicle_receipt_drafts exists');
 smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'onedrive_web_url'), 'receipt draft OneDrive URL column exists');
 smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'parse_status'), 'receipt draft parse status column exists');
+smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'route_target'), 'receipt draft route target column exists');
+smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'route_status'), 'receipt draft route status column exists');
+smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'routed_at'), 'receipt draft routed timestamp column exists');
+smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'route_notes'), 'receipt draft route notes column exists');
 
 $categories = field_vehicle_receipt_categories();
 smoke_ok(isset($categories['TOOLS']), 'receipt categories include tools');
@@ -39,6 +43,15 @@ smoke_ok(isset($categories['BUSINESS_EXPENSE']), 'receipt categories include bus
 $eventMap = field_vehicle_receipt_vehicle_event_category_map();
 smoke_ok(isset($eventMap['FUEL']), 'fuel receipt category can convert to vehicle event');
 smoke_ok(!isset($eventMap['TOOLS']), 'tools receipt category remains receipt-only');
+
+$routeTargets = field_vehicle_receipt_route_targets();
+smoke_ok(isset($routeTargets['TOOL_ASSET']), 'route targets include tool asset');
+smoke_ok(isset($routeTargets['EQUIPMENT_ASSET']), 'route targets include equipment asset');
+smoke_ok(isset($routeTargets['BUSINESS_EXPENSE']), 'route targets include business expense');
+smoke_ok(
+    field_vehicle_receipt_default_route_target('TOOLS') === 'TOOL_ASSET',
+    'tools default to tool asset routing'
+);
 
 $result = field_vehicle_save([
     'vehicle_name' => 'Smoke Receipt Vehicle ' . date('YmdHis'),
@@ -138,6 +151,8 @@ smoke_ok(
 
 $linked = field_vehicle_find_receipt_draft($fuelDraftId);
 smoke_ok((string)$linked['receipt_status'] === 'LINKED', 'converted draft is marked linked');
+smoke_ok((string)$linked['route_target'] === 'VEHICLE_EVENT', 'converted draft route target is vehicle event');
+smoke_ok((string)$linked['route_status'] === 'LINKED', 'converted draft route status is linked');
 smoke_ok((int)$linked['vehicle_event_id'] === (int)$convert['vehicle_event_id'], 'converted draft stores linked event id');
 
 $pdo->prepare("
@@ -165,6 +180,20 @@ $pdo->prepare("
 $toolDraftId = (int)$pdo->lastInsertId();
 $toolConvert = field_vehicle_convert_receipt_draft_to_event($toolDraftId, null);
 smoke_ok(empty($toolConvert['ok']), 'tool receipt draft does not convert to vehicle event yet');
+
+$toolRoute = field_vehicle_route_receipt_draft(
+    $toolDraftId,
+    'TOOL_ASSET',
+    'Smoke tool receipt reviewed',
+    null
+);
+smoke_ok(!empty($toolRoute['ok']), 'tool receipt draft can be routed');
+
+$routedToolDraft = field_vehicle_find_receipt_draft($toolDraftId);
+smoke_ok((string)$routedToolDraft['receipt_status'] === 'REVIEWED', 'routed tool draft is marked reviewed');
+smoke_ok((string)$routedToolDraft['route_target'] === 'TOOL_ASSET', 'routed tool draft stores route target');
+smoke_ok((string)$routedToolDraft['route_status'] === 'REVIEWED', 'routed tool draft stores reviewed status');
+smoke_ok(str_contains((string)$routedToolDraft['route_notes'], 'Smoke tool'), 'routed tool draft stores route notes');
 
 db()->prepare("
     DELETE FROM field_vehicle_receipt_drafts

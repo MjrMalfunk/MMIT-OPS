@@ -84,6 +84,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             isset($user['id']) ? (int)$user['id'] : null
         ),
 
+        'route_receipt_draft' => field_vehicle_route_receipt_draft(
+            (int)($_POST['receipt_draft_id'] ?? 0),
+            (string)($_POST['route_target'] ?? ''),
+            $_POST['route_notes'] ?? null,
+            isset($user['id']) ? (int)$user['id'] : null
+        ),
+
         default => [
             'ok' => false,
             'errors' => ['Unknown vehicle action.'],
@@ -113,6 +120,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'convert_receipt_draft' => !empty($result['already_linked'])
                 ? 'Receipt draft is already linked to a vehicle event.'
                 : 'Receipt draft converted to a vehicle event.',
+            'route_receipt_draft' => 'Receipt draft routed and marked reviewed.',
             default => 'Saved.',
         };
 
@@ -356,6 +364,8 @@ $maintenanceSummary = $vehicle
 
 $receiptCategories = field_vehicle_receipt_categories();
 $receiptVehicleEventCategoryMap = field_vehicle_receipt_vehicle_event_category_map();
+$receiptRouteTargets = field_vehicle_receipt_route_targets();
+$receiptRouteStatuses = field_vehicle_receipt_route_statuses();
 
 $receiptDrafts = $vehicle
     ? field_vehicle_receipt_drafts($vehicleId)
@@ -827,6 +837,18 @@ $vehicleValue = static function (
       background: rgba(2,6,23,.42);
     }
 
+    .receipt-route-form {
+      display: grid;
+      grid-template-columns: minmax(160px, .75fr) minmax(220px, 1fr) auto;
+      gap: 8px;
+      align-items: end;
+      width: 100%;
+    }
+
+    .receipt-route-form label {
+      min-width: 0;
+    }
+
     .mini-table td,
     .mini-table th {
       vertical-align: top;
@@ -850,6 +872,10 @@ $vehicleValue = static function (
 
       .full {
         grid-column: auto;
+      }
+
+      .receipt-route-form {
+        grid-template-columns: 1fr;
       }
     }
   </style>
@@ -1730,6 +1756,14 @@ $vehicleValue = static function (
             <?php endif; ?>
 
             <?php foreach ($receiptDrafts as $draft): ?>
+              <?php
+                $draftCategory = (string)($draft['receipt_category'] ?? 'OTHER');
+                $draftRouteTarget = (string)($draft['route_target'] ?? 'UNROUTED');
+                $draftRouteStatus = (string)($draft['route_status'] ?? 'UNROUTED');
+                $draftDefaultRouteTarget = $draftRouteTarget !== 'UNROUTED'
+                    ? $draftRouteTarget
+                    : field_vehicle_receipt_default_route_target($draftCategory);
+              ?>
               <div class="receipt-draft">
                 <div>
                   <strong>
@@ -1753,11 +1787,29 @@ $vehicleValue = static function (
                   <span><?= $h($draft['upload_status']) ?></span>
                   <span><?= $h($draft['parse_status']) ?></span>
                   <span><?= $h($draft['receipt_status']) ?></span>
+
+                  <?php if ($draftRouteTarget !== 'UNROUTED'): ?>
+                    <span>
+                      <?= $h($receiptRouteTargets[$draftRouteTarget] ?? $draftRouteTarget) ?>
+                    </span>
+                  <?php endif; ?>
+
+                  <?php if ($draftRouteStatus !== 'UNROUTED'): ?>
+                    <span>
+                      <?= $h($receiptRouteStatuses[$draftRouteStatus] ?? $draftRouteStatus) ?>
+                    </span>
+                  <?php endif; ?>
                 </div>
 
                 <?php if (!empty($draft['notes'])): ?>
                   <div class="muted">
                     <?= nl2br($h($draft['notes'])) ?>
+                  </div>
+                <?php endif; ?>
+
+                <?php if (!empty($draft['route_notes'])): ?>
+                  <div class="muted">
+                    Route notes: <?= nl2br($h($draft['route_notes'])) ?>
                   </div>
                 <?php endif; ?>
 
@@ -1795,9 +1847,40 @@ $vehicleValue = static function (
                       </button>
                     </form>
                   <?php else: ?>
-                    <span class="muted">
-                      Receipt-only for now. Expense/equipment routing comes next.
-                    </span>
+                    <form method="post" class="receipt-route-form">
+                      <?= csrf_field() ?>
+                      <input type="hidden" name="action" value="route_receipt_draft">
+                      <input type="hidden" name="vehicle_id" value="<?= (int)$vehicleId ?>">
+                      <input type="hidden" name="receipt_draft_id" value="<?= (int)$draft['receipt_draft_id'] ?>">
+
+                      <label>
+                        Route target
+                        <select name="route_target">
+                          <?php foreach ($receiptRouteTargets as $routeKey => $routeLabel): ?>
+                            <?php if (in_array($routeKey, ['UNROUTED', 'VEHICLE_EVENT'], true)) { continue; } ?>
+                            <option
+                              value="<?= $h($routeKey) ?>"
+                              <?= $draftDefaultRouteTarget === (string)$routeKey ? 'selected' : '' ?>
+                            >
+                              <?= $h($routeLabel) ?>
+                            </option>
+                          <?php endforeach; ?>
+                        </select>
+                      </label>
+
+                      <label>
+                        Route notes
+                        <input
+                          name="route_notes"
+                          value="<?= $h($draft['route_notes'] ?? '') ?>"
+                          placeholder="Optional review note"
+                        >
+                      </label>
+
+                      <button class="btn btn-table" type="submit">
+                        <?= $draftRouteStatus === 'UNROUTED' ? 'Mark reviewed' : 'Update route' ?>
+                      </button>
+                    </form>
                   <?php endif; ?>
                 </div>
               </div>

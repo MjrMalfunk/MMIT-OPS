@@ -27,6 +27,43 @@ function field_vehicle_receipt_categories(): array
     ];
 }
 
+function field_vehicle_receipt_route_targets(): array
+{
+    return [
+        'UNROUTED' => 'Unrouted',
+        'VEHICLE_EVENT' => 'Vehicle event',
+        'BUSINESS_EXPENSE' => 'Business expense',
+        'FIELD_OPS_EXPENSE' => 'Field Ops expense',
+        'EQUIPMENT_ASSET' => 'Equipment asset',
+        'TOOL_ASSET' => 'Tool asset',
+        'RECEIPT_ONLY' => 'Receipt-only evidence',
+        'IGNORE_PERSONAL' => 'Ignore / personal',
+    ];
+}
+
+function field_vehicle_receipt_route_statuses(): array
+{
+    return [
+        'UNROUTED' => 'Unrouted',
+        'REVIEWED' => 'Reviewed',
+        'LINKED' => 'Linked',
+        'IGNORED' => 'Ignored',
+    ];
+}
+
+function field_vehicle_receipt_default_route_target(string $category): string
+{
+    return match (field_vehicle_receipt_clean_category($category)) {
+        'TOOLS' => 'TOOL_ASSET',
+        'EQUIPMENT' => 'EQUIPMENT_ASSET',
+        'JOB_MATERIALS' => 'FIELD_OPS_EXPENSE',
+        'PARTS',
+        'SUPPLIES',
+        'BUSINESS_EXPENSE' => 'BUSINESS_EXPENSE',
+        default => 'RECEIPT_ONLY',
+    };
+}
+
 function field_vehicle_receipt_vehicle_event_category_map(): array
 {
     return [
@@ -130,6 +167,10 @@ function field_vehicle_receipts_ensure_schema(): void
         'parse_status' => "VARCHAR(40) NOT NULL DEFAULT 'NOT_PARSED'",
         'parse_confidence' => "DECIMAL(5,4) NULL",
         'raw_parse_json' => "MEDIUMTEXT NULL",
+        'route_target' => "VARCHAR(60) NOT NULL DEFAULT 'UNROUTED'",
+        'route_status' => "VARCHAR(40) NOT NULL DEFAULT 'UNROUTED'",
+        'routed_at' => "DATETIME NULL",
+        'route_notes' => "TEXT NULL",
         'deleted_at' => "DATETIME NULL",
     ];
 
@@ -806,6 +847,9 @@ function field_vehicle_convert_receipt_draft_to_event(
         UPDATE field_vehicle_receipt_drafts
         SET vehicle_event_id = ?,
             receipt_status = 'LINKED',
+            route_target = 'VEHICLE_EVENT',
+            route_status = 'LINKED',
+            routed_at = NOW(),
             updated_at = NOW()
         WHERE receipt_draft_id = ?
           AND vehicle_id = ?
@@ -824,3 +868,88 @@ function field_vehicle_convert_receipt_draft_to_event(
         'created' => true,
     ];
 }
+
+function field_vehicle_route_receipt_draft(
+    int $receiptDraftId,
+    string $routeTarget,
+    mixed $routeNotes = null,
+    ?int $routedBy = null
+): array {
+    field_vehicle_receipts_ensure_schema();
+
+    $draft = field_vehicle_find_receipt_draft($receiptDraftId);
+
+    if (!$draft) {
+        return [
+            'ok' => false,
+            'errors' => ['Receipt draft not found.'],
+        ];
+    }
+
+    if (!empty($draft['vehicle_event_id'])) {
+        return [
+            'ok' => false,
+            'errors' => ['Linked vehicle-event receipts are already routed.'],
+        ];
+    }
+
+    $category = field_vehicle_receipt_clean_category(
+        (string)($draft['receipt_category'] ?? 'OTHER')
+    );
+
+    if (isset(field_vehicle_receipt_vehicle_event_category_map()[$category])) {
+        return [
+            'ok' => false,
+            'errors' => ['This receipt category should be converted to a vehicle event.'],
+        ];
+    }
+
+    $targets = field_vehicle_receipt_route_targets();
+    $routeTarget = strtoupper(trim($routeTarget));
+
+    if (
+        $routeTarget === ''
+        || $routeTarget === 'UNROUTED'
+        || $routeTarget === 'VEHICLE_EVENT'
+        || !array_key_exists($routeTarget, $targets)
+    ) {
+        return [
+            'ok' => false,
+            'errors' => ['Choose a valid receipt route target.'],
+        ];
+    }
+
+    $routeStatus = $routeTarget === 'IGNORE_PERSONAL'
+        ? 'IGNORED'
+        : 'REVIEWED';
+
+    $notes = trim((string)$routeNotes) ?: null;
+
+    db()->prepare("
+        UPDATE field_vehicle_receipt_drafts
+        SET receipt_status = 'REVIEWED',
+            route_target = ?,
+            route_status = ?,
+            routed_at = NOW(),
+            route_notes = ?,
+            updated_at = NOW()
+        WHERE receipt_draft_id = ?
+          AND deleted_at IS NULL
+        LIMIT 1
+    ")->execute([
+        $routeTarget,
+        $routeStatus,
+        $notes,
+        $receiptDraftId,
+    ]);
+
+    return [
+        'ok' => true,
+        'vehicle_id' => (int)$draft['vehicle_id'],
+        'receipt_draft_id' => $receiptDraftId,
+        'route_target' => $routeTarget,
+        'route_status' => $routeStatus,
+        'routed_by' => $routedBy,
+    ];
+}
+
