@@ -804,6 +804,7 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
     <div class="actions">
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_opportunities.php">FN opportunities</a>
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_vehicles.php">Service vehicles</a>
+  <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_receipts.php">Receipts</a>
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/index.php">Back to admin</a>
     </div>
   </div>

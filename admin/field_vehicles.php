@@ -257,6 +257,13 @@ foreach ($vehicles as $vehicle) {
 
       <a
         class="btn"
+        href="<?= $h(BASE_URL) ?>/admin/field_receipts.php"
+      >
+        Receipts
+      </a>
+
+      <a
+        class="btn"
         href="<?= $h(BASE_URL) ?>/admin/field_ops.php"
       >
         Back to Field Ops
