@@ -25,6 +25,7 @@ echo "Database: " . (defined('DB_NAME') ? DB_NAME : 'unknown') . "\n";
 
 field_vehicles_ensure_schema();
 field_vehicle_receipts_ensure_schema();
+field_vehicle_receipt_expense_drafts_ensure_schema();
 
 smoke_ok(db_table_exists('field_vehicle_receipt_drafts'), 'field_vehicle_receipt_drafts exists');
 smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'onedrive_web_url'), 'receipt draft OneDrive URL column exists');
@@ -33,6 +34,7 @@ smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'route_target'), 'rece
 smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'route_status'), 'receipt draft route status column exists');
 smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'routed_at'), 'receipt draft routed timestamp column exists');
 smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'route_notes'), 'receipt draft route notes column exists');
+smoke_ok(db_table_exists('field_receipt_expense_drafts'), 'receipt expense draft table exists');
 
 $categories = field_vehicle_receipt_categories();
 smoke_ok(isset($categories['TOOLS']), 'receipt categories include tools');
@@ -195,6 +197,41 @@ smoke_ok((string)$routedToolDraft['route_target'] === 'TOOL_ASSET', 'routed tool
 smoke_ok((string)$routedToolDraft['route_status'] === 'REVIEWED', 'routed tool draft stores reviewed status');
 smoke_ok(str_contains((string)$routedToolDraft['route_notes'], 'Smoke tool'), 'routed tool draft stores route notes');
 
+$pdo->prepare("
+    INSERT INTO field_vehicle_receipt_drafts (
+        vehicle_id,
+        receipt_status,
+        receipt_category,
+        receipt_date,
+        vendor,
+        amount,
+        original_filename,
+        stored_filename,
+        storage_path,
+        mime_type,
+        file_size_bytes,
+        upload_status,
+        route_target,
+        route_status,
+        notes
+    ) VALUES (?, 'REVIEWED', 'BUSINESS_EXPENSE', ?, 'State Farm', 26.48, 'insurance.pdf', 'insurance.pdf', ?, 'application/pdf', 100, 'LOCAL_ONLY', 'BUSINESS_EXPENSE', 'REVIEWED', 'Smoke business receipt')
+")->execute([
+    $vehicleId,
+    date('Y-m-d'),
+    __FILE__,
+]);
+
+$businessReceiptId = (int)$pdo->lastInsertId();
+$expenseDraft = field_vehicle_create_expense_draft_from_receipt($businessReceiptId, null);
+smoke_ok(!empty($expenseDraft['ok']), 'business receipt creates expense draft');
+smoke_ok((int)($expenseDraft['expense_draft_id'] ?? 0) > 0, 'expense draft id is returned');
+
+$duplicateExpenseDraft = field_vehicle_create_expense_draft_from_receipt($businessReceiptId, null);
+smoke_ok(!empty($duplicateExpenseDraft['already_exists']), 'expense draft creation is idempotent');
+
+$expenseDraftsByReceipt = field_vehicle_receipt_expense_drafts_by_receipt_ids([$businessReceiptId]);
+smoke_ok(isset($expenseDraftsByReceipt[$businessReceiptId]), 'expense drafts index by receipt id');
+
 $summary = field_vehicle_receipt_route_summary($vehicleId);
 smoke_ok((int)$summary['total'] >= 2, 'route summary counts receipt drafts');
 smoke_ok((int)$summary['linked'] >= 1, 'route summary counts linked receipts');
@@ -215,6 +252,11 @@ db()->prepare("
 $legacySummary = field_vehicle_receipt_route_summary($vehicleId);
 smoke_ok((int)$legacySummary['linked'] >= 1, 'route summary normalizes legacy linked drafts');
 smoke_ok(isset($legacySummary['by_route_target']['VEHICLE_EVENT']), 'legacy linked drafts summarize as vehicle event');
+
+db()->prepare("
+    DELETE FROM field_receipt_expense_drafts
+    WHERE vehicle_id = ?
+")->execute([$vehicleId]);
 
 db()->prepare("
     DELETE FROM field_vehicle_receipt_drafts

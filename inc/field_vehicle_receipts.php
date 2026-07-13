@@ -51,6 +51,16 @@ function field_vehicle_receipt_route_statuses(): array
     ];
 }
 
+function field_vehicle_receipt_expense_draft_statuses(): array
+{
+    return [
+        'DRAFT' => 'Draft',
+        'READY' => 'Ready',
+        'EXPORTED' => 'Exported',
+        'VOID' => 'Void',
+    ];
+}
+
 function field_vehicle_receipt_default_route_target(string $category): string
 {
     return match (field_vehicle_receipt_clean_category($category)) {
@@ -451,6 +461,223 @@ function field_vehicle_receipt_route_summary(int $vehicleId): array
     }
 
     return $summary;
+}
+
+function field_vehicle_receipt_expense_drafts_ensure_schema(): void
+{
+    field_vehicle_receipts_ensure_schema();
+
+    db()->exec("
+        CREATE TABLE IF NOT EXISTS field_receipt_expense_drafts (
+            expense_draft_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            receipt_draft_id INT UNSIGNED NOT NULL,
+            vehicle_id INT UNSIGNED NOT NULL,
+
+            expense_status VARCHAR(40) NOT NULL DEFAULT 'DRAFT',
+            expense_date DATE NULL,
+            vendor VARCHAR(180) NULL,
+            amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+            expense_category VARCHAR(80) NOT NULL DEFAULT 'Business expense',
+            description VARCHAR(255) NOT NULL,
+
+            receipt_onedrive_web_url VARCHAR(500) NULL,
+            receipt_onedrive_item_id VARCHAR(190) NULL,
+
+            notes TEXT NULL,
+            created_by INT UNSIGNED NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            deleted_at DATETIME NULL,
+
+            UNIQUE KEY uniq_field_receipt_expense_draft_receipt (receipt_draft_id),
+            INDEX idx_field_receipt_expense_vehicle (vehicle_id),
+            INDEX idx_field_receipt_expense_status (expense_status),
+            INDEX idx_field_receipt_expense_date (expense_date)
+        ) ENGINE=InnoDB
+          DEFAULT CHARSET=utf8mb4
+          COLLATE=utf8mb4_unicode_ci
+    ");
+}
+
+function field_vehicle_receipt_expense_drafts_by_receipt_ids(
+    array $receiptDraftIds
+): array {
+    field_vehicle_receipt_expense_drafts_ensure_schema();
+
+    $receiptDraftIds = array_values(array_unique(array_filter(
+        array_map('intval', $receiptDraftIds),
+        static fn(int $receiptDraftId): bool => $receiptDraftId > 0
+    )));
+
+    if (!$receiptDraftIds) {
+        return [];
+    }
+
+    $placeholders = implode(',', array_fill(0, count($receiptDraftIds), '?'));
+
+    $st = db()->prepare("
+        SELECT *
+        FROM field_receipt_expense_drafts
+        WHERE deleted_at IS NULL
+          AND receipt_draft_id IN ({$placeholders})
+        ORDER BY expense_draft_id DESC
+    ");
+    $st->execute($receiptDraftIds);
+
+    $rows = $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    $byReceipt = [];
+
+    foreach ($rows as $row) {
+        $receiptDraftId = (int)($row['receipt_draft_id'] ?? 0);
+
+        if ($receiptDraftId <= 0) {
+            continue;
+        }
+
+        $byReceipt[$receiptDraftId] = $row;
+    }
+
+    return $byReceipt;
+}
+
+function field_vehicle_create_expense_draft_from_receipt(
+    int $receiptDraftId,
+    ?int $createdBy = null
+): array {
+    field_vehicle_receipt_expense_drafts_ensure_schema();
+
+    $draft = field_vehicle_find_receipt_draft($receiptDraftId);
+
+    if (!$draft) {
+        return [
+            'ok' => false,
+            'errors' => ['Receipt draft not found.'],
+        ];
+    }
+
+    if (!empty($draft['vehicle_event_id'])) {
+        return [
+            'ok' => false,
+            'errors' => ['Vehicle-event receipts cannot become expense drafts.'],
+        ];
+    }
+
+    $category = field_vehicle_receipt_clean_category(
+        (string)($draft['receipt_category'] ?? 'OTHER')
+    );
+
+    $routeTarget = strtoupper(
+        trim((string)($draft['route_target'] ?? 'UNROUTED'))
+    ) ?: 'UNROUTED';
+
+    if ($category !== 'BUSINESS_EXPENSE' && $routeTarget !== 'BUSINESS_EXPENSE') {
+        return [
+            'ok' => false,
+            'errors' => ['Only business expense receipts can create expense drafts.'],
+        ];
+    }
+
+    $existing = db()->prepare("
+        SELECT *
+        FROM field_receipt_expense_drafts
+        WHERE receipt_draft_id = ?
+          AND deleted_at IS NULL
+        LIMIT 1
+    ");
+    $existing->execute([$receiptDraftId]);
+
+    $existingRow = $existing->fetch(PDO::FETCH_ASSOC);
+
+    if (is_array($existingRow)) {
+        return [
+            'ok' => true,
+            'already_exists' => true,
+            'expense_draft_id' => (int)$existingRow['expense_draft_id'],
+            'receipt_draft_id' => $receiptDraftId,
+            'vehicle_id' => (int)$draft['vehicle_id'],
+        ];
+    }
+
+    $expenseDate = field_vehicle_nullable_date($draft['receipt_date'] ?? null);
+
+    if ($expenseDate === null) {
+        $expenseDate = field_vehicle_nullable_date(
+            substr((string)($draft['created_at'] ?? ''), 0, 10)
+        );
+    }
+
+    $categories = field_vehicle_receipt_categories();
+    $categoryLabel = $categories[$category] ?? 'Business expense';
+
+    $vendor = trim((string)($draft['vendor'] ?? '')) ?: null;
+    $descriptionParts = array_filter([
+        $vendor,
+        $categoryLabel,
+        'receipt #' . $receiptDraftId,
+    ]);
+
+    $description = implode(' - ', $descriptionParts);
+
+    $notes = trim((string)($draft['notes'] ?? ''));
+    $routeNotes = trim((string)($draft['route_notes'] ?? ''));
+
+    $noteLines = [];
+
+    if ($notes !== '') {
+        $noteLines[] = $notes;
+    }
+
+    if ($routeNotes !== '') {
+        $noteLines[] = 'Route notes: ' . $routeNotes;
+    }
+
+    if (!empty($draft['onedrive_web_url'])) {
+        $noteLines[] = 'Receipt OneDrive URL: ' . (string)$draft['onedrive_web_url'];
+    }
+
+    $st = db()->prepare("
+        INSERT INTO field_receipt_expense_drafts
+          (
+            receipt_draft_id,
+            vehicle_id,
+            expense_status,
+            expense_date,
+            vendor,
+            amount,
+            expense_category,
+            description,
+            receipt_onedrive_web_url,
+            receipt_onedrive_item_id,
+            notes,
+            created_by
+          )
+        VALUES
+          (?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ");
+
+    $st->execute([
+        $receiptDraftId,
+        (int)$draft['vehicle_id'],
+        $expenseDate,
+        $vendor,
+        field_vehicle_decimal($draft['amount'] ?? 0, 2),
+        $categoryLabel,
+        $description,
+        $draft['onedrive_web_url'] ?? null,
+        $draft['onedrive_item_id'] ?? null,
+        trim(implode("\n\n", $noteLines)) ?: null,
+        $createdBy,
+    ]);
+
+    $expenseDraftId = (int)db()->lastInsertId();
+
+    return [
+        'ok' => true,
+        'expense_draft_id' => $expenseDraftId,
+        'receipt_draft_id' => $receiptDraftId,
+        'vehicle_id' => (int)$draft['vehicle_id'],
+        'created' => true,
+    ];
 }
 
 function field_vehicle_receipt_drafts_by_event_ids(

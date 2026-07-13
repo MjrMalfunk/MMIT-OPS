@@ -9,6 +9,7 @@ require_login();
 
 field_vehicles_ensure_schema();
 field_vehicle_receipts_ensure_schema();
+field_vehicle_receipt_expense_drafts_ensure_schema();
 
 $h = static fn(mixed $value): string =>
     htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
@@ -37,6 +38,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             isset($user['id']) ? (int)$user['id'] : null
         ),
 
+        'create_expense_draft' => field_vehicle_create_expense_draft_from_receipt(
+            (int)($_POST['receipt_draft_id'] ?? 0),
+            isset($user['id']) ? (int)$user['id'] : null
+        ),
+
         default => [
             'ok' => false,
             'errors' => ['Unknown receipt action.'],
@@ -44,7 +50,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     };
 
     if (!empty($result['ok'])) {
-        $_SESSION['flash_msg'] = 'Receipt routed and marked reviewed.';
+        $_SESSION['flash_msg'] = $action === 'create_expense_draft'
+            ? (!empty($result['already_exists'])
+                ? 'Expense draft already exists for this receipt.'
+                : 'Expense draft created from receipt.')
+            : 'Receipt routed and marked reviewed.';
 
         $redirect = (string)($_POST['return_to'] ?? '');
         $fallback = BASE_URL . '/admin/field_receipts.php';
@@ -177,6 +187,14 @@ $st = db()->prepare("
 $st->execute($params);
 
 $receipts = $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+$expenseDraftsByReceipt = field_vehicle_receipt_expense_drafts_by_receipt_ids(
+    array_map(
+        static fn(array $receipt): int =>
+            (int)($receipt['receipt_draft_id'] ?? 0),
+        $receipts
+    )
+);
 
 $summary = [
     'total' => 0,
@@ -796,8 +814,17 @@ $receiptCenterUrl = static function (array $overrides = []) use ($filters): stri
                   field_vehicle_receipt_vehicle_event_category_map()[$category]
               );
 
+              $expenseDraft = $expenseDraftsByReceipt[$receiptId] ?? null;
+
               $canQuickRoute = empty($receipt['vehicle_event_id'])
                   && !$isVehicleEventCategory;
+
+              $canCreateExpenseDraft = empty($expenseDraft)
+                  && empty($receipt['vehicle_event_id'])
+                  && (
+                      $category === 'BUSINESS_EXPENSE'
+                      || $routeTarget === 'BUSINESS_EXPENSE'
+                  );
 
               $defaultRouteTarget = $routeTarget !== 'UNROUTED'
                   ? $routeTarget
@@ -889,6 +916,25 @@ $receiptCenterUrl = static function (array $overrides = []) use ($filters): stri
                     Review
                   </a>
                 </div>
+
+                <?php if ($expenseDraft): ?>
+                  <div style="margin-top:8px;">
+                    <span class="pill pill-green">
+                      Expense draft #<?= (int)$expenseDraft['expense_draft_id'] ?>
+                    </span>
+                  </div>
+                <?php elseif ($canCreateExpenseDraft): ?>
+                  <form method="post" style="margin-top:8px;">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="action" value="create_expense_draft">
+                    <input type="hidden" name="receipt_draft_id" value="<?= $receiptId ?>">
+                    <input type="hidden" name="return_to" value="<?= $h(BASE_URL . '/admin/field_receipts.php' . (!empty($_SERVER['QUERY_STRING']) ? '?' . $_SERVER['QUERY_STRING'] : '')) ?>">
+
+                    <button class="btn btn-primary" type="submit">
+                      Create expense draft
+                    </button>
+                  </form>
+                <?php endif; ?>
 
                 <?php if ($canQuickRoute): ?>
                   <form method="post" class="quick-route-form" style="margin-top:8px;">
