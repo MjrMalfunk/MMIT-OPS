@@ -4,11 +4,13 @@ declare(strict_types=1);
 require_once __DIR__ . '/../inc/bootstrap.php';
 require_once __DIR__ . '/../inc/field_vehicles.php';
 require_once __DIR__ . '/../inc/field_vehicle_maintenance.php';
+require_once __DIR__ . '/../inc/field_vehicle_receipts.php';
 
 require_login();
 
 field_vehicles_ensure_schema();
 field_vehicle_maintenance_ensure_schema();
+field_vehicle_receipts_ensure_schema();
 
 $h = static fn(mixed $value): string =>
     htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
@@ -71,6 +73,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         })(),
 
+        'capture_receipt_draft' => field_vehicle_capture_receipt_draft(
+            $_POST,
+            $_FILES['receipt_file'] ?? [],
+            isset($user['id']) ? (int)$user['id'] : null
+        ),
+
         default => [
             'ok' => false,
             'errors' => ['Unknown vehicle action.'],
@@ -94,6 +102,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'save_maintenance_item' => !empty($result['updated'])
                 ? 'Maintenance item updated.'
                 : 'Maintenance item added.',
+            'capture_receipt_draft' => empty($result['warnings'])
+                ? 'Receipt draft captured and synced to OneDrive.'
+                : 'Receipt draft captured locally. OneDrive sync needs attention.',
             default => 'Saved.',
         };
 
@@ -334,6 +345,12 @@ $maintenanceFormDefaults = [
 $maintenanceSummary = $vehicle
     ? field_vehicle_maintenance_summary($vehicleId)
     : null;
+
+$receiptCategories = field_vehicle_receipt_categories();
+
+$receiptDrafts = $vehicle
+    ? field_vehicle_receipt_drafts($vehicleId)
+    : [];
 
 $vehicleValue = static function (
     ?array $vehicle,
@@ -742,6 +759,32 @@ $vehicleValue = static function (
       color: var(--muted);
       font-size: 13px;
       line-height: 1.5;
+    }
+
+    .receipt-draft {
+      display: grid;
+      gap: 8px;
+      padding: 12px 0;
+      border-top: 1px solid var(--line);
+    }
+
+    .receipt-draft:first-child {
+      border-top: 0;
+      padding-top: 0;
+    }
+
+    .receipt-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .file-input {
+      padding: 9px 12px;
+      background: rgba(2,6,23,.42);
     }
 
     .mini-table td,
@@ -1502,6 +1545,173 @@ $vehicleValue = static function (
             Model version:
             <?= (int)($model['model_version'] ?? 1) ?>.
           </p>
+        </section>
+
+        <section class="card" id="receipt-drafts">
+          <h2>Receipt drafts</h2>
+
+          <p class="section-copy">
+            Capture receipt evidence fast from your phone. OCR comes later;
+            this version preserves the file and drafts the metadata.
+          </p>
+
+          <form method="post" class="form-grid" enctype="multipart/form-data" autocomplete="off">
+            <?= csrf_field() ?>
+
+            <input type="hidden" name="action" value="capture_receipt_draft">
+            <input type="hidden" name="vehicle_id" value="<?= (int)$vehicleId ?>">
+
+            <label>
+              Category
+              <select name="receipt_category">
+                <?php foreach ($receiptCategories as $key => $label): ?>
+                  <option
+                    value="<?= $h($key) ?>"
+                    <?= $key === 'FUEL' ? 'selected' : '' ?>
+                  >
+                    <?= $h($label) ?>
+                  </option>
+                <?php endforeach; ?>
+              </select>
+            </label>
+
+            <label>
+              Receipt date
+              <input
+                type="date"
+                name="receipt_date"
+                value="<?= $h(date('Y-m-d')) ?>"
+              >
+            </label>
+
+            <label>
+              Vendor
+              <input
+                name="vendor"
+                placeholder="Costco, Kroger, Glenbrook..."
+              >
+            </label>
+
+            <label>
+              Amount
+              <input
+                name="amount"
+                inputmode="decimal"
+                placeholder="33.50"
+              >
+            </label>
+
+            <label>
+              Gallons
+              <input
+                name="gallons"
+                inputmode="decimal"
+                placeholder="Optional fuel draft data"
+              >
+            </label>
+
+            <label>
+              Fuel price / gallon
+              <input
+                name="fuel_price_per_gallon"
+                inputmode="decimal"
+                placeholder="Auto-calculates if blank"
+              >
+            </label>
+
+            <label>
+              Odometer
+              <input
+                name="odometer"
+                inputmode="decimal"
+                value="<?= $h($vehicle['current_odometer'] ?? '') ?>"
+              >
+            </label>
+
+            <label>
+              Receipt photo / PDF
+              <input
+                class="file-input"
+                type="file"
+                name="receipt_file"
+                accept="image/*,application/pdf"
+                capture="environment"
+                required
+              >
+            </label>
+
+            <label class="full">
+              Notes
+              <textarea
+                name="notes"
+                placeholder="Receipt-only capture, missing values, pump notes, warranty context..."
+              ></textarea>
+            </label>
+
+            <div class="full">
+              <button class="btn btn-primary" type="submit">
+                Capture receipt draft
+              </button>
+            </div>
+          </form>
+
+          <div style="margin-top:18px;">
+            <?php if (!$receiptDrafts): ?>
+              <p class="muted" style="margin:0;">
+                No receipt drafts yet.
+              </p>
+            <?php endif; ?>
+
+            <?php foreach ($receiptDrafts as $draft): ?>
+              <div class="receipt-draft">
+                <div>
+                  <strong>
+                    <?= $h($receiptCategories[(string)$draft['receipt_category']] ?? $draft['receipt_category']) ?>
+                    receipt draft
+                  </strong>
+                </div>
+
+                <div class="receipt-meta">
+                  <span>#<?= (int)$draft['receipt_draft_id'] ?></span>
+                  <span><?= $h($draft['receipt_date'] ?: substr((string)$draft['created_at'], 0, 10)) ?></span>
+
+                  <?php if (!empty($draft['vendor'])): ?>
+                    <span><?= $h($draft['vendor']) ?></span>
+                  <?php endif; ?>
+
+                  <?php if ($draft['amount'] !== null): ?>
+                    <span><?= $fmtMoney($draft['amount']) ?></span>
+                  <?php endif; ?>
+
+                  <span><?= $h($draft['upload_status']) ?></span>
+                  <span><?= $h($draft['parse_status']) ?></span>
+                </div>
+
+                <?php if (!empty($draft['notes'])): ?>
+                  <div class="muted">
+                    <?= nl2br($h($draft['notes'])) ?>
+                  </div>
+                <?php endif; ?>
+
+                <div class="actions">
+                  <?php if (!empty($draft['onedrive_web_url'])): ?>
+                    <a
+                      class="btn btn-table"
+                      href="<?= $h($draft['onedrive_web_url']) ?>"
+                      target="_blank"
+                      rel="noopener"
+                    >
+                      Open in OneDrive
+                    </a>
+                  <?php else: ?>
+                    <span class="muted">
+                      Stored locally. OneDrive link pending.
+                    </span>
+                  <?php endif; ?>
+                </div>
+              </div>
+            <?php endforeach; ?>
+          </div>
         </section>
 
         <section class="card" id="component-baseline-form">
