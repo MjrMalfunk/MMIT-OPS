@@ -4,6 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../inc/bootstrap.php';
 require_once __DIR__ . '/../inc/field_vehicles.php';
 require_once __DIR__ . '/../inc/field_vehicle_receipts.php';
+require_once __DIR__ . '/../inc/accounting.php';
 
 require_login();
 
@@ -55,6 +56,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_POST['status_notes'] ?? null
         ),
 
+        'export_expense_draft' => field_vehicle_export_expense_draft_to_accounting(
+            (int)($_POST['expense_draft_id'] ?? 0),
+            isset($user['id']) ? (int)$user['id'] : null
+        ),
+
         default => [
             'ok' => false,
             'errors' => ['Unknown expense draft action.'],
@@ -62,7 +68,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     };
 
     if (!empty($result['ok'])) {
-        $_SESSION['flash_msg'] = 'Expense draft status updated.';
+        $_SESSION['flash_msg'] = $action === 'export_expense_draft'
+            ? (!empty($result['already_exported'])
+                ? 'Expense draft was already posted to accounting.'
+                : 'Expense draft posted to accounting as a draft expense.')
+            : 'Expense draft status updated.';
 
         $redirect = (string)($_POST['return_to'] ?? '');
         $fallback = BASE_URL . '/admin/field_expense_drafts.php';
@@ -714,6 +724,7 @@ $statusShortcuts = [
               <th>Vendor</th>
               <th>Amount</th>
               <th>Status</th>
+              <th>Accounting</th>
               <th>Category</th>
               <th>Notes</th>
               <th>Actions</th>
@@ -723,7 +734,7 @@ $statusShortcuts = [
           <tbody>
           <?php if (!$drafts): ?>
             <tr>
-              <td colspan="10" class="muted">No expense drafts found.</td>
+              <td colspan="11" class="muted">No expense drafts found.</td>
             </tr>
           <?php endif; ?>
 
@@ -782,6 +793,16 @@ $statusShortcuts = [
                 </span>
               </td>
 
+              <td>
+                <?php if (!empty($draft['accounting_expense_id'])): ?>
+                  <span class="pill pill-green">
+                    Expense #<?= (int)$draft['accounting_expense_id'] ?>
+                  </span>
+                <?php else: ?>
+                  <span class="muted">Not posted</span>
+                <?php endif; ?>
+              </td>
+
               <td><?= $h($draft['expense_category'] ?? '') ?></td>
 
               <td class="notes-cell">
@@ -816,7 +837,29 @@ $statusShortcuts = [
                   >
                     Source vehicle
                   </a>
+
+                  <?php if ($status === 'EXPORTED' && !empty($draft['accounting_expense_id'])): ?>
+                    <a
+                      class="btn"
+                      href="<?= $h(BASE_URL) ?>/accounting/bill_edit.php?id=<?= (int)$draft['accounting_expense_id'] ?>"
+                    >
+                      Accounting draft
+                    </a>
+                  <?php endif; ?>
                 </div>
+
+                <?php if ($status === 'READY' && empty($draft['accounting_expense_id'])): ?>
+                  <form method="post" style="margin-top:8px;">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="action" value="export_expense_draft">
+                    <input type="hidden" name="expense_draft_id" value="<?= $expenseDraftId ?>">
+                    <input type="hidden" name="return_to" value="<?= $h(BASE_URL . '/admin/field_expense_drafts.php' . (!empty($_SERVER['QUERY_STRING']) ? '?' . $_SERVER['QUERY_STRING'] : '')) ?>">
+
+                    <button class="btn btn-primary" type="submit">
+                      Post to accounting
+                    </button>
+                  </form>
+                <?php endif; ?>
 
                 <?php if ($status !== 'EXPORTED'): ?>
                   <form method="post" class="status-action-form">

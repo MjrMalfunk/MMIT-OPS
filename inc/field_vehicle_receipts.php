@@ -483,6 +483,12 @@ function field_vehicle_receipt_expense_drafts_ensure_schema(): void
             receipt_onedrive_web_url VARCHAR(500) NULL,
             receipt_onedrive_item_id VARCHAR(190) NULL,
 
+            accounting_expense_id BIGINT UNSIGNED NULL,
+            accounting_vendor_id BIGINT UNSIGNED NULL,
+            accounting_expense_account_id BIGINT UNSIGNED NULL,
+            exported_at DATETIME NULL,
+            export_error TEXT NULL,
+
             notes TEXT NULL,
             created_by INT UNSIGNED NULL,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -492,11 +498,43 @@ function field_vehicle_receipt_expense_drafts_ensure_schema(): void
             UNIQUE KEY uniq_field_receipt_expense_draft_receipt (receipt_draft_id),
             INDEX idx_field_receipt_expense_vehicle (vehicle_id),
             INDEX idx_field_receipt_expense_status (expense_status),
-            INDEX idx_field_receipt_expense_date (expense_date)
+            INDEX idx_field_receipt_expense_date (expense_date),
+            INDEX idx_field_receipt_expense_accounting (accounting_expense_id)
         ) ENGINE=InnoDB
           DEFAULT CHARSET=utf8mb4
           COLLATE=utf8mb4_unicode_ci
     ");
+
+    $pdo = db();
+
+    $columns = [
+        'accounting_expense_id' => 'BIGINT UNSIGNED NULL',
+        'accounting_vendor_id' => 'BIGINT UNSIGNED NULL',
+        'accounting_expense_account_id' => 'BIGINT UNSIGNED NULL',
+        'exported_at' => 'DATETIME NULL',
+        'export_error' => 'TEXT NULL',
+    ];
+
+    foreach ($columns as $column => $definition) {
+        if (
+            function_exists('db_column_exists')
+            && !db_column_exists('field_receipt_expense_drafts', $column)
+        ) {
+            try {
+                $pdo->exec("
+                    ALTER TABLE field_receipt_expense_drafts
+                    ADD COLUMN {$column} {$definition}
+                ");
+            } catch (Throwable $e) {
+                error_log(
+                    'Unable to add field_receipt_expense_drafts.'
+                    . $column
+                    . ': '
+                    . $e->getMessage()
+                );
+            }
+        }
+    }
 }
 
 function field_vehicle_receipt_expense_drafts_by_receipt_ids(
@@ -1419,6 +1457,354 @@ function field_vehicle_update_expense_draft_status(
         'ok' => true,
         'expense_draft_id' => $expenseDraftId,
         'expense_status' => $expenseStatus,
+    ];
+}
+
+function field_vehicle_receipt_accounting_clean_vendor_name(mixed $vendor): string
+{
+    $name = trim((string)$vendor);
+    $name = str_replace('`', '', $name);
+    $name = preg_replace('/\s+/', ' ', $name) ?: '';
+
+    return trim($name);
+}
+
+function field_vehicle_receipt_find_or_create_accounting_vendor(
+    string $vendorName,
+    ?int $defaultExpenseAccountId = null
+): ?int {
+    if (!db_table_exists('vendor')) {
+        return null;
+    }
+
+    $vendorName = field_vehicle_receipt_accounting_clean_vendor_name($vendorName);
+
+    if ($vendorName === '') {
+        return null;
+    }
+
+    $st = db()->prepare("
+        SELECT vendor_id
+        FROM vendor
+        WHERE LOWER(vendor_name) = LOWER(?)
+        LIMIT 1
+    ");
+    $st->execute([$vendorName]);
+
+    $vendorId = (int)($st->fetchColumn() ?: 0);
+
+    if ($vendorId > 0) {
+        return $vendorId;
+    }
+
+    db()->prepare("
+        INSERT INTO vendor
+          (
+            vendor_code,
+            vendor_name,
+            default_expense_account_id,
+            notes,
+            is_active
+          )
+        VALUES
+          (NULL, ?, ?, ?, 1)
+    ")->execute([
+        $vendorName,
+        $defaultExpenseAccountId,
+        'Auto-created from Field Ops receipt expense draft.',
+    ]);
+
+    return (int)db()->lastInsertId();
+}
+
+function field_vehicle_receipt_accounting_expense_account_id(array $draft): ?int
+{
+    if (!function_exists('accounting_find_account_id_by_code')) {
+        require_once __DIR__ . '/accounting.php';
+    }
+
+    $haystack = strtoupper(
+        implode(' ', [
+            (string)($draft['vendor'] ?? ''),
+            (string)($draft['expense_category'] ?? ''),
+            (string)($draft['description'] ?? ''),
+            (string)($draft['notes'] ?? ''),
+        ])
+    );
+
+    $preferredCodes = [];
+
+    if (str_contains($haystack, 'INSURANCE') || str_contains($haystack, 'STATE FARM')) {
+        $preferredCodes[] = '5050';
+    }
+
+    if (str_contains($haystack, 'FUEL') || str_contains($haystack, 'MILEAGE')) {
+        $preferredCodes[] = '5030';
+    }
+
+    if (
+        str_contains($haystack, 'EQUIPMENT')
+        || str_contains($haystack, 'DASH CAM')
+        || str_contains($haystack, 'CAMERA')
+        || str_contains($haystack, 'MOUNT')
+    ) {
+        $preferredCodes[] = '5130';
+    }
+
+    if (
+        str_contains($haystack, 'PHONE')
+        || str_contains($haystack, 'VOICE')
+        || str_contains($haystack, 'MOBILE')
+    ) {
+        $preferredCodes[] = '5121';
+    }
+
+    $preferredCodes[] = '5000';
+
+    foreach (array_values(array_unique($preferredCodes)) as $code) {
+        $accountId = accounting_find_account_id_by_code($code);
+
+        if ($accountId !== null) {
+            return (int)$accountId;
+        }
+    }
+
+    if (function_exists('accounting_account_options')) {
+        $accounts = accounting_account_options(['EXPENSE']);
+
+        foreach ($accounts as $account) {
+            $accountId = (int)($account['account_id'] ?? 0);
+
+            if ($accountId > 0) {
+                return $accountId;
+            }
+        }
+    }
+
+    return null;
+}
+
+function field_vehicle_export_expense_draft_to_accounting(
+    int $expenseDraftId,
+    ?int $userId = null
+): array {
+    field_vehicle_receipt_expense_drafts_ensure_schema();
+
+    if (!function_exists('accounting_create_expense')) {
+        require_once __DIR__ . '/accounting.php';
+    }
+
+    $expenseDraftId = max(0, $expenseDraftId);
+
+    if ($expenseDraftId <= 0) {
+        return [
+            'ok' => false,
+            'errors' => ['Expense draft ID is required.'],
+        ];
+    }
+
+    $st = db()->prepare("
+        SELECT
+            e.*,
+            r.original_filename,
+            r.stored_filename,
+            r.mime_type,
+            r.file_size_bytes,
+            r.checksum_sha256,
+            r.onedrive_web_url AS source_receipt_web_url,
+            r.onedrive_item_id AS source_receipt_item_id
+        FROM field_receipt_expense_drafts e
+        INNER JOIN field_vehicle_receipt_drafts r
+            ON r.receipt_draft_id = e.receipt_draft_id
+        WHERE e.expense_draft_id = ?
+          AND e.deleted_at IS NULL
+          AND r.deleted_at IS NULL
+        LIMIT 1
+    ");
+    $st->execute([$expenseDraftId]);
+
+    $draft = $st->fetch(PDO::FETCH_ASSOC);
+
+    if (!is_array($draft)) {
+        return [
+            'ok' => false,
+            'errors' => ['Expense draft not found.'],
+        ];
+    }
+
+    $currentStatus = strtoupper(
+        trim((string)($draft['expense_status'] ?? 'DRAFT'))
+    ) ?: 'DRAFT';
+
+    if (!empty($draft['accounting_expense_id'])) {
+        return [
+            'ok' => true,
+            'already_exported' => true,
+            'expense_draft_id' => $expenseDraftId,
+            'accounting_expense_id' => (int)$draft['accounting_expense_id'],
+        ];
+    }
+
+    if ($currentStatus !== 'READY') {
+        return [
+            'ok' => false,
+            'errors' => ['Only READY expense drafts can be posted to accounting.'],
+        ];
+    }
+
+    $expenseAccountId = field_vehicle_receipt_accounting_expense_account_id($draft);
+
+    if (!$expenseAccountId) {
+        return [
+            'ok' => false,
+            'errors' => ['Unable to determine accounting expense account.'],
+        ];
+    }
+
+    $vendorId = field_vehicle_receipt_find_or_create_accounting_vendor(
+        (string)($draft['vendor'] ?? ''),
+        $expenseAccountId
+    );
+
+    $expenseDate = field_vehicle_nullable_date($draft['expense_date'] ?? null)
+        ?: date('Y-m-d');
+
+    $memoLines = [
+        trim((string)($draft['description'] ?? 'Field Ops receipt expense')),
+    ];
+
+    $notes = trim((string)($draft['notes'] ?? ''));
+
+    if ($notes !== '') {
+        $memoLines[] = $notes;
+    }
+
+    $memoLines[] = 'Source: Field Ops expense draft #' . $expenseDraftId;
+    $memoLines[] = 'Receipt draft #' . (int)($draft['receipt_draft_id'] ?? 0);
+
+    $create = accounting_create_expense(
+        [
+            'vendor_id' => $vendorId ?: 0,
+            'expense_date' => $expenseDate,
+            'posting_date' => $expenseDate,
+            'due_date' => '',
+            'reference_number' => 'FIELD-EXP-' . $expenseDraftId,
+            'status' => 'DRAFT',
+            'subtotal_amount' => (float)($draft['amount'] ?? 0),
+            'tax_amount' => 0,
+            'expense_account_id' => $expenseAccountId,
+            'payable_account_id' => 0,
+            'payment_account_id' => 0,
+            'memo' => trim(implode("\n\n", array_filter($memoLines))),
+            'payment_date' => '',
+        ],
+        (int)($userId ?? 0)
+    );
+
+    if (empty($create['ok'])) {
+        $errors = (array)($create['errors'] ?? ['Accounting expense create failed.']);
+
+        db()->prepare("
+            UPDATE field_receipt_expense_drafts
+            SET export_error = ?,
+                updated_at = NOW()
+            WHERE expense_draft_id = ?
+            LIMIT 1
+        ")->execute([
+            implode(' ', $errors),
+            $expenseDraftId,
+        ]);
+
+        return [
+            'ok' => false,
+            'errors' => $errors,
+        ];
+    }
+
+    $accountingExpenseId = (int)($create['expense_id'] ?? 0);
+
+    if ($accountingExpenseId <= 0) {
+        return [
+            'ok' => false,
+            'errors' => ['Accounting expense ID was not returned.'],
+        ];
+    }
+
+    if (
+        db_column_exists('expense', 'source_system')
+        && db_column_exists('expense', 'source_record_id')
+    ) {
+        db()->prepare("
+            UPDATE expense
+            SET source_system = 'FIELD_RECEIPT',
+                source_record_id = ?
+            WHERE expense_id = ?
+            LIMIT 1
+        ")->execute([
+            (string)$expenseDraftId,
+            $accountingExpenseId,
+        ]);
+    }
+
+    $receiptUrl = trim((string)(
+        $draft['receipt_onedrive_web_url']
+        ?: ($draft['source_receipt_web_url'] ?? '')
+    ));
+
+    $receiptItemId = trim((string)(
+        $draft['receipt_onedrive_item_id']
+        ?: ($draft['source_receipt_item_id'] ?? '')
+    ));
+
+    $fileName = trim((string)(
+        $draft['original_filename']
+        ?: ($draft['stored_filename'] ?? '')
+    ));
+
+    if ($fileName === '') {
+        $fileName = 'field-receipt-' . (int)($draft['receipt_draft_id'] ?? 0);
+    }
+
+    if ($receiptUrl !== '') {
+        accounting_add_expense_attachment(
+            $accountingExpenseId,
+            [
+                'provider' => 'ONEDRIVE',
+                'provider_file_id' => $receiptItemId,
+                'file_name' => $fileName,
+                'file_url' => $receiptUrl,
+                'mime_type' => $draft['mime_type'] ?? null,
+                'file_size' => $draft['file_size_bytes'] ?? null,
+                'checksum_sha256' => $draft['checksum_sha256'] ?? null,
+                'uploaded_by' => $userId,
+            ]
+        );
+    }
+
+    db()->prepare("
+        UPDATE field_receipt_expense_drafts
+        SET expense_status = 'EXPORTED',
+            accounting_expense_id = ?,
+            accounting_vendor_id = ?,
+            accounting_expense_account_id = ?,
+            exported_at = NOW(),
+            export_error = NULL,
+            updated_at = NOW()
+        WHERE expense_draft_id = ?
+        LIMIT 1
+    ")->execute([
+        $accountingExpenseId,
+        $vendorId,
+        $expenseAccountId,
+        $expenseDraftId,
+    ]);
+
+    return [
+        'ok' => true,
+        'expense_draft_id' => $expenseDraftId,
+        'accounting_expense_id' => $accountingExpenseId,
+        'accounting_vendor_id' => $vendorId,
+        'accounting_expense_account_id' => $expenseAccountId,
     ];
 }
 

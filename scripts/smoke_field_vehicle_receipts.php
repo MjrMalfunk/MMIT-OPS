@@ -27,6 +27,10 @@ field_vehicles_ensure_schema();
 field_vehicle_receipts_ensure_schema();
 field_vehicle_receipt_expense_drafts_ensure_schema();
 
+if (!function_exists('accounting_create_expense')) {
+    require_once __DIR__ . '/../inc/accounting.php';
+}
+
 smoke_ok(db_table_exists('field_vehicle_receipt_drafts'), 'field_vehicle_receipt_drafts exists');
 smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'onedrive_web_url'), 'receipt draft OneDrive URL column exists');
 smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'parse_status'), 'receipt draft parse status column exists');
@@ -35,6 +39,8 @@ smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'route_status'), 'rece
 smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'routed_at'), 'receipt draft routed timestamp column exists');
 smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'route_notes'), 'receipt draft route notes column exists');
 smoke_ok(db_table_exists('field_receipt_expense_drafts'), 'receipt expense draft table exists');
+smoke_ok(db_column_exists('field_receipt_expense_drafts', 'accounting_expense_id'), 'expense draft accounting expense id column exists');
+smoke_ok(db_column_exists('field_receipt_expense_drafts', 'exported_at'), 'expense draft exported timestamp column exists');
 
 $categories = field_vehicle_receipt_categories();
 smoke_ok(isset($categories['TOOLS']), 'receipt categories include tools');
@@ -252,6 +258,82 @@ $badStatusUpdate = field_vehicle_update_expense_draft_status(
     null
 );
 smoke_ok(empty($badStatusUpdate['ok']), 'invalid expense draft status is rejected');
+
+$pdo->prepare("
+    INSERT INTO field_vehicle_receipt_drafts (
+        vehicle_id,
+        receipt_status,
+        receipt_category,
+        receipt_date,
+        vendor,
+        amount,
+        original_filename,
+        stored_filename,
+        storage_path,
+        mime_type,
+        file_size_bytes,
+        upload_status,
+        route_target,
+        route_status,
+        notes
+    ) VALUES (?, 'REVIEWED', 'BUSINESS_EXPENSE', ?, ?, 12.34, 'export.pdf', 'export.pdf', ?, 'application/pdf', 100, 'LOCAL_ONLY', 'BUSINESS_EXPENSE', 'REVIEWED', 'Smoke export receipt')
+")->execute([
+    $vehicleId,
+    date('Y-m-d'),
+    'Smoke Export Vendor ' . date('YmdHis'),
+    __FILE__,
+]);
+
+$exportReceiptId = (int)$pdo->lastInsertId();
+$exportDraft = field_vehicle_create_expense_draft_from_receipt($exportReceiptId, null);
+smoke_ok(!empty($exportDraft['ok']), 'export smoke expense draft can be created');
+
+field_vehicle_update_expense_draft_status(
+    (int)$exportDraft['expense_draft_id'],
+    'READY',
+    'Smoke export ready'
+);
+
+$exportResult = field_vehicle_export_expense_draft_to_accounting(
+    (int)$exportDraft['expense_draft_id'],
+    null
+);
+smoke_ok(!empty($exportResult['ok']), 'ready expense draft exports to accounting');
+smoke_ok((int)($exportResult['accounting_expense_id'] ?? 0) > 0, 'export returns accounting expense id');
+
+$exportedDraftRow = db()->prepare("
+    SELECT *
+    FROM field_receipt_expense_drafts
+    WHERE expense_draft_id = ?
+    LIMIT 1
+");
+$exportedDraftRow->execute([(int)$exportDraft['expense_draft_id']]);
+$exportedDraft = $exportedDraftRow->fetch(PDO::FETCH_ASSOC) ?: [];
+smoke_ok((string)($exportedDraft['expense_status'] ?? '') === 'EXPORTED', 'export marks expense draft exported');
+
+$exportAgain = field_vehicle_export_expense_draft_to_accounting(
+    (int)$exportDraft['expense_draft_id'],
+    null
+);
+smoke_ok(!empty($exportAgain['already_exported']), 'expense draft export is idempotent');
+
+$accountingExpenseId = (int)($exportResult['accounting_expense_id'] ?? 0);
+
+if ($accountingExpenseId > 0) {
+    db()->prepare("DELETE FROM expense_attachment WHERE expense_id = ?")
+        ->execute([$accountingExpenseId]);
+
+    db()->prepare("DELETE FROM expense WHERE expense_id = ?")
+        ->execute([$accountingExpenseId]);
+}
+
+if (!empty($exportResult['accounting_vendor_id'])) {
+    db()->prepare("
+        DELETE FROM vendor
+        WHERE vendor_id = ?
+          AND vendor_name LIKE 'Smoke Export Vendor %'
+    ")->execute([(int)$exportResult['accounting_vendor_id']]);
+}
 
 $summary = field_vehicle_receipt_route_summary($vehicleId);
 smoke_ok((int)$summary['total'] >= 2, 'route summary counts receipt drafts');
