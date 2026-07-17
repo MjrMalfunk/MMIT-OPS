@@ -3159,6 +3159,79 @@ function field_ops_fn_clean_text(string $text): string
     return trim($text);
 }
 
+function field_ops_fn_work_order_url(
+    ?string $workOrderNumber,
+    string $text = ''
+): ?string {
+    $number = trim((string)$workOrderNumber);
+
+    if (!preg_match('/^[0-9]{5,}$/', $number)) {
+        if (!preg_match(
+            '~(?:https?://app\.fieldnation\.com)?/workorders/([0-9]{5,})\b~i',
+            $text,
+            $match
+        )) {
+            return null;
+        }
+
+        $number = $match[1];
+    }
+
+    return 'https://app.fieldnation.com/workorders/' . $number;
+}
+
+function field_ops_fn_email_snapshot(
+    string $body,
+    int $limit = 1800
+): string {
+    $text = field_ops_fn_clean_text($body);
+
+    if ($text === '') {
+        return '';
+    }
+
+    // Remove image, tracking, profile, unsubscribe, and deep-link debris.
+    $text = preg_replace(
+        '~<?https?://[^\s<>]+>?~i',
+        '',
+        $text
+    ) ?? $text;
+
+    $lines = preg_split('/\R+/', $text) ?: [];
+    $cleanLines = [];
+
+    foreach ($lines as $line) {
+        $line = preg_replace('/\s{2,}/', ' ', trim($line)) ?? trim($line);
+        $line = trim($line, " \t\n\r\0\x0B<>");
+
+        if ($line === '') {
+            continue;
+        }
+
+        if (preg_match(
+            '/^(View Work Order|View Message|View Profile|Unsubscribe|'
+            . 'Manage notification settings)$/i',
+            $line
+        )) {
+            continue;
+        }
+
+        if (preg_match('/^[+\-=*_]{5,}$/', $line)) {
+            continue;
+        }
+
+        $cleanLines[] = $line;
+    }
+
+    $snapshot = trim(implode("\n", $cleanLines));
+
+    if ($snapshot === '') {
+        return '';
+    }
+
+    return substr($snapshot, 0, max(100, min(5000, $limit)));
+}
+
 function field_ops_fn_sender_email(string $sender): string
 {
     if (preg_match('/<([^>]+)>/', $sender, $m)) {
@@ -3307,8 +3380,13 @@ function field_ops_parse_fieldnation_email(string $subject, string $bodyText, st
         $parsed['confidence'] += 18;
     }
 
-    if (preg_match('/https?:\/\/[^\s"\']*fieldnation[^\s"\']*/i', $haystack, $m)) {
-        $parsed['url'] = $m[0];
+    $canonicalUrl = field_ops_fn_work_order_url(
+        $parsed['work_order_number'],
+        $haystack
+    );
+
+    if ($canonicalUrl !== null) {
+        $parsed['url'] = $canonicalUrl;
         $parsed['confidence'] += 6;
     }
 
@@ -3608,8 +3686,15 @@ function field_ops_refine_fieldnation_parsed_from_body(array $parsed, string $su
         }
     }
 
-    if (empty($parsed['url']) && preg_match('~https://app\.fieldnation\.com/workorders/[0-9]{5,}[^\s>]*~i', $text, $m)) {
-        $parsed['url'] = $m[0];
+    // The parsed W/O number is authoritative. Always replace image,
+    // tracking, profile, or other incidental FieldNation links.
+    $canonicalUrl = field_ops_fn_work_order_url(
+        $parsed['work_order_number'] ?? null,
+        $text
+    );
+
+    if ($canonicalUrl !== null) {
+        $parsed['url'] = $canonicalUrl;
     }
 
     // Real FN email title is usually the first meaningful non-link line.
@@ -3879,7 +3964,13 @@ function field_ops_apply_email_event_to_opportunity(int $eventId): array
     $notes = 'Created/updated from FN email event #' . $eventId . '. Parsed status: ' . $status . '.';
 
     if (!empty($event['body_text'])) {
-        $notes .= "\n\n--- Email body snapshot ---\n" . substr((string)$event['body_text'], 0, 1800);
+        $snapshot = field_ops_fn_email_snapshot(
+            (string)$event['body_text']
+        );
+
+        if ($snapshot !== '') {
+            $notes .= "\n\n--- Email body snapshot ---\n" . $snapshot;
+        }
     }
 
     $existing = $woNumber !== '' ? field_ops_find_opportunity_by_external_number($woNumber) : null;
@@ -4350,7 +4441,13 @@ function field_ops_apply_assigned_email_event_to_work_order(int $eventId): array
     ];
 
     if (!empty($event['body_text'])) {
-        $notes[] = "\n--- Email body snapshot ---\n" . substr((string)$event['body_text'], 0, 1800);
+        $snapshot = field_ops_fn_email_snapshot(
+            (string)$event['body_text']
+        );
+
+        if ($snapshot !== '') {
+            $notes[] = "\n--- Email body snapshot ---\n" . $snapshot;
+        }
     }
 
     $grossPay = max(

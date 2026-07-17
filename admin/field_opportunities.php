@@ -639,19 +639,36 @@ OLD,
                     <?php endif; ?>
                   </div>
 
+                  <?php
+                    $fieldNationUrl = field_ops_fn_work_order_url(
+                        (string)($op['external_work_order_number'] ?? ''),
+                        (string)($op['source_url'] ?? '')
+                    );
+                  ?>
                   <div class="detail-item full">
-                    <strong>Source URL</strong>
-                    <?php if (!empty($op['source_url'])): ?>
-                      <a href="<?= $h((string)$op['source_url']) ?>" target="_blank" rel="noopener noreferrer"><?= $h((string)$op['source_url']) ?></a>
+                    <strong>FieldNation</strong>
+                    <?php if ($fieldNationUrl !== null): ?>
+                      <a
+                        class="btn"
+                        href="<?= $h($fieldNationUrl) ?>"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >Open on FieldNation</a>
                     <?php else: ?>
-                      <span class="muted">No FieldNation URL captured.</span>
+                      <span class="muted">No FieldNation W/O link captured.</span>
                     <?php endif; ?>
                   </div>
 
+                  <?php
+                    $displayNotes = field_ops_fn_email_snapshot(
+                        (string)($op['notes'] ?? ''),
+                        5000
+                    );
+                  ?>
                   <div class="detail-item full">
                     <strong>Notes</strong>
-                    <?php if (trim((string)($op['notes'] ?? '')) !== ''): ?>
-                      <div class="detail-notes"><?= $h((string)$op['notes']) ?></div>
+                    <?php if ($displayNotes !== ''): ?>
+                      <div class="detail-notes"><?= $h($displayNotes) ?></div>
                     <?php else: ?>
                       <span class="muted">No notes captured yet.</span>
                     <?php endif; ?>
