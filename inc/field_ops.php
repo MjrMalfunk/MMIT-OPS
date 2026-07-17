@@ -3173,25 +3173,93 @@ function field_ops_apply_email_event_to_opportunity(int $eventId): array
     return ['ok' => true, 'opportunity_id' => $opportunityId];
 }
 
-function field_ops_opportunities(int $limit = 200): array
+function field_ops_opportunities(int $limit = 200, array $options = []): array
 {
     field_ops_ensure_opportunity_schema();
 
     $limit = max(1, min(500, $limit));
+    $query = trim((string)($options['q'] ?? ''));
+    $sort = strtolower(trim((string)($options['sort'] ?? 'date')));
 
-    return db()->query("
+    if (!in_array($sort, ['date', 'score'], true)) {
+        $sort = 'date';
+    }
+
+    $sql = "
         SELECT o.*, wo.title AS promoted_work_order_title
         FROM field_opportunities o
         LEFT JOIN field_work_orders wo ON wo.work_order_id = o.promoted_work_order_id
         WHERE o.ignored_at IS NULL
           AND o.promoted_work_order_id IS NULL
           AND o.status IN ('AVAILABLE', 'ROUTED', 'WATCHING')
+    ";
+
+    $params = [];
+
+    if ($query !== '') {
+        $sql .= "
+          AND (
+               o.external_work_order_number LIKE ?
+            OR o.title LIKE ?
+            OR o.buyer_name_snapshot LIKE ?
+            OR o.city LIKE ?
+            OR o.state LIKE ?
+            OR o.zip LIKE ?
+          )
+        ";
+
+        $searchValue = '%' . $query . '%';
+        $params = array_fill(0, 6, $searchValue);
+    }
+
+    $exactMatchOrder = '';
+
+    if ($query !== '') {
+        $exactMatchOrder = "
+          CASE WHEN o.external_work_order_number = ? THEN 0 ELSE 1 END,
+        ";
+        $params[] = $query;
+    }
+
+    if ($sort === 'score') {
+        $sql .= "
         ORDER BY
+          {$exactMatchOrder}
           CASE WHEN o.status = 'ROUTED' THEN 0 ELSE 1 END,
           o.score DESC,
-          COALESCE(o.scheduled_start_at, o.created_at) ASC
-        LIMIT {$limit}
-    ")->fetchAll(PDO::FETCH_ASSOC) ?: [];
+          CASE WHEN o.scheduled_start_at IS NULL THEN 1 ELSE 0 END,
+          o.scheduled_start_at ASC,
+          o.created_at DESC,
+          o.opportunity_id DESC
+        ";
+    } else {
+        $sql .= "
+        ORDER BY
+          {$exactMatchOrder}
+          CASE
+            WHEN o.scheduled_start_at >= CURRENT_DATE THEN 0
+            WHEN o.scheduled_start_at IS NULL THEN 2
+            ELSE 1
+          END,
+          CASE
+            WHEN o.scheduled_start_at >= CURRENT_DATE
+            THEN o.scheduled_start_at
+          END ASC,
+          CASE
+            WHEN o.scheduled_start_at < CURRENT_DATE
+            THEN o.scheduled_start_at
+          END DESC,
+          o.created_at DESC,
+          o.opportunity_id DESC
+        ";
+    }
+
+    $sql .= " LIMIT {$limit}";
+
+    $statement = db()->prepare($sql);
+    $statement->execute($params);
+
+    return $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
 }
 
 function field_ops_find_opportunity(int $opportunityId): ?array

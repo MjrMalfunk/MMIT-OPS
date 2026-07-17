@@ -61,7 +61,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         };
         }
 
-        header('Location: ' . BASE_URL . '/admin/field_opportunities.php');
+        $returnParams = [];
+
+        $returnQuery = substr(trim((string)($_GET['q'] ?? '')), 0, 120);
+        $returnSort = strtolower((string)($_GET['sort'] ?? 'date'));
+        $returnOpportunityFilter = strtolower((string)($_GET['opportunity_filter'] ?? 'all'));
+        $returnEventFilter = strtolower((string)($_GET['event_filter'] ?? 'all'));
+
+        if ($returnQuery !== '') {
+            $returnParams['q'] = $returnQuery;
+        }
+
+        if (in_array($returnSort, ['date', 'score'], true)) {
+            $returnParams['sort'] = $returnSort;
+        }
+
+        if ($returnOpportunityFilter !== '') {
+            $returnParams['opportunity_filter'] = $returnOpportunityFilter;
+        }
+
+        if ($returnEventFilter !== '') {
+            $returnParams['event_filter'] = $returnEventFilter;
+        }
+
+        $returnAnchor = match ($action) {
+            'promote_opportunity',
+            'ignore_opportunity',
+            'watch_opportunity',
+            'unwatch_opportunity' => '#opportunity-board-filters',
+
+            'apply_email_event',
+            'apply_assigned_email_event',
+            'apply_declined_email_event' => '#email-event-filters',
+
+            default => '',
+        };
+
+        $returnUrl = BASE_URL . '/admin/field_opportunities.php';
+
+        if ($returnParams) {
+            $returnUrl .= '?' . http_build_query($returnParams);
+        }
+
+        header('Location: ' . $returnUrl . $returnAnchor);
         exit;
     }
 
@@ -73,9 +115,19 @@ if (!empty($_SESSION['flash_msg'])) {
     unset($_SESSION['flash_msg']);
 }
 
+$searchQuery = substr(trim((string)($_GET['q'] ?? '')), 0, 120);
+$opportunitySort = strtolower((string)($_GET['sort'] ?? 'date'));
+
+if (!in_array($opportunitySort, ['date', 'score'], true)) {
+    $opportunitySort = 'date';
+}
+
 $summary = field_ops_opportunity_summary();
 $allEvents = field_ops_email_events(80);
-$allOpportunities = field_ops_opportunities(200);
+$allOpportunities = field_ops_opportunities(200, [
+    'q' => $searchQuery,
+    'sort' => $opportunitySort,
+]);
 
 $opportunityFilters = [
     'all' => 'All',
@@ -107,7 +159,7 @@ $opportunities = array_values(array_filter($allOpportunities, static function (a
 }));
 
 $opportunityCount = count($opportunities);
-$totalOpportunityCount = count($allOpportunities);
+$totalOpportunityCount = (int)($summary['total'] ?? count($allOpportunities));
 
 $eventFilters = [
     'all' => 'All',
@@ -223,6 +275,34 @@ $now = date('Y-m-d H:i');
     .score { font-size:22px; font-weight:950; }
     .actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
     .filter-bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:10px 0 14px; }
+    .board-tools {
+      display:grid;
+      grid-template-columns:minmax(220px,1fr) minmax(150px,220px) auto auto;
+      gap:10px;
+      align-items:end;
+      margin:14px 0;
+    }
+    .board-tools .btn { min-height:43px; }
+    .search-match td { background:rgba(34,197,94,.10); }
+    .search-match td:first-child { box-shadow:inset 4px 0 0 #22c55e; }
+OLD,
+    'Search styling'
+);
+
+$page = $replaceOnce(
+    $page,
+    <<<'OLD'
+    @media (max-width:1000px) { .stats,.two,.form-grid { grid-template-columns:1fr; } .full { grid-column:auto; } }
+OLD,
+    <<<'NEW'
+    @media (max-width:1000px) {
+      .stats,.two,.form-grid { grid-template-columns:1fr; }
+      .board-tools { grid-template-columns:1fr 1fr; }
+      .full { grid-column:auto; }
+    }
+    @media (max-width:620px) {
+      .board-tools { grid-template-columns:1fr; }
+    }
     .filter-pill { display:inline-flex; align-items:center; justify-content:center; min-height:34px; padding:7px 12px; border-radius:999px; border:1px solid rgba(147,197,253,.28); color:#bfdbfe; background:rgba(15,23,42,.42); text-decoration:none; font-weight:950; font-size:13px; }
     .filter-pill.active { color:white; border-color:rgba(96,165,250,.7); background:linear-gradient(135deg,rgba(37,99,235,.84),rgba(96,165,250,.7)); }
     #opportunity-board-filters,
@@ -334,13 +414,56 @@ $now = date('Y-m-d H:i');
     <h2>Opportunity board</h2>
     <p class="muted" style="margin-top:-4px;">
       Showing <?= (int)$opportunityCount ?> of <?= (int)$totalOpportunityCount ?> active opportunities.
+      <?php if ($searchQuery !== ''): ?>
+        Search: <strong><?= $h($searchQuery) ?></strong>.
+      <?php endif; ?>
     </p>
+
+    <form method="get" class="board-tools" role="search">
+      <input type="hidden" name="opportunity_filter" value="<?= $h($opportunityFilter) ?>">
+      <input type="hidden" name="event_filter" value="<?= $h($eventFilter) ?>">
+
+      <label>
+        Find W/O or opportunity
+        <input
+          type="search"
+          name="q"
+          value="<?= $h($searchQuery) ?>"
+          placeholder="W/O #, buyer, title, city, state"
+          autocomplete="off"
+        >
+      </label>
+
+      <label>
+        Sort opportunities
+        <select name="sort">
+          <option value="date" <?= $opportunitySort === 'date' ? 'selected' : '' ?>>Job date</option>
+          <option value="score" <?= $opportunitySort === 'score' ? 'selected' : '' ?>>Score</option>
+        </select>
+      </label>
+
+      <button class="btn btn-primary" type="submit">Search</button>
+
+      <a
+        class="btn"
+        href="<?= $h(BASE_URL . '/admin/field_opportunities.php?' . http_build_query([
+            'sort' => 'date',
+            'opportunity_filter' => $opportunityFilter,
+            'event_filter' => $eventFilter,
+        ])) ?>#opportunity-board-filters"
+      >Clear</a>
+    </form>
 
     <nav id="opportunity-board-filters" class="filter-bar" aria-label="Opportunity board filters">
       <?php foreach ($opportunityFilters as $filterKey => $filterLabel): ?>
         <a
           class="filter-pill <?= $opportunityFilter === $filterKey ? 'active' : '' ?>"
-          href="<?= $h(BASE_URL) ?>/admin/field_opportunities.php?opportunity_filter=<?= $h($filterKey) ?>&amp;event_filter=<?= $h($eventFilter) ?>#opportunity-board-filters"
+          href="<?= $h(BASE_URL . '/admin/field_opportunities.php?' . http_build_query([
+              'q' => $searchQuery,
+              'sort' => $opportunitySort,
+              'opportunity_filter' => $filterKey,
+              'event_filter' => $eventFilter,
+          ])) ?>#opportunity-board-filters"
           aria-current="<?= $opportunityFilter === $filterKey ? 'page' : 'false' ?>"
         ><?= $h($filterLabel) ?></a>
       <?php endforeach; ?>
@@ -365,7 +488,9 @@ $now = date('Y-m-d H:i');
         <?php if (!$opportunities): ?>
           <tr>
             <td colspan="9" class="muted">
-              <?php if ($totalOpportunityCount > 0): ?>
+              <?php if ($searchQuery !== ''): ?>
+                No active opportunities match “<?= $h($searchQuery) ?>”.
+              <?php elseif ($totalOpportunityCount > 0): ?>
                 No opportunities match the <?= $h($opportunityFilters[$opportunityFilter] ?? 'selected') ?> filter.
               <?php else: ?>
                 No opportunities yet. Import from the FN mailbox or paste a routed/new-work email above.
@@ -384,8 +509,13 @@ $now = date('Y-m-d H:i');
               'REQUESTED' => 'badge-requested',
               default => '',
           };
+          $isExactSearchMatch = $searchQuery !== ''
+              && strcasecmp(
+                  trim((string)($op['external_work_order_number'] ?? '')),
+                  $searchQuery
+              ) === 0;
         ?>
-          <tr>
+          <tr class="<?= $isExactSearchMatch ? 'search-match' : '' ?>">
             <td><span class="score <?= $h($scoreClass) ?>"><?= $score ?></span></td>
             <td>
               <strong><?= $h($op['recommendation']) ?></strong>
@@ -595,7 +725,12 @@ $now = date('Y-m-d H:i');
       <?php foreach ($eventFilters as $filterKey => $filterLabel): ?>
         <a
           class="filter-pill <?= $eventFilter === $filterKey ? 'active' : '' ?>"
-          href="<?= $h(BASE_URL) ?>/admin/field_opportunities.php?opportunity_filter=<?= $h($opportunityFilter) ?>&amp;event_filter=<?= $h($filterKey) ?>#email-event-filters"
+          href="<?= $h(BASE_URL . '/admin/field_opportunities.php?' . http_build_query([
+              'q' => $searchQuery,
+              'sort' => $opportunitySort,
+              'opportunity_filter' => $opportunityFilter,
+              'event_filter' => $filterKey,
+          ])) ?>#email-event-filters"
           aria-current="<?= $eventFilter === $filterKey ? 'page' : 'false' ?>"
         ><?= $h($filterLabel) ?></a>
       <?php endforeach; ?>
