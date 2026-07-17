@@ -40,7 +40,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             default => 'Saved.',
         };
 
-        header('Location: ' . BASE_URL . '/admin/field_ops.php');
+        $returnParams = [];
+        $returnQuery = substr(trim((string)($_GET['q'] ?? '')), 0, 120);
+        $returnFilter = strtolower((string)($_GET['work_order_filter'] ?? 'all'));
+
+        if ($returnQuery !== '') {
+            $returnParams['q'] = $returnQuery;
+        }
+
+        if ($returnFilter !== '') {
+            $returnParams['work_order_filter'] = $returnFilter;
+        }
+
+        $returnUrl = BASE_URL . '/admin/field_ops.php';
+
+        if ($returnParams) {
+            $returnUrl .= '?' . http_build_query($returnParams);
+        }
+
+        $returnAnchor = in_array(
+            $action,
+            ['save_work_order', 'discard_work_order'],
+            true
+        ) ? '#work-order-filters' : '';
+
+        header('Location: ' . $returnUrl . $returnAnchor);
         exit;
     }
 
@@ -52,10 +76,14 @@ if (!empty($_SESSION['flash_msg'])) {
     unset($_SESSION['flash_msg']);
 }
 
+$workOrderSearch = substr(trim((string)($_GET['q'] ?? '')), 0, 120);
+
 $summary = field_ops_summary();
 $buyers = field_ops_buyers();
 $items = field_ops_inventory_items();
-$allWorkOrders = field_ops_work_orders(100);
+$allWorkOrders = field_ops_work_orders(100, [
+    'q' => $workOrderSearch,
+]);
 
 $workOrderFilters = [
     'all' => 'All',
@@ -252,7 +280,10 @@ usort($workOrders, static function (array $leftWo, array $rightWo) use ($workOrd
 });
 
 $workOrderCount = count($workOrders);
-$totalWorkOrderCount = count($allWorkOrders);
+$totalWorkOrderCount = (int)(
+    $summary['total_work_orders']
+    ?? count($allWorkOrders)
+);
 
 $scheduleIntelligence = [
     'today' => 0,
@@ -736,6 +767,18 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
       font-weight: 850;
     }
     .filter-bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:10px 0 14px; }
+    .work-order-search {
+      display:grid;
+      grid-template-columns:minmax(260px,1fr) auto auto;
+      gap:10px;
+      align-items:end;
+      margin:14px 0;
+    }
+    .work-order-search .btn { min-height:43px; }
+    .work-order-search-match td { background:rgba(34,197,94,.10); }
+    .work-order-search-match td:first-child {
+      box-shadow:inset 4px 0 0 #22c55e;
+    }
     .filter-pill { display:inline-flex; align-items:center; justify-content:center; min-height:34px; padding:7px 12px; border-radius:999px; border:1px solid rgba(147,197,253,.28); color:#bfdbfe; background:rgba(15,23,42,.42); text-decoration:none; font-weight:950; font-size:13px; }
     .filter-pill.active { color:white; border-color:rgba(96,165,250,.7); background:linear-gradient(135deg,rgba(37,99,235,.84),rgba(96,165,250,.7)); }
     .filter-count {
@@ -757,6 +800,7 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
       .attention-grid,
       .receivable-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .forms, .form-grid { grid-template-columns: 1fr; }
+      .work-order-search { grid-template-columns:1fr auto auto; }
       .full { grid-column: auto; }
     }
     @media (max-width: 620px) {
@@ -764,6 +808,7 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
       .attention-grid,
       .receivable-grid { grid-template-columns: 1fr; }
       .topbar { align-items: flex-start; flex-direction: column; }
+      .work-order-search { grid-template-columns:1fr; }
     }
   
     /* Final native dropdown readability override */
@@ -1123,13 +1168,41 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
     <h2>Work orders</h2>
     <p class="muted" style="margin-top:-4px;">
       Showing <?= (int)$workOrderCount ?> of <?= (int)$totalWorkOrderCount ?> non-discarded work orders.
+      <?php if ($workOrderSearch !== ''): ?>
+        Search: <strong><?= $h($workOrderSearch) ?></strong>.
+      <?php endif; ?>
     </p>
+
+    <form method="get" class="work-order-search" role="search">
+      <input type="hidden" name="work_order_filter" value="all">
+
+      <label>
+        Find work order
+        <input
+          type="search"
+          name="q"
+          value="<?= $h($workOrderSearch) ?>"
+          placeholder="W/O #, buyer, title, site, city, state"
+          autocomplete="off"
+        >
+      </label>
+
+      <button class="btn btn-primary" type="submit">Search W/O</button>
+
+      <a
+        class="btn"
+        href="<?= $h(BASE_URL) ?>/admin/field_ops.php?work_order_filter=all#work-order-filters"
+      >Clear</a>
+    </form>
 
     <nav id="work-order-filters" class="filter-bar" aria-label="Work order filters">
       <?php foreach ($workOrderFilters as $filterKey => $filterLabel): ?>
         <a
           class="filter-pill <?= $workOrderFilter === $filterKey ? 'active' : '' ?>"
-          href="<?= $h(BASE_URL) ?>/admin/field_ops.php?work_order_filter=<?= $h($filterKey) ?>#work-order-filters"
+          href="<?= $h(BASE_URL . '/admin/field_ops.php?' . http_build_query([
+              'q' => $workOrderSearch,
+              'work_order_filter' => $filterKey,
+          ])) ?>#work-order-filters"
           aria-current="<?= $workOrderFilter === $filterKey ? 'page' : 'false' ?>"
         >
           <?= $h($filterLabel) ?>
@@ -1160,7 +1233,9 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
         <?php if (!$workOrders): ?>
           <tr>
             <td colspan="10" class="muted">
-              <?php if ($totalWorkOrderCount > 0): ?>
+              <?php if ($workOrderSearch !== ''): ?>
+                No real work orders match “<?= $h($workOrderSearch) ?>”.
+              <?php elseif ($totalWorkOrderCount > 0): ?>
                 No work orders match the <?= $h($workOrderFilters[$workOrderFilter] ?? 'selected') ?> filter.
               <?php else: ?>
                 No field work orders yet.
@@ -1238,8 +1313,13 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
               }
           }
 
+          $isExactWorkOrderMatch = $workOrderSearch !== ''
+              && strcasecmp(
+                  trim((string)($wo['external_work_order_number'] ?? '')),
+                  $workOrderSearch
+              ) === 0;
         ?>
-          <tr>
+          <tr class="<?= $isExactWorkOrderMatch ? 'work-order-search-match' : '' ?>">
             <td>
               <span class="badge <?= $h($workStatusClass) ?>">
                 <?= $h(str_replace('_', ' ', $workStatus)) ?>

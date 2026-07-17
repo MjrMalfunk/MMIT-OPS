@@ -624,11 +624,12 @@ function field_ops_inventory_items(bool $activeOnly = true): array
     return db()->query($sql)->fetchAll(PDO::FETCH_ASSOC) ?: [];
 }
 
-function field_ops_work_orders(int $limit = 100): array
+function field_ops_work_orders(int $limit = 100, array $options = []): array
 {
     field_ops_ensure_schema();
 
     $limit = max(1, min(500, $limit));
+    $query = trim((string)($options['q'] ?? ''));
 
     $sql = "
         SELECT wo.*,
@@ -655,11 +656,49 @@ function field_ops_work_orders(int $limit = 100): array
             GROUP BY work_order_id
         ) exp ON exp.work_order_id = wo.work_order_id
         WHERE wo.deleted_at IS NULL
-        ORDER BY COALESCE(wo.scheduled_start_at, wo.created_at) DESC, wo.work_order_id DESC
-        LIMIT {$limit}
     ";
 
-    return db()->query($sql)->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    $params = [];
+
+    if ($query !== '') {
+        $sql .= "
+          AND (
+               wo.external_work_order_number LIKE ?
+            OR wo.title LIKE ?
+            OR b.buyer_name LIKE ?
+            OR wo.site_name LIKE ?
+            OR wo.site_address LIKE ?
+            OR wo.city LIKE ?
+            OR wo.state LIKE ?
+            OR wo.platform LIKE ?
+          )
+        ";
+
+        $searchValue = '%' . $query . '%';
+        $params = array_fill(0, 8, $searchValue);
+
+        $sql .= "
+        ORDER BY
+          CASE WHEN wo.external_work_order_number = ? THEN 0 ELSE 1 END,
+          COALESCE(wo.scheduled_start_at, wo.created_at) DESC,
+          wo.work_order_id DESC
+        ";
+
+        $params[] = $query;
+    } else {
+        $sql .= "
+        ORDER BY
+          COALESCE(wo.scheduled_start_at, wo.created_at) DESC,
+          wo.work_order_id DESC
+        ";
+    }
+
+    $sql .= " LIMIT {$limit}";
+
+    $statement = db()->prepare($sql);
+    $statement->execute($params);
+
+    return $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
 }
 
 function field_ops_discarded_work_orders(int $limit = 10): array
