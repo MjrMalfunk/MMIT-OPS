@@ -42,6 +42,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $result = field_ops_add_time_entry($_POST);
     } elseif ($action === 'update_state') {
         $result = field_ops_update_work_order_state($_POST);
+    } elseif ($action === 'create_pay_change') {
+        $result = field_ops_create_pay_change(
+            $_POST,
+            (int)((current_user()['user_id'] ?? 0))
+        );
+    } elseif ($action === 'resolve_pay_change') {
+        $result = field_ops_resolve_pay_change(
+            $_POST,
+            (int)((current_user()['user_id'] ?? 0))
+        );
     } elseif ($action === 'create_invoice') {
         $result = field_ops_create_draft_invoice_from_work_order($_POST, (int)((current_user()['user_id'] ?? 0)));
     } elseif ($action === 'upload_attachment') {
@@ -62,6 +72,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'add_expense' => 'Expense added.',
             'add_time' => 'Time entry added.',
             'update_state' => 'Work order updated.',
+            'create_pay_change' => 'Pay-change request recorded.',
+            'resolve_pay_change' => 'Pay-change request resolved.',
             'create_invoice' => 'Draft invoice created from W/O.',
             'upload_attachment' => 'Attachment uploaded.',
             'delete_attachment' => 'Attachment removed.',
@@ -92,6 +104,8 @@ $wo = field_ops_find_work_order($workOrderId);
 $materials = field_ops_work_order_materials($workOrderId);
 $expenses = field_ops_work_order_expenses($workOrderId);
 $timeEntries = field_ops_work_order_time_entries($workOrderId);
+$payChanges = field_ops_work_order_pay_changes($workOrderId);
+$pendingPayChange = field_ops_pending_pay_change($workOrderId);
 $items = field_ops_inventory_items();
 $totals = field_ops_work_order_totals($workOrderId);
 $attachments = field_ops_work_order_attachments($workOrderId);
@@ -265,7 +279,61 @@ $receivableStateClass = match ($receivableState) {
     .muted { color:var(--muted); }
     .field-hint { color:var(--muted); font-size:11px; margin-top:-4px; }
     .actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-    @media (max-width:1000px) { .stats,.two,.form-grid { grid-template-columns:1fr; } .full { grid-column:auto; } }
+
+    .pay-change-card {
+      margin:0 0 18px;
+      border-top:3px solid rgba(250,204,21,.84);
+    }
+
+    .pay-change-card-clear {
+      border-top-color:rgba(96,165,250,.82);
+    }
+
+    .pay-change-summary {
+      display:grid;
+      grid-template-columns:repeat(3,minmax(0,1fr));
+      gap:12px;
+      margin:14px 0;
+    }
+
+    .pay-change-metric {
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:12px;
+      background:rgba(0,0,0,.18);
+    }
+
+    .pay-change-metric strong {
+      display:block;
+      margin-top:4px;
+      font-size:22px;
+    }
+
+    .pay-change-notice {
+      border:1px solid rgba(250,204,21,.34);
+      border-radius:14px;
+      padding:12px 14px;
+      color:var(--yellow);
+      background:rgba(250,204,21,.09);
+    }
+
+    .pay-change-history {
+      margin-top:18px;
+      padding-top:18px;
+      border-top:1px solid var(--line);
+    }
+
+    .pay-change-status-pending { color:var(--yellow); }
+    .pay-change-status-approved { color:var(--green); }
+    .pay-change-status-partially-approved { color:#bfdbfe; }
+    .pay-change-status-denied { color:var(--red); }
+
+    @media (max-width:1000px) {
+      .stats,.two,.form-grid,.pay-change-summary {
+        grid-template-columns:1fr;
+      }
+      .full { grid-column:auto; }
+    }
   
     /* Final native dropdown readability override */
     body select,
@@ -365,6 +433,254 @@ $receivableStateClass = match ($receivableState) {
     <article class="card"><div class="stat-value"><?= $fmtMoney($totals['expense_cost'] ?? 0) ?></div><div class="stat-label">Expenses</div></article>
     <article class="card"><div class="stat-value"><?= $fmtMoney($totals['estimated_net'] ?? 0) ?></div><div class="stat-label">Estimated net</div></article>
     <article class="card"><div class="stat-value"><?= $fmtMoney($totals['effective_hourly'] ?? 0) ?></div><div class="stat-label">Effective hourly</div></article>
+  </section>
+
+  <section class="card pay-change-card <?= $pendingPayChange === null ? 'pay-change-card-clear' : '' ?>" aria-label="Pay-change tracking">
+    <h2>Pay change</h2>
+
+    <?php if ($pendingPayChange !== null): ?>
+      <div class="pay-change-notice">
+        <strong>Buyer decision pending</strong><br>
+        Authorized gross remains
+        <?= $fmtMoney($pendingPayChange['original_authorized_gross']) ?>
+        until this request is resolved.
+      </div>
+
+      <div class="pay-change-summary">
+        <div class="pay-change-metric">
+          <span class="muted">Authorized gross</span>
+          <strong><?= $fmtMoney($pendingPayChange['original_authorized_gross']) ?></strong>
+        </div>
+
+        <div class="pay-change-metric">
+          <span class="muted">Requested revised gross</span>
+          <strong><?= $fmtMoney($pendingPayChange['requested_total_gross']) ?></strong>
+        </div>
+
+        <div class="pay-change-metric">
+          <span class="muted">Pending increase</span>
+          <strong><?= $fmtMoney($pendingPayChange['requested_increase']) ?></strong>
+        </div>
+      </div>
+
+      <p>
+        <strong>Reason:</strong>
+        <?= $h($pendingPayChange['reason']) ?>
+      </p>
+
+      <?php if (
+          $pendingPayChange['requested_rate'] !== null
+          || $pendingPayChange['requested_hours'] !== null
+      ): ?>
+        <p class="muted">
+          <?php if ($pendingPayChange['requested_rate'] !== null): ?>
+            Requested rate:
+            <?= $fmtMoney($pendingPayChange['requested_rate']) ?>
+          <?php endif; ?>
+
+          <?php if ($pendingPayChange['requested_hours'] !== null): ?>
+            · Requested hours:
+            <?= number_format((float)$pendingPayChange['requested_hours'], 2) ?>
+          <?php endif; ?>
+        </p>
+      <?php endif; ?>
+
+      <form
+        method="post"
+        class="form-grid"
+        onsubmit="return confirm('Resolve this pay-change request? Approval can update authorized gross and fees.');"
+      >
+        <?= csrf_field() ?>
+        <input type="hidden" name="action" value="resolve_pay_change">
+        <input type="hidden" name="work_order_id" value="<?= (int)$workOrderId ?>">
+        <input type="hidden" name="pay_change_id" value="<?= (int)$pendingPayChange['pay_change_id'] ?>">
+
+        <label>
+          Buyer decision
+          <select name="resolution_status" required>
+            <option value="">Choose outcome</option>
+            <option value="APPROVED">Approved in full</option>
+            <option value="PARTIALLY_APPROVED">Partially approved</option>
+            <option value="DENIED">Denied</option>
+          </select>
+        </label>
+
+        <label>
+          Approved revised gross
+          <input
+            name="approved_total_gross"
+            inputmode="decimal"
+            value="<?= $h($moneyInput($pendingPayChange['requested_total_gross'])) ?>"
+          >
+          <span class="field-hint">
+            Ignored when denied. Use the actual buyer-approved total.
+          </span>
+        </label>
+
+        <label>
+          Updated provider fee
+          <input
+            name="approved_platform_fee"
+            inputmode="decimal"
+            placeholder="Leave blank until FN shows the revised fee"
+          >
+        </label>
+
+        <label>
+          Updated insurance fee
+          <input
+            name="approved_insurance_fee"
+            inputmode="decimal"
+            placeholder="Leave blank until FN shows the revised fee"
+          >
+        </label>
+
+        <label class="full">
+          Resolution notes
+          <textarea
+            name="resolution_notes"
+            placeholder="Approval message, partial amount explanation, denial reason, or FN reference."
+          ></textarea>
+        </label>
+
+        <div class="full actions">
+          <button class="btn btn-primary" type="submit">
+            Resolve pay change
+          </button>
+        </div>
+      </form>
+    <?php else: ?>
+      <p class="muted">
+        Record a pay increase already requested on FieldNation. Pending amounts
+        remain separate from authorized gross and receivable totals.
+      </p>
+
+      <form method="post" class="form-grid">
+        <?= csrf_field() ?>
+        <input type="hidden" name="action" value="create_pay_change">
+        <input type="hidden" name="work_order_id" value="<?= (int)$workOrderId ?>">
+
+        <label>
+          Current authorized gross
+          <input
+            value="<?= $h($moneyInput($wo['gross_pay'])) ?>"
+            readonly
+            aria-readonly="true"
+          >
+        </label>
+
+        <label>
+          Requested revised gross
+          <input
+            name="requested_total_gross"
+            inputmode="decimal"
+            placeholder="$889.85"
+            required
+          >
+        </label>
+
+        <label>
+          Requested rate
+          <input
+            name="requested_rate"
+            inputmode="decimal"
+            placeholder="$65.00"
+          >
+        </label>
+
+        <label>
+          Requested hours
+          <input
+            name="requested_hours"
+            inputmode="decimal"
+            placeholder="13.69"
+          >
+        </label>
+
+        <label>
+          Requested at
+          <input
+            type="text"
+            name="requested_at"
+            value="<?= $h(date('Y-m-d H:i')) ?>"
+            placeholder="2026-07-16 22:36"
+          >
+          <span class="field-hint">24-hour format: YYYY-MM-DD HH:MM</span>
+        </label>
+
+        <label class="full">
+          Reason
+          <textarea
+            name="reason"
+            placeholder="Additional hours logged, buyer-approved scope expansion, return visit, added materials, etc."
+            required
+          ></textarea>
+        </label>
+
+        <div class="full actions">
+          <button class="btn btn-primary" type="submit">
+            Record pending pay change
+          </button>
+        </div>
+      </form>
+    <?php endif; ?>
+
+    <?php if ($payChanges): ?>
+      <div class="pay-change-history">
+        <h3>Pay-change history</h3>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Requested</th>
+                <th>Status</th>
+                <th>Original</th>
+                <th>Requested total</th>
+                <th>Increase</th>
+                <th>Approved total</th>
+                <th>Reason / resolution</th>
+              </tr>
+            </thead>
+            <tbody>
+              <?php foreach ($payChanges as $payChange):
+                $payChangeStatus = strtoupper(
+                    (string)($payChange['status'] ?? 'PENDING')
+                );
+                $payChangeStatusClass = 'pay-change-status-'
+                    . strtolower(str_replace('_', '-', $payChangeStatus));
+              ?>
+                <tr>
+                  <td><?= $h($dtDisplay($payChange['requested_at'] ?? '')) ?></td>
+                  <td>
+                    <strong class="<?= $h($payChangeStatusClass) ?>">
+                      <?= $h(str_replace('_', ' ', $payChangeStatus)) ?>
+                    </strong>
+                  </td>
+                  <td><?= $fmtMoney($payChange['original_authorized_gross']) ?></td>
+                  <td><?= $fmtMoney($payChange['requested_total_gross']) ?></td>
+                  <td><?= $fmtMoney($payChange['requested_increase']) ?></td>
+                  <td>
+                    <?= $payChange['approved_total_gross'] === null
+                        ? '—'
+                        : $fmtMoney($payChange['approved_total_gross']) ?>
+                  </td>
+                  <td>
+                    <?= $h($payChange['reason']) ?>
+                    <?php if (!empty($payChange['resolution_notes'])): ?>
+                      <br>
+                      <span class="muted">
+                        <?= $h($payChange['resolution_notes']) ?>
+                      </span>
+                    <?php endif; ?>
+                  </td>
+                </tr>
+              <?php endforeach; ?>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    <?php endif; ?>
   </section>
 
   <section class="grid two">

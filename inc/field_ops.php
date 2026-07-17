@@ -9,6 +9,13 @@ declare(strict_types=1);
 
 function field_ops_ensure_schema(): void
 {
+    static $schemaEnsured = false;
+
+    if ($schemaEnsured) {
+        return;
+    }
+
+    $schemaEnsured = true;
     $pdo = db();
 
     $pdo->exec("
@@ -101,6 +108,34 @@ function field_ops_ensure_schema(): void
             INDEX idx_field_work_orders_payment_status (payment_status),
             INDEX idx_field_work_orders_scheduled (scheduled_start_at),
             INDEX idx_field_work_orders_buyer (buyer_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS field_work_order_pay_changes (
+            pay_change_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            work_order_id INT UNSIGNED NOT NULL,
+            original_authorized_gross DECIMAL(12,2) NOT NULL,
+            requested_total_gross DECIMAL(12,2) NOT NULL,
+            requested_increase DECIMAL(12,2) NOT NULL,
+            requested_rate DECIMAL(12,2) NULL,
+            requested_hours DECIMAL(12,2) NULL,
+            reason TEXT NOT NULL,
+            status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
+            approved_total_gross DECIMAL(12,2) NULL,
+            approved_increase DECIMAL(12,2) NULL,
+            approved_platform_fee DECIMAL(12,2) NULL,
+            approved_insurance_fee DECIMAL(12,2) NULL,
+            requested_at DATETIME NOT NULL,
+            resolved_at DATETIME NULL,
+            resolution_notes TEXT NULL,
+            created_by INT UNSIGNED NULL,
+            resolved_by INT UNSIGNED NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_field_pay_changes_work_order (work_order_id),
+            INDEX idx_field_pay_changes_status (status),
+            INDEX idx_field_pay_changes_requested (requested_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     ");
 
@@ -1282,6 +1317,22 @@ function field_ops_update_work_order_state(array $input): array
     }
 
     $grossPay = field_ops_money($input['gross_pay'] ?? 0);
+    $pendingPayChange = field_ops_pending_pay_change($workOrderId);
+
+    if (
+        $pendingPayChange !== null
+        && abs(
+            $grossPay
+            - (float)($existingWorkOrder['gross_pay'] ?? 0)
+        ) > 0.004
+    ) {
+        return [
+            'ok' => false,
+            'errors' => [
+                'Authorized gross cannot be changed while a pay-change request is pending. Resolve the request first.',
+            ],
+        ];
+    }
 
     $platformFee = field_ops_fn_normalize_provider_fee(
         (string)($existingWorkOrder['platform'] ?? ''),
@@ -1505,6 +1556,457 @@ function field_ops_update_work_order_state(array $input): array
 }
 
 
+
+function field_ops_pay_change_statuses(): array
+{
+    return [
+        'PENDING',
+        'APPROVED',
+        'PARTIALLY_APPROVED',
+        'DENIED',
+    ];
+}
+
+function field_ops_work_order_pay_changes(int $workOrderId): array
+{
+    field_ops_ensure_schema();
+
+    $statement = db()->prepare("
+        SELECT *
+        FROM field_work_order_pay_changes
+        WHERE work_order_id = ?
+        ORDER BY requested_at DESC, pay_change_id DESC
+    ");
+    $statement->execute([$workOrderId]);
+
+    return $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
+}
+
+function field_ops_pending_pay_change(int $workOrderId): ?array
+{
+    field_ops_ensure_schema();
+
+    $statement = db()->prepare("
+        SELECT *
+        FROM field_work_order_pay_changes
+        WHERE work_order_id = ?
+          AND status = 'PENDING'
+        ORDER BY pay_change_id DESC
+        LIMIT 1
+    ");
+    $statement->execute([$workOrderId]);
+
+    $row = $statement->fetch(PDO::FETCH_ASSOC);
+
+    return is_array($row) ? $row : null;
+}
+
+function field_ops_create_pay_change(
+    array $input,
+    int $userId = 0
+): array {
+    field_ops_ensure_schema();
+
+    $workOrderId = (int)($input['work_order_id'] ?? 0);
+    $requestedTotal = field_ops_money(
+        $input['requested_total_gross'] ?? 0
+    );
+    $requestedRateInput = trim(
+        (string)($input['requested_rate'] ?? '')
+    );
+    $requestedHoursInput = trim(
+        (string)($input['requested_hours'] ?? '')
+    );
+    $requestedRate = $requestedRateInput === ''
+        ? null
+        : field_ops_money($requestedRateInput);
+    $requestedHours = $requestedHoursInput === ''
+        ? null
+        : field_ops_decimal($requestedHoursInput);
+    $reason = trim((string)($input['reason'] ?? ''));
+    $requestedAtInput = trim(
+        (string)($input['requested_at'] ?? '')
+    );
+    $requestedAt = $requestedAtInput === ''
+        ? date('Y-m-d H:i:s')
+        : field_ops_datetime_or_null($requestedAtInput);
+
+    $errors = [];
+
+    if ($workOrderId <= 0) {
+        $errors[] = 'Valid work order is required.';
+    }
+
+    if ($requestedTotal <= 0) {
+        $errors[] = 'Requested revised gross must be greater than zero.';
+    }
+
+    if ($requestedRate !== null && $requestedRate <= 0) {
+        $errors[] = 'Requested rate must be greater than zero when supplied.';
+    }
+
+    if ($requestedHours !== null && $requestedHours <= 0) {
+        $errors[] = 'Requested hours must be greater than zero when supplied.';
+    }
+
+    if ($reason === '') {
+        $errors[] = 'Pay-change reason is required.';
+    }
+
+    if ($requestedAt === null) {
+        $errors[] = 'Requested date must use YYYY-MM-DD HH:MM.';
+    }
+
+    if ($errors !== []) {
+        return ['ok' => false, 'errors' => $errors];
+    }
+
+    $pdo = db();
+    $ownsTransaction = !$pdo->inTransaction();
+
+    try {
+        if ($ownsTransaction) {
+            $pdo->beginTransaction();
+        }
+
+        $workOrderStatement = $pdo->prepare("
+            SELECT *
+            FROM field_work_orders
+            WHERE work_order_id = ?
+              AND deleted_at IS NULL
+            LIMIT 1
+            FOR UPDATE
+        ");
+        $workOrderStatement->execute([$workOrderId]);
+        $workOrder = $workOrderStatement->fetch(PDO::FETCH_ASSOC);
+
+        if (!is_array($workOrder)) {
+            throw new RuntimeException('Work order was not found.');
+        }
+
+        $workStatus = strtoupper(
+            trim((string)($workOrder['status'] ?? ''))
+        );
+        $paymentStatus = strtoupper(
+            trim((string)($workOrder['payment_status'] ?? ''))
+        );
+
+        if (
+            in_array($workStatus, ['CANCELLED', 'DECLINED', 'PAID'], true)
+            || in_array($paymentStatus, ['PAID', 'VOID'], true)
+        ) {
+            throw new RuntimeException(
+                'Pay changes cannot be requested for a closed or paid work order.'
+            );
+        }
+
+        $existingStatement = $pdo->prepare("
+            SELECT pay_change_id
+            FROM field_work_order_pay_changes
+            WHERE work_order_id = ?
+              AND status = 'PENDING'
+            LIMIT 1
+            FOR UPDATE
+        ");
+        $existingStatement->execute([$workOrderId]);
+
+        if ($existingStatement->fetchColumn()) {
+            throw new RuntimeException(
+                'This work order already has a pending pay-change request.'
+            );
+        }
+
+        $originalGross = field_ops_money(
+            $workOrder['gross_pay'] ?? 0
+        );
+
+        if ($requestedTotal <= $originalGross) {
+            throw new RuntimeException(
+                'Requested revised gross must exceed the currently authorized gross.'
+            );
+        }
+
+        $requestedIncrease = round(
+            $requestedTotal - $originalGross,
+            2
+        );
+
+        $insert = $pdo->prepare("
+            INSERT INTO field_work_order_pay_changes
+              (
+                work_order_id,
+                original_authorized_gross,
+                requested_total_gross,
+                requested_increase,
+                requested_rate,
+                requested_hours,
+                reason,
+                status,
+                requested_at,
+                created_by
+              )
+            VALUES
+              (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+        ");
+        $insert->execute([
+            $workOrderId,
+            $originalGross,
+            $requestedTotal,
+            $requestedIncrease,
+            $requestedRate,
+            $requestedHours,
+            $reason,
+            $requestedAt,
+            $userId > 0 ? $userId : null,
+        ]);
+
+        $payChangeId = (int)$pdo->lastInsertId();
+
+        if ($ownsTransaction) {
+            $pdo->commit();
+        }
+
+        return [
+            'ok' => true,
+            'pay_change_id' => $payChangeId,
+            'requested_increase' => $requestedIncrease,
+        ];
+    } catch (Throwable $e) {
+        if ($ownsTransaction && $pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+
+        return [
+            'ok' => false,
+            'errors' => [$e->getMessage()],
+        ];
+    }
+}
+
+function field_ops_resolve_pay_change(
+    array $input,
+    int $userId = 0
+): array {
+    field_ops_ensure_schema();
+
+    $workOrderId = (int)($input['work_order_id'] ?? 0);
+    $payChangeId = (int)($input['pay_change_id'] ?? 0);
+    $resolutionStatus = field_ops_clean_status(
+        (string)($input['resolution_status'] ?? ''),
+        ['APPROVED', 'PARTIALLY_APPROVED', 'DENIED'],
+        ''
+    );
+    $approvedTotalInput = trim(
+        (string)($input['approved_total_gross'] ?? '')
+    );
+    $approvedPlatformFeeInput = trim(
+        (string)($input['approved_platform_fee'] ?? '')
+    );
+    $approvedInsuranceFeeInput = trim(
+        (string)($input['approved_insurance_fee'] ?? '')
+    );
+    $resolutionNotes = trim(
+        (string)($input['resolution_notes'] ?? '')
+    );
+
+    if (
+        $workOrderId <= 0
+        || $payChangeId <= 0
+        || $resolutionStatus === ''
+    ) {
+        return [
+            'ok' => false,
+            'errors' => ['Valid pay-change resolution is required.'],
+        ];
+    }
+
+    $pdo = db();
+    $ownsTransaction = !$pdo->inTransaction();
+
+    try {
+        if ($ownsTransaction) {
+            $pdo->beginTransaction();
+        }
+
+        $statement = $pdo->prepare("
+            SELECT
+              pc.*,
+              wo.gross_pay AS current_authorized_gross,
+              wo.deleted_at AS work_order_deleted_at
+            FROM field_work_order_pay_changes pc
+            INNER JOIN field_work_orders wo
+              ON wo.work_order_id = pc.work_order_id
+            WHERE pc.pay_change_id = ?
+              AND pc.work_order_id = ?
+            LIMIT 1
+            FOR UPDATE
+        ");
+        $statement->execute([$payChangeId, $workOrderId]);
+        $payChange = $statement->fetch(PDO::FETCH_ASSOC);
+
+        if (!is_array($payChange)) {
+            throw new RuntimeException(
+                'Pay-change request was not found.'
+            );
+        }
+
+        if (
+            strtoupper((string)$payChange['status']) !== 'PENDING'
+        ) {
+            throw new RuntimeException(
+                'Only pending pay-change requests can be resolved.'
+            );
+        }
+
+        if (!empty($payChange['work_order_deleted_at'])) {
+            throw new RuntimeException(
+                'The linked work order has been discarded.'
+            );
+        }
+
+        $originalGross = field_ops_money(
+            $payChange['original_authorized_gross'] ?? 0
+        );
+        $requestedTotal = field_ops_money(
+            $payChange['requested_total_gross'] ?? 0
+        );
+        $currentGross = field_ops_money(
+            $payChange['current_authorized_gross'] ?? 0
+        );
+
+        if (abs($currentGross - $originalGross) > 0.004) {
+            throw new RuntimeException(
+                'Authorized gross changed after this request was created. Reconcile the work order before resolving it.'
+            );
+        }
+
+        $approvedTotal = null;
+        $approvedIncrease = null;
+        $approvedPlatformFee = null;
+        $approvedInsuranceFee = null;
+
+        if ($resolutionStatus !== 'DENIED') {
+            if ($approvedTotalInput === '') {
+                $approvedTotal = $resolutionStatus === 'APPROVED'
+                    ? $requestedTotal
+                    : null;
+            } else {
+                $approvedTotal = field_ops_money(
+                    $approvedTotalInput
+                );
+            }
+
+            if ($approvedTotal === null) {
+                throw new RuntimeException(
+                    'Approved revised gross is required for partial approval.'
+                );
+            }
+
+            if ($approvedTotal <= $originalGross) {
+                throw new RuntimeException(
+                    'Approved revised gross must exceed the original authorized gross.'
+                );
+            }
+
+            if (
+                $resolutionStatus === 'APPROVED'
+                && abs($approvedTotal - $requestedTotal) > 0.004
+            ) {
+                throw new RuntimeException(
+                    'Use partially approved when the buyer approves less than the requested total.'
+                );
+            }
+
+            if (
+                $resolutionStatus === 'PARTIALLY_APPROVED'
+                && $approvedTotal >= $requestedTotal
+            ) {
+                throw new RuntimeException(
+                    'Partial approval must be less than the requested revised gross.'
+                );
+            }
+
+            $approvedIncrease = round(
+                $approvedTotal - $originalGross,
+                2
+            );
+
+            $approvedPlatformFee = $approvedPlatformFeeInput === ''
+                ? null
+                : field_ops_money($approvedPlatformFeeInput);
+            $approvedInsuranceFee = $approvedInsuranceFeeInput === ''
+                ? null
+                : field_ops_money($approvedInsuranceFeeInput);
+
+            $updateWorkOrder = $pdo->prepare("
+                UPDATE field_work_orders
+                SET gross_pay = ?,
+                    platform_fee = COALESCE(?, platform_fee),
+                    insurance_fee = COALESCE(?, insurance_fee),
+                    updated_at = NOW()
+                WHERE work_order_id = ?
+                LIMIT 1
+            ");
+            $updateWorkOrder->execute([
+                $approvedTotal,
+                $approvedPlatformFee,
+                $approvedInsuranceFee,
+                $workOrderId,
+            ]);
+        }
+
+        $updatePayChange = $pdo->prepare("
+            UPDATE field_work_order_pay_changes
+            SET status = ?,
+                approved_total_gross = ?,
+                approved_increase = ?,
+                approved_platform_fee = ?,
+                approved_insurance_fee = ?,
+                resolved_at = NOW(),
+                resolution_notes = ?,
+                resolved_by = ?,
+                updated_at = NOW()
+            WHERE pay_change_id = ?
+              AND status = 'PENDING'
+            LIMIT 1
+        ");
+        $updatePayChange->execute([
+            $resolutionStatus,
+            $approvedTotal,
+            $approvedIncrease,
+            $approvedPlatformFee,
+            $approvedInsuranceFee,
+            $resolutionNotes !== '' ? $resolutionNotes : null,
+            $userId > 0 ? $userId : null,
+            $payChangeId,
+        ]);
+
+        if ($updatePayChange->rowCount() !== 1) {
+            throw new RuntimeException(
+                'Pay-change request could not be resolved.'
+            );
+        }
+
+        if ($ownsTransaction) {
+            $pdo->commit();
+        }
+
+        return [
+            'ok' => true,
+            'status' => $resolutionStatus,
+            'approved_total_gross' => $approvedTotal,
+        ];
+    } catch (Throwable $e) {
+        if ($ownsTransaction && $pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+
+        return [
+            'ok' => false,
+            'errors' => [$e->getMessage()],
+        ];
+    }
+}
 
 function field_ops_clients_for_invoice(): array
 {
