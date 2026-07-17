@@ -91,6 +91,8 @@ function field_ops_ensure_schema(): void
             estimated_approval_days SMALLINT UNSIGNED NULL,
             payment_terms_text TEXT NULL,
             gross_pay DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+            authorized_rate DECIMAL(12,2) NULL,
+            authorized_hours DECIMAL(12,2) NULL,
             platform_fee DECIMAL(12,2) NOT NULL DEFAULT 0.00,
             insurance_fee DECIMAL(12,2) NOT NULL DEFAULT 0.00,
             bonus_pay DECIMAL(12,2) NOT NULL DEFAULT 0.00,
@@ -181,6 +183,8 @@ function field_ops_ensure_schema(): void
         'invoice_created_at' => "DATETIME NULL",
 
         'insurance_fee' => "DECIMAL(12,2) NOT NULL DEFAULT 0.00",
+        'authorized_rate' => "DECIMAL(12,2) NULL",
+        'authorized_hours' => "DECIMAL(12,2) NULL",
         'deleted_at' => "DATETIME NULL",
         'delete_reason' => "VARCHAR(255) NULL",
         'source_system' => "VARCHAR(80) NULL",
@@ -958,7 +962,53 @@ function field_ops_save_work_order(array $input, int $userId = 0): array
         $userId > 0 ? $userId : null,
     ]);
 
-    return ['ok' => true, 'work_order_id' => (int)db()->lastInsertId()];
+    $workOrderId = (int)db()->lastInsertId();
+    $authorizedRateInput = trim(
+        (string)($input['authorized_rate'] ?? '')
+    );
+    $authorizedHoursInput = trim(
+        (string)($input['authorized_hours'] ?? '')
+    );
+
+    $authorizedRate = $authorizedRateInput === ''
+        ? null
+        : field_ops_money($authorizedRateInput);
+
+    $authorizedHours = $authorizedHoursInput === ''
+        ? null
+        : field_ops_decimal($authorizedHoursInput);
+
+    if (
+        ($authorizedRate !== null && $authorizedRate <= 0)
+        || ($authorizedHours !== null && $authorizedHours <= 0)
+    ) {
+        db()->prepare("
+            DELETE FROM field_work_orders
+            WHERE work_order_id = ?
+            LIMIT 1
+        ")->execute([$workOrderId]);
+
+        return [
+            'ok' => false,
+            'errors' => [
+                'Authorized rate and authorized hours must be greater than zero when supplied.',
+            ],
+        ];
+    }
+
+    db()->prepare("
+        UPDATE field_work_orders
+        SET authorized_rate = ?,
+            authorized_hours = ?
+        WHERE work_order_id = ?
+        LIMIT 1
+    ")->execute([
+        $authorizedRate,
+        $authorizedHours,
+        $workOrderId,
+    ]);
+
+    return ['ok' => true, 'work_order_id' => $workOrderId];
 }
 
 function field_ops_discard_work_order(int $workOrderId, string $reason = ''): array
@@ -1241,6 +1291,173 @@ function field_ops_add_expense(array $input): array
     return ['ok' => true];
 }
 
+function field_ops_save_sli_terms(array $input): array
+{
+    field_ops_ensure_schema();
+
+    $workOrderId = (int)($input['work_order_id'] ?? 0);
+    $workOrder = $workOrderId > 0
+        ? field_ops_find_work_order($workOrderId)
+        : null;
+
+    if (!$workOrder) {
+        return ['ok' => false, 'errors' => ['Valid work order is required.']];
+    }
+
+    $rateInput = trim((string)($input['authorized_rate'] ?? ''));
+    $hoursInput = trim((string)($input['authorized_hours'] ?? ''));
+
+    $rate = $rateInput === ''
+        ? null
+        : field_ops_money($rateInput);
+
+    $hours = $hoursInput === ''
+        ? null
+        : field_ops_decimal($hoursInput);
+
+    $errors = [];
+
+    if ($rate !== null && $rate <= 0) {
+        $errors[] = 'Authorized rate must be greater than zero.';
+    }
+
+    if ($hours !== null && $hours <= 0) {
+        $errors[] = 'Authorized hours must be greater than zero.';
+    }
+
+    if ($errors !== []) {
+        return ['ok' => false, 'errors' => $errors];
+    }
+
+    db()->prepare("
+        UPDATE field_work_orders
+        SET authorized_rate = ?,
+            authorized_hours = ?,
+            updated_at = NOW()
+        WHERE work_order_id = ?
+        LIMIT 1
+    ")->execute([
+        $rate,
+        $hours,
+        $workOrderId,
+    ]);
+
+    return ['ok' => true];
+}
+
+function field_ops_sli_projection(
+    int $workOrderId,
+    ?float $billableHoursOverride = null
+): array {
+    field_ops_ensure_schema();
+
+    $workOrder = field_ops_find_work_order($workOrderId);
+
+    if (!$workOrder) {
+        return [
+            'ok' => false,
+            'errors' => ['Work order not found.'],
+        ];
+    }
+
+    $statement = db()->prepare("
+        SELECT
+          COUNT(*) AS entry_count,
+          COALESCE(SUM(minutes), 0) AS onsite_minutes
+        FROM field_work_order_time_entries
+        WHERE work_order_id = ?
+          AND entry_type = 'onsite'
+    ");
+    $statement->execute([$workOrderId]);
+
+    $timeRow = $statement->fetch(PDO::FETCH_ASSOC) ?: [];
+    $entryCount = (int)($timeRow['entry_count'] ?? 0);
+
+    $onsiteMinutes = $entryCount > 0
+        ? (int)($timeRow['onsite_minutes'] ?? 0)
+        : (int)($workOrder['onsite_minutes'] ?? 0);
+
+    $rawHours = $onsiteMinutes / 60;
+
+    /*
+     * FN can display the next hundredth above minute-only arithmetic.
+     * Keep this as a suggestion because FN may retain hidden seconds.
+     */
+    $suggestedBillableHours = $rawHours > 0
+        ? ceil(($rawHours * 100) - 0.0000001) / 100
+        : 0.0;
+
+    if ($billableHoursOverride !== null) {
+        $suggestedBillableHours = round(
+            max(0.0, $billableHoursOverride),
+            2
+        );
+    }
+
+    $authorizedRate = max(
+        0.0,
+        (float)($workOrder['authorized_rate'] ?? 0)
+    );
+
+    $authorizedHours = max(
+        0.0,
+        (float)($workOrder['authorized_hours'] ?? 0)
+    );
+
+    $authorizedGross = max(
+        0.0,
+        (float)($workOrder['gross_pay'] ?? 0)
+    );
+
+    $overageHours = max(
+        0.0,
+        round($suggestedBillableHours - $authorizedHours, 2)
+    );
+
+    $eligible = $authorizedRate > 0
+        && $authorizedHours > 0
+        && $suggestedBillableHours > $authorizedHours;
+
+    $suggestedTotalGross = $eligible
+        ? round($authorizedRate * $suggestedBillableHours, 2)
+        : $authorizedGross;
+
+    $suggestedIncrease = $eligible
+        ? max(
+            0.0,
+            round($suggestedTotalGross - $authorizedGross, 2)
+        )
+        : 0.0;
+
+    $suggestedReason = $eligible
+        ? sprintf(
+            'Extended onsite hours required to complete the assigned scope: %.2f hours logged versus %.2f authorized.',
+            $suggestedBillableHours,
+            $authorizedHours
+        )
+        : '';
+
+    return [
+        'ok' => true,
+        'work_order_id' => $workOrderId,
+        'time_source' => $entryCount > 0
+            ? 'onsite_time_entries'
+            : 'work_order_onsite_minutes',
+        'onsite_entry_count' => $entryCount,
+        'onsite_minutes' => $onsiteMinutes,
+        'raw_hours' => $rawHours,
+        'suggested_billable_hours' => $suggestedBillableHours,
+        'authorized_rate' => $authorizedRate,
+        'authorized_hours' => $authorizedHours,
+        'authorized_gross' => $authorizedGross,
+        'overage_hours' => $overageHours,
+        'eligible' => $eligible,
+        'suggested_total_gross' => $suggestedTotalGross,
+        'suggested_increase' => $suggestedIncrease,
+        'suggested_reason' => $suggestedReason,
+    ];
+}
+
 function field_ops_add_time_entry(array $input): array
 {
     field_ops_ensure_schema();
@@ -1251,10 +1468,57 @@ function field_ops_add_time_entry(array $input): array
         return ['ok' => false, 'errors' => ['Valid work order is required.']];
     }
 
-    $minutes = field_ops_int($input['minutes'] ?? 0);
+    $startedInput = trim((string)($input['started_at'] ?? ''));
+    $endedInput = trim((string)($input['ended_at'] ?? ''));
+
+    $startedAt = field_ops_datetime_or_null($startedInput);
+    $endedAt = field_ops_datetime_or_null($endedInput);
+
+    $errors = [];
+
+    if ($startedInput !== '' && $startedAt === null) {
+        $errors[] = 'Started time must use YYYY-MM-DD HH:MM.';
+    }
+
+    if ($endedInput !== '' && $endedAt === null) {
+        $errors[] = 'Ended time must use YYYY-MM-DD HH:MM.';
+    }
+
+    if (($startedAt === null) !== ($endedAt === null)) {
+        $errors[] = 'Enter both started and ended times, or leave both blank.';
+    }
+
+    $minutesInput = trim((string)($input['minutes'] ?? ''));
+    $minutes = $minutesInput === ''
+        ? 0
+        : field_ops_int($minutesInput);
+
+    $derivedFromTimes = false;
+
+    if ($startedAt !== null && $endedAt !== null) {
+        $startedTimestamp = strtotime($startedAt);
+        $endedTimestamp = strtotime($endedAt);
+
+        if (
+            $startedTimestamp === false
+            || $endedTimestamp === false
+            || $endedTimestamp <= $startedTimestamp
+        ) {
+            $errors[] = 'Ended time must be later than started time.';
+        } else {
+            $minutes = (int)ceil(
+                ($endedTimestamp - $startedTimestamp) / 60
+            );
+            $derivedFromTimes = true;
+        }
+    }
 
     if ($minutes <= 0) {
-        return ['ok' => false, 'errors' => ['Minutes must be greater than zero.']];
+        $errors[] = 'Enter valid started/ended times or minutes greater than zero.';
+    }
+
+    if ($errors !== []) {
+        return ['ok' => false, 'errors' => array_values(array_unique($errors))];
     }
 
     $type = strtolower(trim((string)($input['entry_type'] ?? 'onsite')));
@@ -1268,13 +1532,17 @@ function field_ops_add_time_entry(array $input): array
     ")->execute([
         $workOrderId,
         $type,
-        field_ops_datetime_or_null($input['started_at'] ?? ''),
-        field_ops_datetime_or_null($input['ended_at'] ?? ''),
+        $startedAt,
+        $endedAt,
         $minutes,
         trim((string)($input['notes'] ?? '')) ?: null,
     ]);
 
-    return ['ok' => true];
+    return [
+        'ok' => true,
+        'minutes' => $minutes,
+        'derived_from_times' => $derivedFromTimes,
+    ];
 }
 
 function field_ops_update_work_order_state(array $input): array
@@ -3936,6 +4204,12 @@ function field_ops_promote_opportunity_to_work_order(int $opportunityId): array
         'status' => 'REQUESTED',
         'payment_status' => 'UNPAID',
         'gross_pay' => $grossPay,
+        'authorized_rate' => (float)($op['pay_rate'] ?? 0) > 0
+            ? field_ops_money($op['pay_rate'])
+            : null,
+        'authorized_hours' => (float)($op['max_hours'] ?? 0) > 0
+            ? field_ops_decimal($op['max_hours'])
+            : null,
         'platform_fee' => $fnFees['platform_fee'],
         'insurance_fee' => $fnFees['insurance_fee'],
         'notes' => "Promoted from Field Ops opportunity #{$opportunityId}.\nRecommendation: {$op['recommendation']}.\nScore: {$op['score']}.\n\n" . (string)($op['notes'] ?? ''),

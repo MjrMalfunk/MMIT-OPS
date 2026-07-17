@@ -1027,6 +1027,16 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
         </label>
 
         <label>
+          Authorized hourly rate
+          <input name="authorized_rate" inputmode="decimal" placeholder="$65.00">
+        </label>
+
+        <label>
+          Maximum authorized hours
+          <input name="authorized_hours" inputmode="decimal" placeholder="10.00">
+        </label>
+
+        <label>
           Provider fee
           <input name="platform_fee" inputmode="decimal" placeholder="Manual fee, usually $0.00">
         </label>

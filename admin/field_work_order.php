@@ -42,6 +42,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $result = field_ops_add_time_entry($_POST);
     } elseif ($action === 'update_state') {
         $result = field_ops_update_work_order_state($_POST);
+    } elseif ($action === 'save_sli_terms') {
+        $result = field_ops_save_sli_terms($_POST);
     } elseif ($action === 'create_pay_change') {
         $result = field_ops_create_pay_change(
             $_POST,
@@ -72,6 +74,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'add_expense' => 'Expense added.',
             'add_time' => 'Time entry added.',
             'update_state' => 'Work order updated.',
+            'save_sli_terms' => 'Authorized SLI terms saved.',
             'create_pay_change' => 'Pay-change request recorded.',
             'resolve_pay_change' => 'Pay-change request resolved.',
             'create_invoice' => 'Draft invoice created from W/O.',
@@ -106,6 +109,7 @@ $expenses = field_ops_work_order_expenses($workOrderId);
 $timeEntries = field_ops_work_order_time_entries($workOrderId);
 $payChanges = field_ops_work_order_pay_changes($workOrderId);
 $pendingPayChange = field_ops_pending_pay_change($workOrderId);
+$sliProjection = field_ops_sli_projection($workOrderId);
 $items = field_ops_inventory_items();
 $totals = field_ops_work_order_totals($workOrderId);
 $attachments = field_ops_work_order_attachments($workOrderId);
@@ -291,7 +295,7 @@ $receivableStateClass = match ($receivableState) {
 
     .pay-change-summary {
       display:grid;
-      grid-template-columns:repeat(3,minmax(0,1fr));
+      grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
       gap:12px;
       margin:14px 0;
     }
@@ -436,7 +440,114 @@ $receivableStateClass = match ($receivableState) {
   </section>
 
   <section class="card pay-change-card <?= $pendingPayChange === null ? 'pay-change-card-clear' : '' ?>" aria-label="Pay-change tracking">
-    <h2>Pay change</h2>
+    <h2>Pay change / SLI</h2>
+
+    <p class="muted">
+      Enter the hourly rate and maximum authorized hours shown by FieldNation.
+      OPS uses onsite time entries to calculate the suggested SLI request.
+    </p>
+
+    <form method="post" class="form-grid">
+      <?= csrf_field() ?>
+      <input type="hidden" name="action" value="save_sli_terms">
+      <input type="hidden" name="work_order_id" value="<?= (int)$workOrderId ?>">
+
+      <label>
+        Authorized hourly rate
+        <input
+          name="authorized_rate"
+          inputmode="decimal"
+          value="<?= empty($wo['authorized_rate'])
+              ? ''
+              : $h($moneyInput($wo['authorized_rate'])) ?>"
+          placeholder="$65.00"
+        >
+      </label>
+
+      <label>
+        Maximum authorized hours
+        <input
+          name="authorized_hours"
+          inputmode="decimal"
+          value="<?= empty($wo['authorized_hours'])
+              ? ''
+              : $h(number_format((float)$wo['authorized_hours'], 2, '.', '')) ?>"
+          placeholder="10.00"
+        >
+      </label>
+
+      <div class="full actions">
+        <button class="btn" type="submit">Save SLI terms</button>
+      </div>
+    </form>
+
+    <?php if (!empty($sliProjection['ok'])): ?>
+      <div class="pay-change-summary">
+        <div class="pay-change-metric">
+          <span class="muted">OPS onsite time</span>
+          <strong>
+            <?= number_format(
+                (float)($sliProjection['suggested_billable_hours'] ?? 0),
+                2
+            ) ?> hrs
+          </strong>
+          <span class="field-hint">
+            <?= (int)($sliProjection['onsite_minutes'] ?? 0) ?> minutes
+          </span>
+        </div>
+
+        <div class="pay-change-metric">
+          <span class="muted">Authorized limit</span>
+          <strong>
+            <?= number_format(
+                (float)($sliProjection['authorized_hours'] ?? 0),
+                2
+            ) ?> hrs
+          </strong>
+        </div>
+
+        <div class="pay-change-metric">
+          <span class="muted">Hours beyond limit</span>
+          <strong>
+            <?= number_format(
+                (float)($sliProjection['overage_hours'] ?? 0),
+                2
+            ) ?> hrs
+          </strong>
+        </div>
+
+        <div class="pay-change-metric">
+          <span class="muted">Suggested revised gross</span>
+          <strong>
+            <?= $fmtMoney(
+                $sliProjection['suggested_total_gross'] ?? $wo['gross_pay']
+            ) ?>
+          </strong>
+        </div>
+      </div>
+
+      <?php if (!empty($sliProjection['eligible'])): ?>
+        <div class="pay-change-notice">
+          <strong>SLI recommended</strong><br>
+          OPS calculated a
+          <?= $fmtMoney($sliProjection['suggested_increase']) ?>
+          increase from the recorded onsite time. Confirm the hours shown by
+          FieldNation before recording the pending request.
+        </div>
+      <?php elseif (
+          empty($sliProjection['authorized_rate'])
+          || empty($sliProjection['authorized_hours'])
+      ): ?>
+        <p class="muted">
+          Save the authorized rate and maximum hours to enable automatic SLI
+          calculations.
+        </p>
+      <?php else: ?>
+        <p class="muted">
+          Recorded onsite time is currently within the authorized limit.
+        </p>
+      <?php endif; ?>
+    <?php endif; ?>
 
     <?php if ($pendingPayChange !== null): ?>
       <div class="pay-change-notice">
@@ -572,8 +683,12 @@ $receivableStateClass = match ($receivableState) {
         <label>
           Requested revised gross
           <input
+            id="sli-requested-total"
             name="requested_total_gross"
             inputmode="decimal"
+            value="<?= !empty($sliProjection['eligible'])
+                ? $h($moneyInput($sliProjection['suggested_total_gross']))
+                : '' ?>"
             placeholder="$889.85"
             required
           >
@@ -582,8 +697,12 @@ $receivableStateClass = match ($receivableState) {
         <label>
           Requested rate
           <input
+            id="sli-requested-rate"
             name="requested_rate"
             inputmode="decimal"
+            value="<?= !empty($sliProjection['authorized_rate'])
+                ? $h($moneyInput($sliProjection['authorized_rate']))
+                : '' ?>"
             placeholder="$65.00"
           >
         </label>
@@ -591,10 +710,22 @@ $receivableStateClass = match ($receivableState) {
         <label>
           Requested hours
           <input
+            id="sli-requested-hours"
             name="requested_hours"
             inputmode="decimal"
+            value="<?= !empty($sliProjection['suggested_billable_hours'])
+                ? $h(number_format(
+                    (float)$sliProjection['suggested_billable_hours'],
+                    2,
+                    '.',
+                    ''
+                ))
+                : '' ?>"
             placeholder="13.69"
           >
+          <span class="field-hint">
+            Editable—use the exact billable hours displayed by FieldNation.
+          </span>
         </label>
 
         <label>
@@ -614,7 +745,9 @@ $receivableStateClass = match ($receivableState) {
             name="reason"
             placeholder="Additional hours logged, buyer-approved scope expansion, return visit, added materials, etc."
             required
-          ></textarea>
+          ><?= !empty($sliProjection['suggested_reason'])
+              ? $h($sliProjection['suggested_reason'])
+              : '' ?></textarea>
         </label>
 
         <div class="full actions">
@@ -875,7 +1008,13 @@ $receivableStateClass = match ($receivableState) {
             <option value="waiting">Waiting</option>
           </select>
         </label>
-        <label>Minutes <input name="minutes" inputmode="numeric" placeholder="60" required></label>
+        <label>
+          Minutes
+          <input name="minutes" inputmode="numeric" placeholder="Calculated from times">
+          <span class="field-hint">
+            Optional when both started and ended times are entered.
+          </span>
+        </label>
         <label>Started <input type="text" name="started_at" placeholder="2026-07-02 14:00"><span class="field-hint">24-hour format: YYYY-MM-DD HH:MM</span></label>
         <label>Ended <input type="text" name="ended_at" placeholder="2026-07-02 19:30"><span class="field-hint">24-hour format: YYYY-MM-DD HH:MM</span></label>
         <label class="full">Notes <input name="notes" placeholder="Optional detail"></label>
@@ -926,11 +1065,17 @@ $receivableStateClass = match ($receivableState) {
       <h2>Time entries</h2>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Type</th><th>Minutes</th><th>Notes</th></tr></thead>
+          <thead><tr><th>Type</th><th>Started</th><th>Ended</th><th>Minutes</th><th>Notes</th></tr></thead>
           <tbody>
-          <?php if (!$timeEntries): ?><tr><td colspan="3" class="muted">No detailed time entries yet.</td></tr><?php endif; ?>
+          <?php if (!$timeEntries): ?><tr><td colspan="5" class="muted">No detailed time entries yet.</td></tr><?php endif; ?>
           <?php foreach ($timeEntries as $t): ?>
-            <tr><td><span class="badge"><?= $h($t['entry_type']) ?></span></td><td><?= (int)$t['minutes'] ?></td><td><?= $h($t['notes'] ?? '') ?></td></tr>
+            <tr>
+              <td><span class="badge"><?= $h($t['entry_type']) ?></span></td>
+              <td><?= empty($t['started_at']) ? '—' : $h($dtDisplay($t['started_at'])) ?></td>
+              <td><?= empty($t['ended_at']) ? '—' : $h($dtDisplay($t['ended_at'])) ?></td>
+              <td><?= (int)$t['minutes'] ?></td>
+              <td><?= $h($t['notes'] ?? '') ?></td>
+            </tr>
           <?php endforeach; ?>
           </tbody>
         </table>
@@ -1145,5 +1290,35 @@ $receivableStateClass = match ($receivableState) {
     </form>
   </section>
 </main>
+<script>
+(() => {
+  const rateInput = document.getElementById('sli-requested-rate');
+  const hoursInput = document.getElementById('sli-requested-hours');
+  const totalInput = document.getElementById('sli-requested-total');
+
+  if (!rateInput || !hoursInput || !totalInput) {
+    return;
+  }
+
+  const numericValue = (input) => {
+    const cleaned = String(input.value || '').replace(/[^0-9.-]/g, '');
+    const value = Number.parseFloat(cleaned);
+
+    return Number.isFinite(value) ? value : 0;
+  };
+
+  const recalculate = () => {
+    const rate = numericValue(rateInput);
+    const hours = numericValue(hoursInput);
+
+    if (rate > 0 && hours > 0) {
+      totalInput.value = '$' + (rate * hours).toFixed(2);
+    }
+  };
+
+  rateInput.addEventListener('input', recalculate);
+  hoursInput.addEventListener('input', recalculate);
+})();
+</script>
 </body>
 </html>
