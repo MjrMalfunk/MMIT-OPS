@@ -40,6 +40,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $result = field_ops_add_expense($_POST);
     } elseif ($action === 'add_time') {
         $result = field_ops_add_time_entry($_POST);
+    } elseif ($action === 'update_time') {
+        $result = field_ops_update_time_entry(
+            $_POST,
+            (int)(current_user()['user_id'] ?? 0)
+        );
+    } elseif ($action === 'remove_time') {
+        $result = field_ops_remove_time_entry(
+            $_POST,
+            (int)(current_user()['user_id'] ?? 0)
+        );
     } elseif ($action === 'update_state') {
         $result = field_ops_update_work_order_state($_POST);
     } elseif ($action === 'save_sli_terms') {
@@ -73,6 +83,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'add_material' => 'Material pulled and inventory updated.',
             'add_expense' => 'Expense added.',
             'add_time' => 'Time entry added.',
+            'update_time' => 'Time entry updated.',
+            'remove_time' => 'Time entry removed.',
             'update_state' => 'Work order updated.',
             'save_sli_terms' => 'Authorized SLI terms saved.',
             'create_pay_change' => 'Pay-change request recorded.',
@@ -847,7 +859,7 @@ $receivableStateClass = match ($receivableState) {
           <input
             type="text"
             name="scheduled_start_at"
-            value="<?= $h($dtDisplay($wo['scheduled_start_at'] ?? '')) ?>"
+            value="<?= $h($dtInput($wo['scheduled_start_at'] ?? '')) ?>"
             placeholder="2026-07-06 14:00"
           >
           <span style="font-size:11px;color:var(--muted);margin-top:-4px;">24-hour format: YYYY-MM-DD HH:MM</span>
@@ -858,7 +870,7 @@ $receivableStateClass = match ($receivableState) {
           <input
             type="text"
             name="scheduled_end_at"
-            value="<?= $h($dtDisplay($wo['scheduled_end_at'] ?? '')) ?>"
+            value="<?= $h($dtInput($wo['scheduled_end_at'] ?? '')) ?>"
             placeholder="2026-07-06 19:00"
           >
           <span style="font-size:11px;color:var(--muted);margin-top:-4px;">24-hour format: YYYY-MM-DD HH:MM</span>
@@ -1065,16 +1077,159 @@ $receivableStateClass = match ($receivableState) {
       <h2>Time entries</h2>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Type</th><th>Started</th><th>Ended</th><th>Minutes</th><th>Notes</th></tr></thead>
+          <thead>
+            <tr>
+              <th>Type</th>
+              <th>Started</th>
+              <th>Ended</th>
+              <th>Minutes</th>
+              <th>Notes</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
           <tbody>
-          <?php if (!$timeEntries): ?><tr><td colspan="5" class="muted">No detailed time entries yet.</td></tr><?php endif; ?>
+          <?php if (!$timeEntries): ?>
+            <tr>
+              <td colspan="6" class="muted">
+                No detailed time entries yet.
+              </td>
+            </tr>
+          <?php endif; ?>
+
           <?php foreach ($timeEntries as $t): ?>
             <tr>
-              <td><span class="badge"><?= $h($t['entry_type']) ?></span></td>
-              <td><?= empty($t['started_at']) ? '—' : $h($dtDisplay($t['started_at'])) ?></td>
-              <td><?= empty($t['ended_at']) ? '—' : $h($dtDisplay($t['ended_at'])) ?></td>
+              <td>
+                <span class="badge"><?= $h($t['entry_type']) ?></span>
+              </td>
+              <td>
+                <?= empty($t['started_at'])
+                    ? '—'
+                    : $h($dtDisplay($t['started_at'])) ?>
+              </td>
+              <td>
+                <?= empty($t['ended_at'])
+                    ? '—'
+                    : $h($dtDisplay($t['ended_at'])) ?>
+              </td>
               <td><?= (int)$t['minutes'] ?></td>
               <td><?= $h($t['notes'] ?? '') ?></td>
+              <td style="min-width:280px;">
+                <details>
+                  <summary class="btn" style="cursor:pointer;">
+                    Edit
+                  </summary>
+
+                  <form
+                    method="post"
+                    class="form-grid"
+                    style="margin-top:10px;"
+                  >
+                    <?= csrf_field() ?>
+                    <input
+                      type="hidden"
+                      name="action"
+                      value="update_time"
+                    >
+                    <input
+                      type="hidden"
+                      name="work_order_id"
+                      value="<?= (int)$workOrderId ?>"
+                    >
+                    <input
+                      type="hidden"
+                      name="time_entry_id"
+                      value="<?= (int)$t['time_entry_id'] ?>"
+                    >
+
+                    <label>
+                      Type
+                      <select name="entry_type">
+                        <?php foreach ([
+                          'drive',
+                          'onsite',
+                          'paperwork',
+                          'shopping',
+                          'waiting',
+                        ] as $entryType): ?>
+                          <option
+                            value="<?= $h($entryType) ?>"
+                            <?= $t['entry_type'] === $entryType
+                                ? 'selected'
+                                : '' ?>
+                          ><?= $h(ucfirst($entryType)) ?></option>
+                        <?php endforeach; ?>
+                      </select>
+                    </label>
+
+                    <label>
+                      Minutes
+                      <input
+                        name="minutes"
+                        inputmode="numeric"
+                        value="<?= (int)$t['minutes'] ?>"
+                      >
+                    </label>
+
+                    <label>
+                      Started
+                      <input
+                        name="started_at"
+                        value="<?= $h($dtInput($t['started_at'] ?? '')) ?>"
+                      >
+                    </label>
+
+                    <label>
+                      Ended
+                      <input
+                        name="ended_at"
+                        value="<?= $h($dtInput($t['ended_at'] ?? '')) ?>"
+                      >
+                    </label>
+
+                    <label class="full">
+                      Notes
+                      <textarea name="notes"><?= $h($t['notes'] ?? '') ?></textarea>
+                    </label>
+
+                    <div class="full">
+                      <button class="btn btn-primary" type="submit">
+                        Save time entry
+                      </button>
+                    </div>
+                  </form>
+
+                  <form
+                    method="post"
+                    style="margin-top:10px;"
+                    onsubmit="return confirm('Remove this time entry from totals and SLI calculations?');"
+                  >
+                    <?= csrf_field() ?>
+                    <input
+                      type="hidden"
+                      name="action"
+                      value="remove_time"
+                    >
+                    <input
+                      type="hidden"
+                      name="work_order_id"
+                      value="<?= (int)$workOrderId ?>"
+                    >
+                    <input
+                      type="hidden"
+                      name="time_entry_id"
+                      value="<?= (int)$t['time_entry_id'] ?>"
+                    >
+                    <input
+                      name="delete_reason"
+                      value="Incorrect or duplicate time entry."
+                      style="margin-bottom:8px;"
+                    >
+                    <button class="btn btn-danger" type="submit">
+                      Remove entry
+                    </button>
+                  </form>
+                </details>
+              </td>
             </tr>
           <?php endforeach; ?>
           </tbody>

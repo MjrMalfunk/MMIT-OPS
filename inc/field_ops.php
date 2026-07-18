@@ -253,10 +253,36 @@ function field_ops_ensure_schema(): void
             minutes INT UNSIGNED NOT NULL DEFAULT 0,
             notes TEXT NULL,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NULL,
+            updated_by INT UNSIGNED NULL,
+            deleted_at DATETIME NULL,
+            deleted_by INT UNSIGNED NULL,
+            delete_reason VARCHAR(255) NULL,
             INDEX idx_field_time_work_order (work_order_id),
             INDEX idx_field_time_type (entry_type)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     ");
+
+    foreach ([
+        'updated_at' => 'DATETIME NULL',
+        'updated_by' => 'INT UNSIGNED NULL',
+        'deleted_at' => 'DATETIME NULL',
+        'deleted_by' => 'INT UNSIGNED NULL',
+        'delete_reason' => 'VARCHAR(255) NULL',
+    ] as $column => $definition) {
+        if (
+            function_exists('db_column_exists')
+            && !db_column_exists(
+                'field_work_order_time_entries',
+                $column
+            )
+        ) {
+            $pdo->exec(
+                "ALTER TABLE field_work_order_time_entries "
+                . "ADD COLUMN {$column} {$definition}"
+            );
+        }
+    }
 }
 
 function field_ops_seed_defaults(): void
@@ -1101,6 +1127,7 @@ function field_ops_work_order_time_entries(int $workOrderId): array
         SELECT *
         FROM field_work_order_time_entries
         WHERE work_order_id = ?
+          AND deleted_at IS NULL
         ORDER BY created_at DESC, time_entry_id DESC
     ");
     $st->execute([$workOrderId]);
@@ -1138,6 +1165,7 @@ function field_ops_work_order_totals(int $workOrderId): array
         SELECT COALESCE(SUM(minutes), 0) AS detail_minutes
         FROM field_work_order_time_entries
         WHERE work_order_id = ?
+          AND deleted_at IS NULL
     ");
     $st->execute([$workOrderId]);
     $detailMinutes = (int)($st->fetchColumn() ?: 0);
@@ -1367,6 +1395,7 @@ function field_ops_sli_projection(
         FROM field_work_order_time_entries
         WHERE work_order_id = ?
           AND entry_type = 'onsite'
+          AND deleted_at IS NULL
     ");
     $statement->execute([$workOrderId]);
 
@@ -1545,91 +1574,308 @@ function field_ops_add_time_entry(array $input): array
     ];
 }
 
+function field_ops_update_time_entry(
+    array $input,
+    int $userId = 0
+): array {
+    field_ops_ensure_schema();
+
+    $timeEntryId = (int)($input['time_entry_id'] ?? 0);
+    $workOrderId = (int)($input['work_order_id'] ?? 0);
+
+    $statement = db()->prepare("
+        SELECT *
+        FROM field_work_order_time_entries
+        WHERE time_entry_id = ?
+          AND work_order_id = ?
+          AND deleted_at IS NULL
+        LIMIT 1
+    ");
+    $statement->execute([$timeEntryId, $workOrderId]);
+    $entry = $statement->fetch(PDO::FETCH_ASSOC);
+
+    if (!$entry) {
+        return [
+            'ok' => false,
+            'errors' => ['Active time entry was not found.'],
+        ];
+    }
+
+    $startedInput = trim((string)($input['started_at'] ?? ''));
+    $endedInput = trim((string)($input['ended_at'] ?? ''));
+
+    $startedAt = field_ops_datetime_or_null($startedInput);
+    $endedAt = field_ops_datetime_or_null($endedInput);
+    $errors = [];
+
+    if ($startedInput !== '' && $startedAt === null) {
+        $errors[] = 'Started time must use YYYY-MM-DD HH:MM.';
+    }
+
+    if ($endedInput !== '' && $endedAt === null) {
+        $errors[] = 'Ended time must use YYYY-MM-DD HH:MM.';
+    }
+
+    if (($startedAt === null) !== ($endedAt === null)) {
+        $errors[] =
+            'Enter both started and ended times, or leave both blank.';
+    }
+
+    $minutesInput = trim((string)($input['minutes'] ?? ''));
+    $minutes = $minutesInput === ''
+        ? 0
+        : field_ops_int($minutesInput);
+
+    if ($startedAt !== null && $endedAt !== null) {
+        $startedTimestamp = strtotime($startedAt);
+        $endedTimestamp = strtotime($endedAt);
+
+        if (
+            $startedTimestamp === false
+            || $endedTimestamp === false
+            || $endedTimestamp <= $startedTimestamp
+        ) {
+            $errors[] = 'Ended time must be later than started time.';
+        } else {
+            $minutes = (int)ceil(
+                ($endedTimestamp - $startedTimestamp) / 60
+            );
+        }
+    }
+
+    if ($minutes <= 0) {
+        $errors[] =
+            'Enter valid started/ended times or minutes greater than zero.';
+    }
+
+    if ($errors !== []) {
+        return [
+            'ok' => false,
+            'errors' => array_values(array_unique($errors)),
+        ];
+    }
+
+    $type = strtolower(
+        trim((string)($input['entry_type'] ?? 'onsite'))
+    );
+    $type = preg_replace('/[^a-z0-9_]+/', '_', $type)
+        ?: 'onsite';
+
+    db()->prepare("
+        UPDATE field_work_order_time_entries
+        SET entry_type = ?,
+            started_at = ?,
+            ended_at = ?,
+            minutes = ?,
+            notes = ?,
+            updated_at = NOW(),
+            updated_by = ?
+        WHERE time_entry_id = ?
+          AND work_order_id = ?
+          AND deleted_at IS NULL
+        LIMIT 1
+    ")->execute([
+        $type,
+        $startedAt,
+        $endedAt,
+        $minutes,
+        trim((string)($input['notes'] ?? '')) ?: null,
+        $userId > 0 ? $userId : null,
+        $timeEntryId,
+        $workOrderId,
+    ]);
+
+    return ['ok' => true, 'minutes' => $minutes];
+}
+
+function field_ops_remove_time_entry(
+    array $input,
+    int $userId = 0
+): array {
+    field_ops_ensure_schema();
+
+    $timeEntryId = (int)($input['time_entry_id'] ?? 0);
+    $workOrderId = (int)($input['work_order_id'] ?? 0);
+    $reason = trim((string)($input['delete_reason'] ?? ''));
+
+    if ($reason === '') {
+        $reason = 'Removed as an inaccurate time entry.';
+    }
+
+    $statement = db()->prepare("
+        UPDATE field_work_order_time_entries
+        SET deleted_at = NOW(),
+            deleted_by = ?,
+            delete_reason = ?
+        WHERE time_entry_id = ?
+          AND work_order_id = ?
+          AND deleted_at IS NULL
+        LIMIT 1
+    ");
+    $statement->execute([
+        $userId > 0 ? $userId : null,
+        substr($reason, 0, 255),
+        $timeEntryId,
+        $workOrderId,
+    ]);
+
+    if ($statement->rowCount() !== 1) {
+        return [
+            'ok' => false,
+            'errors' => ['Active time entry was not found.'],
+        ];
+    }
+
+    return ['ok' => true];
+}
 function field_ops_update_work_order_state(array $input): array
 {
     field_ops_ensure_schema();
 
     $workOrderId = (int)($input['work_order_id'] ?? 0);
+    $existing = $workOrderId > 0
+        ? field_ops_find_work_order($workOrderId)
+        : null;
 
-    $existingWorkOrder = $workOrderId > 0 ? field_ops_find_work_order($workOrderId) : null;
-
-    if (!$existingWorkOrder) {
-        return ['ok' => false, 'errors' => ['Valid work order is required.']];
+    if (!$existing) {
+        return [
+            'ok' => false,
+            'errors' => ['Valid work order is required.'],
+        ];
     }
 
-    $status = field_ops_clean_status((string)($input['status'] ?? 'REQUESTED'), field_ops_work_statuses(), 'REQUESTED');
-    $paymentStatus = field_ops_clean_status((string)($input['payment_status'] ?? 'UNPAID'), field_ops_payment_statuses(), 'UNPAID');
+    $status = field_ops_clean_status(
+        (string)($input['status'] ?? $existing['status']),
+        field_ops_work_statuses(),
+        (string)$existing['status']
+    );
 
-    $scheduledStartInput = trim((string)($input['scheduled_start_at'] ?? ''));
-    $scheduledEndInput = trim((string)($input['scheduled_end_at'] ?? ''));
-    $scheduledStartAt = field_ops_datetime_or_null($scheduledStartInput);
-    $scheduledEndAt = field_ops_datetime_or_null($scheduledEndInput);
+    $paymentStatus = field_ops_clean_status(
+        (string)(
+            $input['payment_status']
+            ?? $existing['payment_status']
+        ),
+        field_ops_payment_statuses(),
+        (string)$existing['payment_status']
+    );
 
+    $scheduledStartAt = $existing['scheduled_start_at'] ?? null;
+    $scheduledEndAt = $existing['scheduled_end_at'] ?? null;
     $scheduleErrors = [];
 
-    if ($scheduledStartInput !== '' && $scheduledStartAt === null) {
-        $scheduleErrors[] = 'Scheduled start must use YYYY-MM-DD HH:MM.';
-    }
+    foreach ([
+        'scheduled_start_at' => 'start',
+        'scheduled_end_at' => 'end',
+    ] as $field => $label) {
+        if (!array_key_exists($field, $input)) {
+            continue;
+        }
 
-    if ($scheduledEndInput !== '' && $scheduledEndAt === null) {
-        $scheduleErrors[] = 'Scheduled end must use YYYY-MM-DD HH:MM.';
+        $raw = trim((string)$input[$field]);
+        $parsed = $raw === ''
+            ? null
+            : field_ops_datetime_or_null($raw);
+
+        if ($raw !== '' && $parsed === null) {
+            $scheduleErrors[] = sprintf(
+                'Scheduled %s must use YYYY-MM-DD HH:MM.',
+                $label
+            );
+        }
+
+        if ($field === 'scheduled_start_at') {
+            $scheduledStartAt = $parsed;
+        } else {
+            $scheduledEndAt = $parsed;
+        }
     }
 
     $scheduleErrors = array_merge(
         $scheduleErrors,
-        field_ops_schedule_validation_errors($scheduledStartAt, $scheduledEndAt)
+        field_ops_schedule_validation_errors(
+            $scheduledStartAt,
+            $scheduledEndAt
+        )
     );
 
     if ($scheduleErrors !== []) {
         return ['ok' => false, 'errors' => $scheduleErrors];
     }
 
-    $grossPay = field_ops_money($input['gross_pay'] ?? 0);
+    $moneyValue = static function (
+        string $field,
+        array $input,
+        array $existing
+    ): float {
+        return array_key_exists($field, $input)
+            ? field_ops_money($input[$field])
+            : (float)($existing[$field] ?? 0);
+    };
+
+    $decimalValue = static function (
+        string $field,
+        array $input,
+        array $existing,
+        int $precision = 2
+    ): float {
+        return array_key_exists($field, $input)
+            ? field_ops_decimal($input[$field], $precision)
+            : (float)($existing[$field] ?? 0);
+    };
+
+    $intValue = static function (
+        string $field,
+        array $input,
+        array $existing
+    ): int {
+        return array_key_exists($field, $input)
+            ? field_ops_int($input[$field])
+            : (int)($existing[$field] ?? 0);
+    };
+
+    $grossPay = $moneyValue('gross_pay', $input, $existing);
     $pendingPayChange = field_ops_pending_pay_change($workOrderId);
 
     if (
         $pendingPayChange !== null
-        && abs(
-            $grossPay
-            - (float)($existingWorkOrder['gross_pay'] ?? 0)
-        ) > 0.004
+        && abs($grossPay - (float)$existing['gross_pay']) > 0.004
     ) {
         return [
             'ok' => false,
             'errors' => [
-                'Authorized gross cannot be changed while a pay-change request is pending. Resolve the request first.',
+                'Authorized gross cannot be changed while a '
+                . 'pay-change request is pending. Resolve the '
+                . 'request first.',
             ],
         ];
     }
 
-    $platformFee = field_ops_fn_normalize_provider_fee(
-        (string)($existingWorkOrder['platform'] ?? ''),
-        $grossPay,
-        field_ops_money($input['platform_fee'] ?? 0)
+    $platformFee = array_key_exists('platform_fee', $input)
+        ? field_ops_fn_normalize_provider_fee(
+            (string)($existing['platform'] ?? ''),
+            $grossPay,
+            field_ops_money($input['platform_fee'])
+        )
+        : (float)($existing['platform_fee'] ?? 0);
+
+    $insuranceFee = $moneyValue(
+        'insurance_fee',
+        $input,
+        $existing
     );
 
-    $insuranceFee = field_ops_money($input['insurance_fee'] ?? 0);
-
-    $expectedPaymentAt = $existingWorkOrder['expected_payment_at']
-        ?? null;
+    $expectedPaymentAt = $existing['expected_payment_at'] ?? null;
 
     if (array_key_exists('expected_payment_at', $input)) {
-        $expectedPaymentInput = trim(
-            (string)$input['expected_payment_at']
-        );
-
+        $raw = trim((string)$input['expected_payment_at']);
         $expectedPaymentAt = null;
 
-        if ($expectedPaymentInput !== '') {
-            $expectedPaymentDate = DateTimeImmutable::createFromFormat(
-                '!Y-m-d',
-                $expectedPaymentInput
-            );
-
+        if ($raw !== '') {
+            $date = DateTimeImmutable::createFromFormat('!Y-m-d', $raw);
             $dateErrors = DateTimeImmutable::getLastErrors();
 
             if (
-                $expectedPaymentDate === false
+                $date === false
                 || (
                     is_array($dateErrors)
                     && (
@@ -1637,8 +1883,7 @@ function field_ops_update_work_order_state(array $input): array
                         || $dateErrors['error_count'] > 0
                     )
                 )
-                || $expectedPaymentDate->format('Y-m-d')
-                    !== $expectedPaymentInput
+                || $date->format('Y-m-d') !== $raw
             ) {
                 return [
                     'ok' => false,
@@ -1648,79 +1893,66 @@ function field_ops_update_work_order_state(array $input): array
                 ];
             }
 
-            $expectedPaymentAt = $expectedPaymentDate->format(
+            $expectedPaymentAt = $date->format(
                 'Y-m-d 00:00:00'
             );
         }
     }
 
-    $paymentTermsDays = isset(
-        $existingWorkOrder['payment_terms_days']
-    )
-        ? (int)$existingWorkOrder['payment_terms_days']
-        : null;
+    $paymentTermsDays = $existing['payment_terms_days'] === null
+        ? null
+        : (int)$existing['payment_terms_days'];
 
     if (array_key_exists('payment_terms_days', $input)) {
-        $paymentTermsDaysInput = trim(
-            (string)$input['payment_terms_days']
-        );
-
+        $raw = trim((string)$input['payment_terms_days']);
         $paymentTermsDays = null;
 
-        if ($paymentTermsDaysInput !== '') {
-            $candidatePaymentTermsDays = (int)$paymentTermsDaysInput;
+        if ($raw !== '') {
+            $candidate = (int)$raw;
 
-            if (
-                !in_array(
-                    $candidatePaymentTermsDays,
-                    field_ops_fn_payment_terms_days(),
-                    true
-                )
-            ) {
+            if (!in_array(
+                $candidate,
+                field_ops_fn_payment_terms_days(),
+                true
+            )) {
                 return [
                     'ok' => false,
                     'errors' => [
-                        'FieldNation payment terms must be 0, 7, or 14 days.',
+                        'FieldNation payment terms must be '
+                        . '0, 7, or 14 days.',
                     ],
                 ];
             }
 
-            $paymentTermsDays = $candidatePaymentTermsDays;
+            $paymentTermsDays = $candidate;
         }
     }
 
-    $estimatedApprovalDays = isset(
-        $existingWorkOrder['estimated_approval_days']
-    )
-        ? (int)$existingWorkOrder['estimated_approval_days']
-        : null;
+    $estimatedApprovalDays =
+        $existing['estimated_approval_days'] === null
+            ? null
+            : (int)$existing['estimated_approval_days'];
 
     if (array_key_exists('estimated_approval_days', $input)) {
-        $estimatedApprovalDaysInput = trim(
-            (string)$input['estimated_approval_days']
-        );
-
+        $raw = trim((string)$input['estimated_approval_days']);
         $estimatedApprovalDays = null;
 
-        if ($estimatedApprovalDaysInput !== '') {
-            if (
-                !ctype_digit($estimatedApprovalDaysInput)
-                || (int)$estimatedApprovalDaysInput > 365
-            ) {
+        if ($raw !== '') {
+            if (!ctype_digit($raw) || (int)$raw > 365) {
                 return [
                     'ok' => false,
                     'errors' => [
-                        'Estimated approval days must be between 0 and 365.',
+                        'Estimated approval days must be between '
+                        . '0 and 365.',
                     ],
                 ];
             }
 
-            $estimatedApprovalDays = (int)$estimatedApprovalDaysInput;
+            $estimatedApprovalDays = (int)$raw;
         }
     }
 
-    $paymentTermsText = $existingWorkOrder['payment_terms_text']
-        ?? null;
+    $paymentTermsText = $existing['payment_terms_text'] ?? null;
 
     if (array_key_exists('payment_terms_text', $input)) {
         $paymentTermsText = trim(
@@ -1729,10 +1961,9 @@ function field_ops_update_work_order_state(array $input): array
     }
 
     $now = date('Y-m-d H:i:s');
-
-    $submittedAt = $existingWorkOrder['submitted_at'] ?? null;
-    $approvedAt = $existingWorkOrder['approved_at'] ?? null;
-    $paidAt = $existingWorkOrder['paid_at'] ?? null;
+    $submittedAt = $existing['submitted_at'] ?? null;
+    $approvedAt = $existing['approved_at'] ?? null;
+    $paidAt = $existing['paid_at'] ?? null;
 
     if (
         $submittedAt === null
@@ -1761,10 +1992,7 @@ function field_ops_update_work_order_state(array $input): array
 
     if (
         $paidAt === null
-        && (
-            $status === 'PAID'
-            || $paymentStatus === 'PAID'
-        )
+        && ($status === 'PAID' || $paymentStatus === 'PAID')
     ) {
         $paidAt = $now;
     }
@@ -1803,13 +2031,17 @@ function field_ops_update_work_order_state(array $input): array
         $grossPay,
         $platformFee,
         $insuranceFee,
-        field_ops_money($input['bonus_pay'] ?? 0),
-        field_ops_money($input['reimbursement_amount'] ?? 0),
-        field_ops_decimal($input['mileage'] ?? 0),
-        field_ops_decimal($input['mileage_rate'] ?? 0, 4),
-        field_ops_int($input['drive_minutes'] ?? 0),
-        field_ops_int($input['onsite_minutes'] ?? 0),
-        field_ops_int($input['admin_minutes'] ?? 0),
+        $moneyValue('bonus_pay', $input, $existing),
+        $moneyValue(
+            'reimbursement_amount',
+            $input,
+            $existing
+        ),
+        $decimalValue('mileage', $input, $existing),
+        $decimalValue('mileage_rate', $input, $existing, 4),
+        $intValue('drive_minutes', $input, $existing),
+        $intValue('onsite_minutes', $input, $existing),
+        $intValue('admin_minutes', $input, $existing),
         $expectedPaymentAt,
         $paymentTermsDays,
         $estimatedApprovalDays,
@@ -1822,9 +2054,6 @@ function field_ops_update_work_order_state(array $input): array
 
     return ['ok' => true];
 }
-
-
-
 function field_ops_pay_change_statuses(): array
 {
     return [
