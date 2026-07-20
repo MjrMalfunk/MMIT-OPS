@@ -114,6 +114,48 @@ function field_ops_ensure_schema(): void
     ");
 
     $pdo->exec("
+        CREATE TABLE IF NOT EXISTS field_work_order_projects (
+            project_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            project_name VARCHAR(220) NOT NULL,
+            platform VARCHAR(80) NOT NULL DEFAULT 'FieldNation',
+            buyer_id INT UNSIGNED NULL,
+            external_reference VARCHAR(120) NULL,
+            project_status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE',
+            notes TEXT NULL,
+            created_by INT UNSIGNED NULL,
+            deleted_by INT UNSIGNED NULL,
+            delete_reason VARCHAR(255) NULL,
+            deleted_at DATETIME NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_field_projects_status (project_status),
+            INDEX idx_field_projects_buyer (buyer_id),
+            INDEX idx_field_projects_external (external_reference),
+            INDEX idx_field_projects_deleted (deleted_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS field_work_order_project_members (
+            project_member_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            project_id INT UNSIGNED NOT NULL,
+            work_order_id INT UNSIGNED NOT NULL,
+            sequence_number SMALLINT UNSIGNED NULL,
+            member_label VARCHAR(100) NULL,
+            notes TEXT NULL,
+            created_by INT UNSIGNED NULL,
+            deleted_by INT UNSIGNED NULL,
+            delete_reason VARCHAR(255) NULL,
+            deleted_at DATETIME NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_field_project_member_work_order (work_order_id),
+            INDEX idx_field_project_members_project (project_id),
+            INDEX idx_field_project_members_deleted (deleted_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+
+    $pdo->exec("
         CREATE TABLE IF NOT EXISTS field_work_order_pay_changes (
             pay_change_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
             work_order_id INT UNSIGNED NOT NULL,
@@ -687,6 +729,546 @@ function field_ops_inventory_items(bool $activeOnly = true): array
     $sql .= " ORDER BY category ASC, item_name ASC";
 
     return db()->query($sql)->fetchAll(PDO::FETCH_ASSOC) ?: [];
+}
+
+function field_ops_project_statuses(): array
+{
+    return [
+        'ACTIVE',
+        'COMPLETED',
+        'CANCELLED',
+    ];
+}
+
+function field_ops_find_project(
+    int $projectId,
+    bool $includeDeleted = false
+): ?array {
+    field_ops_ensure_schema();
+
+    if ($projectId <= 0) {
+        return null;
+    }
+
+    $sql = "
+        SELECT p.*,
+               b.buyer_name
+        FROM field_work_order_projects p
+        LEFT JOIN field_buyers b ON b.buyer_id = p.buyer_id
+        WHERE p.project_id = ?
+    ";
+
+    if (!$includeDeleted) {
+        $sql .= " AND p.deleted_at IS NULL";
+    }
+
+    $sql .= " LIMIT 1";
+
+    $statement = db()->prepare($sql);
+    $statement->execute([$projectId]);
+    $row = $statement->fetch(PDO::FETCH_ASSOC);
+
+    return is_array($row) ? $row : null;
+}
+
+function field_ops_save_project(array $input, int $userId = 0): array
+{
+    field_ops_ensure_schema();
+
+    $projectId = (int)($input['project_id'] ?? 0);
+    $projectName = trim((string)($input['project_name'] ?? ''));
+
+    if ($projectName === '') {
+        return [
+            'ok' => false,
+            'errors' => ['Project name is required.'],
+        ];
+    }
+
+    $projectName = substr($projectName, 0, 220);
+    $platform = substr(
+        trim((string)($input['platform'] ?? 'FieldNation'))
+            ?: 'FieldNation',
+        0,
+        80
+    );
+    $externalReference = substr(
+        trim((string)($input['external_reference'] ?? '')),
+        0,
+        120
+    );
+    $status = field_ops_clean_status(
+        (string)($input['project_status'] ?? 'ACTIVE'),
+        field_ops_project_statuses(),
+        'ACTIVE'
+    );
+    $buyerId = !empty($input['buyer_id'])
+        ? (int)$input['buyer_id']
+        : null;
+    $notes = trim((string)($input['notes'] ?? ''));
+
+    if ($buyerId !== null) {
+        $buyerCheck = db()->prepare("
+            SELECT buyer_id
+            FROM field_buyers
+            WHERE buyer_id = ?
+            LIMIT 1
+        ");
+        $buyerCheck->execute([$buyerId]);
+
+        if (!$buyerCheck->fetchColumn()) {
+            return [
+                'ok' => false,
+                'errors' => ['Selected buyer was not found.'],
+            ];
+        }
+    }
+
+    if ($projectId > 0) {
+        if (!field_ops_find_project($projectId)) {
+            return [
+                'ok' => false,
+                'errors' => ['Project not found.'],
+            ];
+        }
+
+        db()->prepare("
+            UPDATE field_work_order_projects
+            SET project_name = ?,
+                platform = ?,
+                buyer_id = ?,
+                external_reference = ?,
+                project_status = ?,
+                notes = ?,
+                updated_at = NOW()
+            WHERE project_id = ?
+              AND deleted_at IS NULL
+            LIMIT 1
+        ")->execute([
+            $projectName,
+            $platform,
+            $buyerId,
+            $externalReference !== '' ? $externalReference : null,
+            $status,
+            $notes !== '' ? $notes : null,
+            $projectId,
+        ]);
+
+        return [
+            'ok' => true,
+            'project_id' => $projectId,
+        ];
+    }
+
+    db()->prepare("
+        INSERT INTO field_work_order_projects
+          (
+            project_name,
+            platform,
+            buyer_id,
+            external_reference,
+            project_status,
+            notes,
+            created_by
+          )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ")->execute([
+        $projectName,
+        $platform,
+        $buyerId,
+        $externalReference !== '' ? $externalReference : null,
+        $status,
+        $notes !== '' ? $notes : null,
+        $userId > 0 ? $userId : null,
+    ]);
+
+    return [
+        'ok' => true,
+        'project_id' => (int)db()->lastInsertId(),
+    ];
+}
+
+function field_ops_project_members(int $projectId): array
+{
+    field_ops_ensure_schema();
+
+    $statement = db()->prepare("
+        SELECT pm.project_member_id,
+               pm.project_id,
+               pm.work_order_id,
+               pm.sequence_number,
+               pm.member_label,
+               pm.notes AS member_notes,
+               pm.created_at AS member_created_at,
+               wo.*,
+               b.buyer_name
+        FROM field_work_order_project_members pm
+        INNER JOIN field_work_orders wo
+          ON wo.work_order_id = pm.work_order_id
+         AND wo.deleted_at IS NULL
+        LEFT JOIN field_buyers b ON b.buyer_id = wo.buyer_id
+        WHERE pm.project_id = ?
+          AND pm.deleted_at IS NULL
+        ORDER BY
+          CASE WHEN pm.sequence_number IS NULL THEN 1 ELSE 0 END,
+          pm.sequence_number ASC,
+          COALESCE(wo.scheduled_start_at, wo.created_at) ASC,
+          wo.work_order_id ASC
+    ");
+    $statement->execute([$projectId]);
+    $rows = $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+    foreach ($rows as &$row) {
+        $row['totals'] = field_ops_work_order_totals(
+            (int)$row['work_order_id']
+        );
+    }
+    unset($row);
+
+    return $rows;
+}
+
+function field_ops_project_totals(int $projectId): array
+{
+    $members = field_ops_project_members($projectId);
+    $totals = [
+        'work_order_count' => 0,
+        'gross' => 0.0,
+        'fees' => 0.0,
+        'platform_fee' => 0.0,
+        'insurance_fee' => 0.0,
+        'mileage_cost' => 0.0,
+        'material_cost' => 0.0,
+        'material_billable' => 0.0,
+        'expense_cost' => 0.0,
+        'reimbursable_expenses' => 0.0,
+        'estimated_net' => 0.0,
+        'total_minutes' => 0,
+        'total_hours' => 0.0,
+        'effective_hourly' => 0.0,
+    ];
+
+    foreach ($members as $member) {
+        $memberTotals = (array)($member['totals'] ?? []);
+        $totals['work_order_count']++;
+
+        foreach ([
+            'gross',
+            'fees',
+            'platform_fee',
+            'insurance_fee',
+            'mileage_cost',
+            'material_cost',
+            'material_billable',
+            'expense_cost',
+            'reimbursable_expenses',
+            'estimated_net',
+        ] as $key) {
+            $totals[$key] += (float)($memberTotals[$key] ?? 0);
+        }
+
+        $totals['total_minutes'] += (int)(
+            $memberTotals['total_minutes']
+            ?? 0
+        );
+    }
+
+    $totals['total_hours'] = $totals['total_minutes'] / 60;
+    $totals['effective_hourly'] = $totals['total_hours'] > 0
+        ? $totals['estimated_net'] / $totals['total_hours']
+        : 0.0;
+
+    return $totals;
+}
+
+function field_ops_projects(int $limit = 100, array $options = []): array
+{
+    field_ops_ensure_schema();
+
+    $limit = max(1, min(500, $limit));
+    $query = trim((string)($options['q'] ?? ''));
+    $sql = "
+        SELECT p.*,
+               b.buyer_name
+        FROM field_work_order_projects p
+        LEFT JOIN field_buyers b ON b.buyer_id = p.buyer_id
+        WHERE p.deleted_at IS NULL
+    ";
+    $params = [];
+
+    if ($query !== '') {
+        $sql .= "
+          AND (
+               p.project_name LIKE ?
+            OR p.external_reference LIKE ?
+            OR p.platform LIKE ?
+            OR b.buyer_name LIKE ?
+          )
+        ";
+        $search = '%' . $query . '%';
+        $params = [$search, $search, $search, $search];
+    }
+
+    $sql .= "
+        ORDER BY
+          CASE p.project_status
+            WHEN 'ACTIVE' THEN 0
+            WHEN 'COMPLETED' THEN 1
+            ELSE 2
+          END,
+          p.updated_at DESC,
+          p.project_id DESC
+        LIMIT {$limit}
+    ";
+
+    $statement = db()->prepare($sql);
+    $statement->execute($params);
+    $rows = $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+    foreach ($rows as &$row) {
+        $row['totals'] = field_ops_project_totals(
+            (int)$row['project_id']
+        );
+    }
+    unset($row);
+
+    return $rows;
+}
+
+function field_ops_project_for_work_order(int $workOrderId): ?array
+{
+    field_ops_ensure_schema();
+
+    $statement = db()->prepare("
+        SELECT p.*,
+               pm.project_member_id,
+               pm.sequence_number,
+               pm.member_label,
+               pm.notes AS member_notes
+        FROM field_work_order_project_members pm
+        INNER JOIN field_work_order_projects p
+          ON p.project_id = pm.project_id
+         AND p.deleted_at IS NULL
+        WHERE pm.work_order_id = ?
+          AND pm.deleted_at IS NULL
+        LIMIT 1
+    ");
+    $statement->execute([$workOrderId]);
+    $row = $statement->fetch(PDO::FETCH_ASSOC);
+
+    return is_array($row) ? $row : null;
+}
+
+function field_ops_assign_work_order_to_project(
+    array $input,
+    int $userId = 0
+): array {
+    field_ops_ensure_schema();
+
+    $projectId = (int)($input['project_id'] ?? 0);
+    $workOrderId = (int)($input['work_order_id'] ?? 0);
+
+    if (!field_ops_find_project($projectId)) {
+        return [
+            'ok' => false,
+            'errors' => ['Project not found.'],
+        ];
+    }
+
+    if (!field_ops_find_work_order($workOrderId)) {
+        return [
+            'ok' => false,
+            'errors' => ['Work order not found.'],
+        ];
+    }
+
+    $sequenceInput = trim((string)($input['sequence_number'] ?? ''));
+    $sequenceNumber = $sequenceInput === ''
+        ? null
+        : max(1, min(65535, (int)$sequenceInput));
+    $memberLabel = substr(
+        trim((string)($input['member_label'] ?? '')),
+        0,
+        100
+    );
+    $notes = trim((string)($input['notes'] ?? ''));
+
+    $existing = db()->prepare("
+        SELECT project_member_id
+        FROM field_work_order_project_members
+        WHERE work_order_id = ?
+        LIMIT 1
+    ");
+    $existing->execute([$workOrderId]);
+    $projectMemberId = (int)($existing->fetchColumn() ?: 0);
+
+    if ($projectMemberId > 0) {
+        db()->prepare("
+            UPDATE field_work_order_project_members
+            SET project_id = ?,
+                sequence_number = ?,
+                member_label = ?,
+                notes = ?,
+                deleted_at = NULL,
+                deleted_by = NULL,
+                delete_reason = NULL,
+                updated_at = NOW()
+            WHERE project_member_id = ?
+            LIMIT 1
+        ")->execute([
+            $projectId,
+            $sequenceNumber,
+            $memberLabel !== '' ? $memberLabel : null,
+            $notes !== '' ? $notes : null,
+            $projectMemberId,
+        ]);
+    } else {
+        db()->prepare("
+            INSERT INTO field_work_order_project_members
+              (
+                project_id,
+                work_order_id,
+                sequence_number,
+                member_label,
+                notes,
+                created_by
+              )
+            VALUES (?, ?, ?, ?, ?, ?)
+        ")->execute([
+            $projectId,
+            $workOrderId,
+            $sequenceNumber,
+            $memberLabel !== '' ? $memberLabel : null,
+            $notes !== '' ? $notes : null,
+            $userId > 0 ? $userId : null,
+        ]);
+        $projectMemberId = (int)db()->lastInsertId();
+    }
+
+    return [
+        'ok' => true,
+        'project_id' => $projectId,
+        'work_order_id' => $workOrderId,
+        'project_member_id' => $projectMemberId,
+    ];
+}
+
+function field_ops_remove_work_order_from_project(
+    array $input,
+    int $userId = 0
+): array {
+    field_ops_ensure_schema();
+
+    $projectId = (int)($input['project_id'] ?? 0);
+    $workOrderId = (int)($input['work_order_id'] ?? 0);
+    $reason = substr(
+        trim((string)($input['delete_reason'] ?? ''))
+            ?: 'Removed from project.',
+        0,
+        255
+    );
+
+    $statement = db()->prepare("
+        UPDATE field_work_order_project_members
+        SET deleted_at = NOW(),
+            deleted_by = ?,
+            delete_reason = ?,
+            updated_at = NOW()
+        WHERE project_id = ?
+          AND work_order_id = ?
+          AND deleted_at IS NULL
+        LIMIT 1
+    ");
+    $statement->execute([
+        $userId > 0 ? $userId : null,
+        $reason,
+        $projectId,
+        $workOrderId,
+    ]);
+
+    if ($statement->rowCount() !== 1) {
+        return [
+            'ok' => false,
+            'errors' => ['Active project membership was not found.'],
+        ];
+    }
+
+    return [
+        'ok' => true,
+        'project_id' => $projectId,
+        'work_order_id' => $workOrderId,
+    ];
+}
+
+function field_ops_remove_project(array $input, int $userId = 0): array
+{
+    field_ops_ensure_schema();
+
+    $projectId = (int)($input['project_id'] ?? 0);
+    $reason = substr(
+        trim((string)($input['delete_reason'] ?? ''))
+            ?: 'Project removed.',
+        0,
+        255
+    );
+
+    if (!field_ops_find_project($projectId)) {
+        return [
+            'ok' => false,
+            'errors' => ['Project not found.'],
+        ];
+    }
+
+    $pdo = db();
+    $pdo->beginTransaction();
+
+    try {
+        $pdo->prepare("
+            UPDATE field_work_order_projects
+            SET project_status = 'CANCELLED',
+                deleted_at = NOW(),
+                deleted_by = ?,
+                delete_reason = ?,
+                updated_at = NOW()
+            WHERE project_id = ?
+              AND deleted_at IS NULL
+            LIMIT 1
+        ")->execute([
+            $userId > 0 ? $userId : null,
+            $reason,
+            $projectId,
+        ]);
+
+        $pdo->prepare("
+            UPDATE field_work_order_project_members
+            SET deleted_at = NOW(),
+                deleted_by = ?,
+                delete_reason = ?,
+                updated_at = NOW()
+            WHERE project_id = ?
+              AND deleted_at IS NULL
+        ")->execute([
+            $userId > 0 ? $userId : null,
+            'Project removed: ' . $reason,
+            $projectId,
+        ]);
+
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+
+        return [
+            'ok' => false,
+            'errors' => ['Unable to remove project.'],
+        ];
+    }
+
+    return [
+        'ok' => true,
+        'project_id' => $projectId,
+    ];
 }
 
 function field_ops_work_orders(int $limit = 100, array $options = []): array

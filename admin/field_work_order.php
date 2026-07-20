@@ -74,6 +74,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $result = field_ops_sync_attachment_to_onedrive((int)($_POST['attachment_id'] ?? 0));
     } elseif ($action === 'sync_all_attachments_onedrive') {
         $result = field_ops_sync_work_order_attachments_to_onedrive($workOrderId);
+    } elseif ($action === 'assign_project') {
+        $result = field_ops_assign_work_order_to_project(
+            $_POST,
+            (int)(current_user()['user_id'] ?? 0)
+        );
+    } elseif ($action === 'remove_project_membership') {
+        $result = field_ops_remove_work_order_from_project(
+            $_POST,
+            (int)(current_user()['user_id'] ?? 0)
+        );
     } elseif ($action === 'discard_work_order') {
         $result = field_ops_discard_work_order($workOrderId, (string)($_POST['delete_reason'] ?? 'Discarded from detail page.'));
     }
@@ -94,6 +104,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'delete_attachment' => 'Attachment removed.',
             'sync_attachment_onedrive' => 'Attachment synced to OneDrive.',
             'sync_all_attachments_onedrive' => 'W/O attachments synced to OneDrive.',
+            'assign_project' => 'Project membership saved.',
+            'remove_project_membership' => 'Work order removed from project.',
             'discard_work_order' => 'Work order discarded.',
             default => 'Saved.',
         };
@@ -130,6 +142,14 @@ $linkedInvoice = field_ops_existing_invoice_for_work_order($workOrderId);
 $onedriveStatus = onedrive_connection_status();
 $canCreateInvoice = field_ops_can_invoice_work_order($wo);
 $defaultRevenueAccountId = field_ops_default_revenue_account_id();
+$projectMembership = field_ops_project_for_work_order($workOrderId);
+$activeProjects = array_values(array_filter(
+    field_ops_projects(200),
+    static fn(array $project): bool =>
+        strtoupper((string)($project['project_status'] ?? '')) === 'ACTIVE'
+        || (int)($project['project_id'] ?? 0)
+            === (int)($projectMembership['project_id'] ?? 0)
+));
 
 $receivable = field_ops_receivable_state($wo);
 
@@ -390,6 +410,7 @@ $receivableStateClass = match ($receivableState) {
       </p>
     </div>
     <div class="actions">
+      <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_projects.php">Projects</a>
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_ops.php">Back to Field Ops</a>
     </div>
   </div>
@@ -440,6 +461,105 @@ $receivableStateClass = match ($receivableState) {
           </span>
         <?php endif; ?>
       </div>
+    <?php endif; ?>
+  </section>
+
+  <section class="card" aria-label="Work-order project membership" style="margin-bottom:18px;">
+    <div class="topbar" style="margin-bottom:12px;align-items:flex-start;">
+      <div>
+        <div class="eyebrow">Project / bundle</div>
+        <h2 style="margin-top:6px;">
+          <?php if ($projectMembership !== null): ?>
+            <a href="<?= $h(BASE_URL) ?>/admin/field_projects.php?id=<?= (int)$projectMembership['project_id'] ?>">
+              <?= $h($projectMembership['project_name']) ?>
+            </a>
+          <?php else: ?>
+            Not assigned to a project
+          <?php endif; ?>
+        </h2>
+
+        <?php if ($projectMembership !== null): ?>
+          <p style="margin:0;">
+            <?= $h($projectMembership['external_reference'] ?? 'No parent reference') ?>
+            <?php if (!empty($projectMembership['member_label'])): ?>
+              · <?= $h($projectMembership['member_label']) ?>
+            <?php endif; ?>
+            <?php if (!empty($projectMembership['sequence_number'])): ?>
+              · Position <?= (int)$projectMembership['sequence_number'] ?>
+            <?php endif; ?>
+          </p>
+        <?php else: ?>
+          <p style="margin:0;">Group related days or sites while keeping this W/O's own pay, time, expenses, and status.</p>
+        <?php endif; ?>
+      </div>
+    </div>
+
+    <?php if ($activeProjects): ?>
+      <form method="post" class="form-grid">
+        <?= csrf_field() ?>
+        <input type="hidden" name="action" value="assign_project">
+        <input type="hidden" name="work_order_id" value="<?= (int)$workOrderId ?>">
+
+        <label>
+          Project
+          <select name="project_id" required>
+            <option value="">Choose project</option>
+            <?php foreach ($activeProjects as $project): ?>
+              <option
+                value="<?= (int)$project['project_id'] ?>"
+                <?= (int)$project['project_id'] === (int)($projectMembership['project_id'] ?? 0) ? 'selected' : '' ?>
+              ><?= $h($project['project_name']) ?><?= empty($project['external_reference']) ? '' : ' · ' . $h($project['external_reference']) ?></option>
+            <?php endforeach; ?>
+          </select>
+        </label>
+
+        <label>
+          Sequence
+          <input
+            name="sequence_number"
+            inputmode="numeric"
+            value="<?= $h((string)($projectMembership['sequence_number'] ?? '')) ?>"
+            placeholder="1"
+          >
+        </label>
+
+        <label class="full">
+          Day / site label
+          <input
+            name="member_label"
+            value="<?= $h((string)($projectMembership['member_label'] ?? '')) ?>"
+            placeholder="Day 1 · Prep and cutover"
+          >
+        </label>
+
+        <label class="full">
+          Membership notes
+          <textarea name="notes" placeholder="Project-specific note for this W/O."><?= $h((string)($projectMembership['member_notes'] ?? '')) ?></textarea>
+        </label>
+
+        <div class="full actions">
+          <button class="btn btn-primary" type="submit">
+            <?= $projectMembership === null ? 'Add to project' : 'Save project placement' ?>
+          </button>
+          <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_projects.php">Manage projects</a>
+        </div>
+      </form>
+    <?php else: ?>
+      <div class="actions">
+        <a class="btn btn-primary" href="<?= $h(BASE_URL) ?>/admin/field_projects.php">Create first project</a>
+      </div>
+    <?php endif; ?>
+
+    <?php if ($projectMembership !== null): ?>
+      <form method="post" class="actions" style="margin-top:12px;">
+        <?= csrf_field() ?>
+        <input type="hidden" name="action" value="remove_project_membership">
+        <input type="hidden" name="work_order_id" value="<?= (int)$workOrderId ?>">
+        <input type="hidden" name="project_id" value="<?= (int)$projectMembership['project_id'] ?>">
+        <input type="hidden" name="delete_reason" value="Removed from W/O detail page.">
+        <button class="btn btn-danger" type="submit">Remove from project</button>
+        <span class="field-hint">Recoverable for audit and later restoration.</span>
+      </form>
     <?php endif; ?>
   </section>
 
