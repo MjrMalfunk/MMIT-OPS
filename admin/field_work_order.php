@@ -770,11 +770,20 @@ $receivableStateClass = match ($receivableState) {
         </label>
 
         <label>
-          Updated insurance fee
+          Updated GL insurance fee
           <input
             name="approved_insurance_fee"
             inputmode="decimal"
             placeholder="Leave blank until FN shows the revised fee"
+          >
+        </label>
+
+        <label>
+          Updated OAI fee
+          <input
+            name="approved_oai_fee"
+            inputmode="decimal"
+            placeholder="Leave blank unless FN shows an OAI charge"
           >
         </label>
 
@@ -1055,7 +1064,8 @@ $receivableStateClass = match ($receivableState) {
 
         <label>Gross pay <input name="gross_pay" inputmode="decimal" value="<?= $h($moneyInput($wo['gross_pay'])) ?>"></label>
         <label>Provider fee <input name="platform_fee" inputmode="decimal" value="<?= $h($moneyInput($wo['platform_fee'])) ?>"></label>
-        <label>Insurance fee <input name="insurance_fee" inputmode="decimal" value="<?= $h($moneyInput($wo['insurance_fee'] ?? 0)) ?>"></label>
+        <label>GL insurance fee <input name="insurance_fee" inputmode="decimal" value="<?= $h($moneyInput($wo['insurance_fee'] ?? 0)) ?>"></label>
+        <label>OAI fee (optional) <input name="oai_fee" inputmode="decimal" value="<?= $h($moneyInput($wo['oai_fee'] ?? 0)) ?>"></label>
         <label>Bonus pay <input name="bonus_pay" inputmode="decimal" value="<?= $h($moneyInput($wo['bonus_pay'])) ?>"></label>
         <label>Reimbursement <input name="reimbursement_amount" inputmode="decimal" value="<?= $h($moneyInput($wo['reimbursement_amount'])) ?>"></label>
         <label>Mileage <input name="mileage" value="<?= $h($wo['mileage']) ?>"></label>

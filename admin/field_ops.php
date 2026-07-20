@@ -1043,8 +1043,13 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
         </label>
 
         <label>
-          Insurance fee
-          <input name="insurance_fee" inputmode="decimal" placeholder="Manual insurance, usually $0.00">
+          GL insurance fee
+          <input name="insurance_fee" inputmode="decimal" placeholder="Auto-estimates 1.95% for FieldNation">
+        </label>
+
+        <label>
+          OAI fee (optional)
+          <input name="oai_fee" inputmode="decimal" placeholder="Only when FieldNation shows this charge">
         </label>
 
         <label>
@@ -1363,9 +1368,15 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
                   <dd><?= $fmtMoney($wo['platform_fee']) ?></dd>
                 </div>
                 <div>
-                  <dt>Insurance</dt>
+                  <dt>GL</dt>
                   <dd><?= $fmtMoney($wo['insurance_fee'] ?? 0) ?></dd>
                 </div>
+                <?php if ((float)($wo['oai_fee'] ?? 0) > 0): ?>
+                  <div>
+                    <dt>OAI</dt>
+                    <dd><?= $fmtMoney($wo['oai_fee']) ?></dd>
+                  </div>
+                <?php endif; ?>
               </dl>
             </td>
             <td>

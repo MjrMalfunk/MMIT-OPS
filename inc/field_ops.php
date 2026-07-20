@@ -95,6 +95,7 @@ function field_ops_ensure_schema(): void
             authorized_hours DECIMAL(12,2) NULL,
             platform_fee DECIMAL(12,2) NOT NULL DEFAULT 0.00,
             insurance_fee DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+            oai_fee DECIMAL(12,2) NOT NULL DEFAULT 0.00,
             bonus_pay DECIMAL(12,2) NOT NULL DEFAULT 0.00,
             reimbursement_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
             mileage DECIMAL(12,2) NOT NULL DEFAULT 0.00,
@@ -170,6 +171,7 @@ function field_ops_ensure_schema(): void
             approved_increase DECIMAL(12,2) NULL,
             approved_platform_fee DECIMAL(12,2) NULL,
             approved_insurance_fee DECIMAL(12,2) NULL,
+            approved_oai_fee DECIMAL(12,2) NULL,
             requested_at DATETIME NOT NULL,
             resolved_at DATETIME NULL,
             resolution_notes TEXT NULL,
@@ -182,6 +184,30 @@ function field_ops_ensure_schema(): void
             INDEX idx_field_pay_changes_requested (requested_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     ");
+
+    foreach ([
+        'approved_oai_fee' => "DECIMAL(12,2) NULL",
+    ] as $column => $definition) {
+        if (
+            function_exists('db_column_exists')
+            && !db_column_exists(
+                'field_work_order_pay_changes',
+                $column
+            )
+        ) {
+            try {
+                $pdo->exec(
+                    "ALTER TABLE field_work_order_pay_changes "
+                    . "ADD COLUMN {$column} {$definition}"
+                );
+            } catch (Throwable $e) {
+                error_log(
+                    'Unable to add field_work_order_pay_changes.'
+                    . $column . ': ' . $e->getMessage()
+                );
+            }
+        }
+    }
 
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS field_work_order_materials (
@@ -225,6 +251,7 @@ function field_ops_ensure_schema(): void
         'invoice_created_at' => "DATETIME NULL",
 
         'insurance_fee' => "DECIMAL(12,2) NOT NULL DEFAULT 0.00",
+        'oai_fee' => "DECIMAL(12,2) NOT NULL DEFAULT 0.00",
         'authorized_rate' => "DECIMAL(12,2) NULL",
         'authorized_hours' => "DECIMAL(12,2) NULL",
         'deleted_at' => "DATETIME NULL",
@@ -937,6 +964,7 @@ function field_ops_project_totals(int $projectId): array
         'fees' => 0.0,
         'platform_fee' => 0.0,
         'insurance_fee' => 0.0,
+        'oai_fee' => 0.0,
         'mileage_cost' => 0.0,
         'material_cost' => 0.0,
         'material_billable' => 0.0,
@@ -957,6 +985,7 @@ function field_ops_project_totals(int $projectId): array
             'fees',
             'platform_fee',
             'insurance_fee',
+            'oai_fee',
             'mileage_cost',
             'material_cost',
             'material_billable',
@@ -1287,6 +1316,7 @@ function field_ops_work_orders(int $limit = 100, array $options = []): array
                  wo.gross_pay + wo.bonus_pay + wo.reimbursement_amount
                  - wo.platform_fee
                  - wo.insurance_fee
+                 - wo.oai_fee
                  - COALESCE(mat.material_cost, 0)
                  - COALESCE(exp.expense_cost, 0)
                ) AS estimated_net
@@ -1450,7 +1480,7 @@ function field_ops_fn_insurance_fee_rate(): float
 {
     $rate = defined('FIELD_OPS_FN_INSURANCE_FEE_RATE')
         ? (float)constant('FIELD_OPS_FN_INSURANCE_FEE_RATE')
-        : 0.019;
+        : 0.0195;
 
     return min(1.0, max(0.0, $rate));
 }
@@ -1487,6 +1517,8 @@ function field_ops_fn_fee_estimates(float $grossPay): array
             $grossPay * field_ops_fn_insurance_fee_rate(),
             2
         ),
+        // OAI is optional and only applies when FieldNation shows it.
+        'oai_fee' => 0.0,
     ];
 }
 
@@ -1529,14 +1561,16 @@ function field_ops_save_work_order(array $input, int $userId = 0): array
         $insuranceFee = $feeEstimates['insurance_fee'];
     }
 
+    $oaiFee = field_ops_money($input['oai_fee'] ?? 0);
+
     $st = db()->prepare("
         INSERT INTO field_work_orders
           (platform, external_work_order_number, buyer_id, title, work_type, site_name, site_address, city, state,
            scheduled_start_at, scheduled_end_at, checked_in_at, checked_out_at, actual_left_site_at,
-           status, payment_status, gross_pay, platform_fee, insurance_fee, bonus_pay, reimbursement_amount,
+           status, payment_status, gross_pay, platform_fee, insurance_fee, oai_fee, bonus_pay, reimbursement_amount,
            mileage, mileage_rate, drive_minutes, onsite_minutes, admin_minutes, notes, created_by)
         VALUES
-          (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ");
 
     $st->execute([
@@ -1559,6 +1593,7 @@ function field_ops_save_work_order(array $input, int $userId = 0): array
         $grossPay,
         $platformFee,
         $insuranceFee,
+        $oaiFee,
         field_ops_money($input['bonus_pay'] ?? 0),
         field_ops_money($input['reimbursement_amount'] ?? 0),
         field_ops_decimal($input['mileage'] ?? 0),
@@ -1756,7 +1791,9 @@ function field_ops_work_order_totals(int $workOrderId): array
     $totalMinutes = $detailMinutes > 0 ? $detailMinutes : $baseMinutes;
 
     $gross = (float)$wo['gross_pay'] + (float)$wo['bonus_pay'] + (float)$wo['reimbursement_amount'];
-    $fees = (float)$wo['platform_fee'] + (float)($wo['insurance_fee'] ?? 0);
+    $fees = (float)$wo['platform_fee']
+        + (float)($wo['insurance_fee'] ?? 0)
+        + (float)($wo['oai_fee'] ?? 0);
     $mileageCost = (float)$wo['mileage'] * (float)$wo['mileage_rate'];
     $materialCost = (float)($materials['material_cost'] ?? 0);
     $expenseCost = (float)($expenses['expense_cost'] ?? 0);
@@ -1768,6 +1805,7 @@ function field_ops_work_order_totals(int $workOrderId): array
         'fees' => $fees,
         'platform_fee' => (float)$wo['platform_fee'],
         'insurance_fee' => (float)($wo['insurance_fee'] ?? 0),
+        'oai_fee' => (float)($wo['oai_fee'] ?? 0),
         'mileage_cost' => $mileageCost,
         'material_cost' => $materialCost,
         'material_billable' => (float)($materials['material_billable'] ?? 0),
@@ -2445,6 +2483,7 @@ function field_ops_update_work_order_state(array $input): array
         $input,
         $existing
     );
+    $oaiFee = $moneyValue('oai_fee', $input, $existing);
 
     $expectedPaymentAt = $existing['expected_payment_at'] ?? null;
 
@@ -2588,6 +2627,7 @@ function field_ops_update_work_order_state(array $input): array
             gross_pay = ?,
             platform_fee = ?,
             insurance_fee = ?,
+            oai_fee = ?,
             bonus_pay = ?,
             reimbursement_amount = ?,
             mileage = ?,
@@ -2613,6 +2653,7 @@ function field_ops_update_work_order_state(array $input): array
         $grossPay,
         $platformFee,
         $insuranceFee,
+        $oaiFee,
         $moneyValue('bonus_pay', $input, $existing),
         $moneyValue(
             'reimbursement_amount',
@@ -2884,6 +2925,9 @@ function field_ops_resolve_pay_change(
     $approvedInsuranceFeeInput = trim(
         (string)($input['approved_insurance_fee'] ?? '')
     );
+    $approvedOaiFeeInput = trim(
+        (string)($input['approved_oai_fee'] ?? '')
+    );
     $resolutionNotes = trim(
         (string)($input['resolution_notes'] ?? '')
     );
@@ -2963,6 +3007,7 @@ function field_ops_resolve_pay_change(
         $approvedIncrease = null;
         $approvedPlatformFee = null;
         $approvedInsuranceFee = null;
+        $approvedOaiFee = null;
 
         if ($resolutionStatus !== 'DENIED') {
             if ($approvedTotalInput === '') {
@@ -3016,12 +3061,16 @@ function field_ops_resolve_pay_change(
             $approvedInsuranceFee = $approvedInsuranceFeeInput === ''
                 ? null
                 : field_ops_money($approvedInsuranceFeeInput);
+            $approvedOaiFee = $approvedOaiFeeInput === ''
+                ? null
+                : field_ops_money($approvedOaiFeeInput);
 
             $updateWorkOrder = $pdo->prepare("
                 UPDATE field_work_orders
                 SET gross_pay = ?,
                     platform_fee = COALESCE(?, platform_fee),
                     insurance_fee = COALESCE(?, insurance_fee),
+                    oai_fee = COALESCE(?, oai_fee),
                     updated_at = NOW()
                 WHERE work_order_id = ?
                 LIMIT 1
@@ -3030,6 +3079,7 @@ function field_ops_resolve_pay_change(
                 $approvedTotal,
                 $approvedPlatformFee,
                 $approvedInsuranceFee,
+                $approvedOaiFee,
                 $workOrderId,
             ]);
         }
@@ -3041,6 +3091,7 @@ function field_ops_resolve_pay_change(
                 approved_increase = ?,
                 approved_platform_fee = ?,
                 approved_insurance_fee = ?,
+                approved_oai_fee = ?,
                 resolved_at = NOW(),
                 resolution_notes = ?,
                 resolved_by = ?,
@@ -3055,6 +3106,7 @@ function field_ops_resolve_pay_change(
             $approvedIncrease,
             $approvedPlatformFee,
             $approvedInsuranceFee,
+            $approvedOaiFee,
             $resolutionNotes !== '' ? $resolutionNotes : null,
             $userId > 0 ? $userId : null,
             $payChangeId,
@@ -3791,6 +3843,7 @@ function field_ops_summary(): array
           COALESCE(SUM(gross_pay + bonus_pay + reimbursement_amount), 0) AS gross_total,
           COALESCE(SUM(platform_fee), 0) AS platform_fee_total,
           COALESCE(SUM(insurance_fee), 0) AS insurance_fee_total,
+          COALESCE(SUM(oai_fee), 0) AS oai_fee_total,
           COALESCE(SUM(mileage * mileage_rate), 0) AS mileage_cost_total,
           COALESCE(SUM(drive_minutes + onsite_minutes + admin_minutes), 0) AS total_minutes
         FROM field_work_orders
@@ -3820,7 +3873,8 @@ function field_ops_summary(): array
     $gross = (float)($wo['gross_total'] ?? 0);
     $platformFees = (float)($wo['platform_fee_total'] ?? 0);
     $insuranceFees = (float)($wo['insurance_fee_total'] ?? 0);
-    $fees = $platformFees + $insuranceFees;
+    $oaiFees = (float)($wo['oai_fee_total'] ?? 0);
+    $fees = $platformFees + $insuranceFees + $oaiFees;
     $mileage = (float)($wo['mileage_cost_total'] ?? 0);
     $net = $gross - $fees - $materialCost - $expenseCost - $mileage;
     $hours = ((int)($wo['total_minutes'] ?? 0)) / 60;
@@ -3832,6 +3886,7 @@ function field_ops_summary(): array
         'gross_total' => $gross,
         'platform_fee_total' => $platformFees,
         'insurance_fee_total' => $insuranceFees,
+        'oai_fee_total' => $oaiFees,
         'fee_total' => $fees,
         'material_cost_total' => $materialCost,
         'expense_cost_total' => $expenseCost,
