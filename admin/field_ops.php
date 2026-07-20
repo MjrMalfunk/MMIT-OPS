@@ -950,7 +950,7 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
   <section class="grid forms">
     <article class="card">
       <h2>Add work order</h2>
-      <form method="post" class="form-grid">
+      <form method="post" class="form-grid" id="field-ops-add-work-order">
         <?= csrf_field() ?>
         <input type="hidden" name="action" value="save_work_order">
 
@@ -1047,9 +1047,26 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
           <input name="insurance_fee" inputmode="decimal" placeholder="Auto-estimates 1.95% for FieldNation">
         </label>
 
+        <label style="display:flex;align-items:center;gap:8px;">
+          <input
+            type="checkbox"
+            id="add-oai-applies"
+            name="oai_fee_applies"
+            value="1"
+            style="width:auto;"
+          >
+          OAI applies (0.5%)
+        </label>
+
         <label>
-          OAI fee (optional)
-          <input name="oai_fee" inputmode="decimal" placeholder="Only when FieldNation shows this charge">
+          OAI fee
+          <input
+            id="add-oai-fee"
+            name="oai_fee"
+            inputmode="decimal"
+            placeholder="Select OAI to calculate 0.5%"
+          >
+          <span class="field-hint">Calculated from gross; editable for exact FN reconciliation.</span>
         </label>
 
         <label>
@@ -1496,5 +1513,47 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
     </div>
   </section>
 </main>
+<script>
+(() => {
+  const form = document.getElementById('field-ops-add-work-order');
+
+  if (!form) {
+    return;
+  }
+
+  const grossInput = form.querySelector('[name="gross_pay"]');
+  const providerInput = form.querySelector('[name="platform_fee"]');
+  const glInput = form.querySelector('[name="insurance_fee"]');
+  const oaiApplies = document.getElementById('add-oai-applies');
+  const oaiInput = document.getElementById('add-oai-fee');
+
+  const numericValue = (input) => {
+    const cleaned = String(input?.value || '').replace(/[^0-9.-]/g, '');
+    const value = Number.parseFloat(cleaned);
+
+    return Number.isFinite(value) ? value : 0;
+  };
+
+  const money = (value) => '$' + Math.max(0, value).toFixed(2);
+
+  const recalculate = () => {
+    const gross = numericValue(grossInput);
+
+    if (gross > 0) {
+      providerInput.value = money(gross * 0.10);
+      glInput.value = money(gross * 0.0195);
+    }
+
+    if (oaiApplies.checked && gross > 0) {
+      oaiInput.value = money(gross * 0.005);
+    } else if (!oaiApplies.checked) {
+      oaiInput.value = '';
+    }
+  };
+
+  grossInput?.addEventListener('input', recalculate);
+  oaiApplies?.addEventListener('change', recalculate);
+})();
+</script>
 </body>
 </html>

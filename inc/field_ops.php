@@ -1485,6 +1485,23 @@ function field_ops_fn_insurance_fee_rate(): float
     return min(1.0, max(0.0, $rate));
 }
 
+function field_ops_fn_oai_fee_rate(): float
+{
+    $rate = defined('FIELD_OPS_FN_OAI_FEE_RATE')
+        ? (float)constant('FIELD_OPS_FN_OAI_FEE_RATE')
+        : 0.005;
+
+    return min(1.0, max(0.0, $rate));
+}
+
+function field_ops_fn_oai_fee(float $grossPay): float
+{
+    return round(
+        max(0.0, $grossPay) * field_ops_fn_oai_fee_rate(),
+        2
+    );
+}
+
 function field_ops_fn_minimum_provider_fee(float $grossPay): float
 {
     return round(max(0.0, $grossPay) * 0.10, 2);
@@ -1561,7 +1578,15 @@ function field_ops_save_work_order(array $input, int $userId = 0): array
         $insuranceFee = $feeEstimates['insurance_fee'];
     }
 
-    $oaiFee = field_ops_money($input['oai_fee'] ?? 0);
+    $oaiFeeInput = trim((string)($input['oai_fee'] ?? ''));
+    $oaiFeeApplies = !empty($input['oai_fee_applies']);
+    $oaiFee = $oaiFeeApplies
+        ? (
+            $oaiFeeInput !== ''
+                ? field_ops_money($oaiFeeInput)
+                : field_ops_fn_oai_fee($grossPay)
+        )
+        : 0.0;
 
     $st = db()->prepare("
         INSERT INTO field_work_orders
@@ -2483,7 +2508,18 @@ function field_ops_update_work_order_state(array $input): array
         $input,
         $existing
     );
-    $oaiFee = $moneyValue('oai_fee', $input, $existing);
+    $oaiFee = (float)($existing['oai_fee'] ?? 0);
+
+    if (array_key_exists('oai_fee_control_present', $input)) {
+        if (empty($input['oai_fee_applies'])) {
+            $oaiFee = 0.0;
+        } else {
+            $oaiFeeInput = trim((string)($input['oai_fee'] ?? ''));
+            $oaiFee = $oaiFeeInput !== ''
+                ? field_ops_money($oaiFeeInput)
+                : field_ops_fn_oai_fee($grossPay);
+        }
+    }
 
     $expectedPaymentAt = $existing['expected_payment_at'] ?? null;
 

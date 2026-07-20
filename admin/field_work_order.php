@@ -751,6 +751,7 @@ $receivableStateClass = match ($receivableState) {
         <label>
           Approved revised gross
           <input
+            id="approved-total-gross"
             name="approved_total_gross"
             inputmode="decimal"
             value="<?= $h($moneyInput($pendingPayChange['requested_total_gross'])) ?>"
@@ -763,8 +764,10 @@ $receivableStateClass = match ($receivableState) {
         <label>
           Updated provider fee
           <input
+            id="approved-provider-fee"
             name="approved_platform_fee"
             inputmode="decimal"
+            value="<?= $h($moneyInput(field_ops_fn_minimum_provider_fee((float)$pendingPayChange['requested_total_gross']))) ?>"
             placeholder="Leave blank until FN shows the revised fee"
           >
         </label>
@@ -772,8 +775,10 @@ $receivableStateClass = match ($receivableState) {
         <label>
           Updated GL insurance fee
           <input
+            id="approved-gl-fee"
             name="approved_insurance_fee"
             inputmode="decimal"
+            value="<?= $h($moneyInput(round((float)$pendingPayChange['requested_total_gross'] * field_ops_fn_insurance_fee_rate(), 2))) ?>"
             placeholder="Leave blank until FN shows the revised fee"
           >
         </label>
@@ -781,8 +786,11 @@ $receivableStateClass = match ($receivableState) {
         <label>
           Updated OAI fee
           <input
+            id="approved-oai-fee"
             name="approved_oai_fee"
             inputmode="decimal"
+            data-oai-applies="<?= (float)($wo['oai_fee'] ?? 0) > 0 ? '1' : '0' ?>"
+            value="<?= (float)($wo['oai_fee'] ?? 0) > 0 ? $h($moneyInput(field_ops_fn_oai_fee((float)$pendingPayChange['requested_total_gross']))) : '' ?>"
             placeholder="Leave blank unless FN shows an OAI charge"
           >
         </label>
@@ -1062,10 +1070,15 @@ $receivableStateClass = match ($receivableState) {
           </span>
         </label>
 
-        <label>Gross pay <input name="gross_pay" inputmode="decimal" value="<?= $h($moneyInput($wo['gross_pay'])) ?>"></label>
-        <label>Provider fee <input name="platform_fee" inputmode="decimal" value="<?= $h($moneyInput($wo['platform_fee'])) ?>"></label>
-        <label>GL insurance fee <input name="insurance_fee" inputmode="decimal" value="<?= $h($moneyInput($wo['insurance_fee'] ?? 0)) ?>"></label>
-        <label>OAI fee (optional) <input name="oai_fee" inputmode="decimal" value="<?= $h($moneyInput($wo['oai_fee'] ?? 0)) ?>"></label>
+        <input type="hidden" name="oai_fee_control_present" value="1">
+        <label>Gross pay <input id="job-gross-pay" name="gross_pay" inputmode="decimal" value="<?= $h($moneyInput($wo['gross_pay'])) ?>"></label>
+        <label>Provider fee <input id="job-provider-fee" name="platform_fee" inputmode="decimal" value="<?= $h($moneyInput($wo['platform_fee'])) ?>"></label>
+        <label>GL insurance fee <input id="job-gl-fee" name="insurance_fee" inputmode="decimal" value="<?= $h($moneyInput($wo['insurance_fee'] ?? 0)) ?>"></label>
+        <label style="display:flex;align-items:center;gap:8px;">
+          <input type="checkbox" id="job-oai-applies" name="oai_fee_applies" value="1" <?= (float)($wo['oai_fee'] ?? 0) > 0 ? 'checked' : '' ?> style="width:auto;">
+          OAI applies (0.5%)
+        </label>
+        <label>OAI fee <input id="job-oai-fee" name="oai_fee" inputmode="decimal" value="<?= $h($moneyInput($wo['oai_fee'] ?? 0)) ?>"><span class="field-hint">Calculated from gross; editable to match FN.</span></label>
         <label>Bonus pay <input name="bonus_pay" inputmode="decimal" value="<?= $h($moneyInput($wo['bonus_pay'])) ?>"></label>
         <label>Reimbursement <input name="reimbursement_amount" inputmode="decimal" value="<?= $h($moneyInput($wo['reimbursement_amount'])) ?>"></label>
         <label>Mileage <input name="mileage" value="<?= $h($wo['mileage']) ?>"></label>
@@ -1603,6 +1616,62 @@ $receivableStateClass = match ($receivableState) {
 
   rateInput.addEventListener('input', recalculate);
   hoursInput.addEventListener('input', recalculate);
+})();
+
+(() => {
+  const numericValue = (input) => {
+    const cleaned = String(input?.value || '').replace(/[^0-9.-]/g, '');
+    const value = Number.parseFloat(cleaned);
+
+    return Number.isFinite(value) ? value : 0;
+  };
+  const money = (value) => '$' + Math.max(0, value).toFixed(2);
+
+  const approvedGross = document.getElementById('approved-total-gross');
+  const approvedProvider = document.getElementById('approved-provider-fee');
+  const approvedGl = document.getElementById('approved-gl-fee');
+  const approvedOai = document.getElementById('approved-oai-fee');
+
+  const recalculateApprovedFees = () => {
+    const gross = numericValue(approvedGross);
+
+    if (gross <= 0) {
+      return;
+    }
+
+    approvedProvider.value = money(gross * 0.10);
+    approvedGl.value = money(gross * 0.0195);
+
+    if (approvedOai?.dataset.oaiApplies === '1') {
+      approvedOai.value = money(gross * 0.005);
+    }
+  };
+
+  approvedGross?.addEventListener('input', recalculateApprovedFees);
+
+  const jobGross = document.getElementById('job-gross-pay');
+  const jobProvider = document.getElementById('job-provider-fee');
+  const jobGl = document.getElementById('job-gl-fee');
+  const jobOaiApplies = document.getElementById('job-oai-applies');
+  const jobOai = document.getElementById('job-oai-fee');
+
+  const recalculateJobFees = () => {
+    const gross = numericValue(jobGross);
+
+    if (gross > 0) {
+      jobProvider.value = money(gross * 0.10);
+      jobGl.value = money(gross * 0.0195);
+    }
+
+    if (jobOaiApplies?.checked && gross > 0) {
+      jobOai.value = money(gross * 0.005);
+    } else if (jobOai && !jobOaiApplies?.checked) {
+      jobOai.value = '$0.00';
+    }
+  };
+
+  jobGross?.addEventListener('input', recalculateJobFees);
+  jobOaiApplies?.addEventListener('change', recalculateJobFees);
 })();
 </script>
 </body>
