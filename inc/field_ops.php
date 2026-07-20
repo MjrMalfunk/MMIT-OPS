@@ -4038,6 +4038,12 @@ function field_ops_ensure_opportunity_schema(): void
         'profit_round_trip_miles' => "DECIMAL(12,2) NULL",
         'profit_drive_minutes' => "INT UNSIGNED NULL",
         'profit_oai_applies' => "TINYINT(1) NOT NULL DEFAULT 0",
+        'pay_model' => "VARCHAR(30) NOT NULL DEFAULT 'UNKNOWN'",
+        'initial_block_amount' => "DECIMAL(12,2) NULL",
+        'initial_block_hours' => "DECIMAL(12,2) NULL",
+        'additional_hour_rate' => "DECIMAL(12,2) NULL",
+        'additional_max_hours' => "DECIMAL(12,2) NULL",
+        'projected_gross_override' => "DECIMAL(12,2) NULL",
     ] as $column => $definition) {
         if (
             function_exists('db_column_exists')
@@ -4253,6 +4259,111 @@ function field_ops_fn_event_year(?string $receivedAt): int
     return (int)date('Y');
 }
 
+function field_ops_fn_parse_pay_terms(
+    string $text,
+    array $parsed = []
+): array {
+    foreach ([
+        'pay_model' => 'UNKNOWN',
+        'initial_block_amount' => null,
+        'initial_block_hours' => null,
+        'additional_hour_rate' => null,
+        'additional_max_hours' => null,
+    ] as $key => $default) {
+        if (!array_key_exists($key, $parsed)) {
+            $parsed[$key] = $default;
+        }
+    }
+
+    $text = preg_replace('/\s+/', ' ', $text) ?? $text;
+
+    $blockPattern = '/(?:\bpays?\s*)?\$?\s*'
+        . '([0-9]+(?:\.[0-9]{1,2})?)\s*'
+        . '(?:\/|for(?:\s+the)?\s+|\s+(?=(?:first|1st)\b))'
+        . '\s*(?:(?:first|1st)\s*)?'
+        . '([0-9]+(?:\.[0-9]+)?)\s*(?:hours?|hrs?)\b/i';
+
+    if (
+        preg_match(
+            $blockPattern,
+            $text,
+            $block,
+            PREG_OFFSET_CAPTURE
+        )
+    ) {
+        $initialAmount = round((float)$block[1][0], 2);
+        $initialHours = round((float)$block[2][0], 2);
+        $tail = substr(
+            $text,
+            $block[0][1] + strlen($block[0][0])
+        );
+
+        $ratePattern = '/(?:then|after(?:wards)?|thereafter)'
+            . '.*?(?:at\s*)?\$?\s*'
+            . '([0-9]+(?:\.[0-9]{1,2})?)\s*'
+            . '(?:\/\s*(?:hour|hr)|per\s+(?:hour|hr))/i';
+
+        if (preg_match($ratePattern, $tail, $rateMatch)) {
+            $additionalRate = round((float)$rateMatch[1], 2);
+            $additionalHours = null;
+
+            if (
+                preg_match(
+                    '/(?:max(?:imum)?(?:\s+of)?|up\s+to)\s*'
+                    . '([0-9]+(?:\.[0-9]+)?)\s*'
+                    . '(?:additional\s*)?(?:hours?|hrs?)/i',
+                    $tail,
+                    $hoursMatch
+                )
+                || preg_match(
+                    '/([0-9]+(?:\.[0-9]+)?)\s*'
+                    . '(?:additional\s*)?(?:hours?|hrs?)\s*'
+                    . '(?:more\s*)?(?:max(?:imum)?)/i',
+                    $tail,
+                    $hoursMatch
+                )
+            ) {
+                $additionalHours = round(
+                    (float)$hoursMatch[1],
+                    2
+                );
+            }
+
+            $parsed['pay_model'] = 'BLENDED';
+            $parsed['initial_block_amount'] = $initialAmount;
+            $parsed['initial_block_hours'] = $initialHours;
+            $parsed['additional_hour_rate'] = $additionalRate;
+            $parsed['additional_max_hours'] = $additionalHours;
+            $parsed['pay_rate'] = $additionalRate;
+            $parsed['max_hours'] = $initialHours
+                + ($additionalHours ?? 0.0);
+            $parsed['estimated_gross'] = round(
+                $initialAmount
+                + ($additionalRate * ($additionalHours ?? 0.0)),
+                2
+            );
+
+            return $parsed;
+        }
+    }
+
+    $hourlyPattern = '/Hourly\s+Rate:\s*\$?'
+        . '([0-9]+(?:\.[0-9]{1,2})?)\s*\/\s*hour\s*'
+        . '\(([0-9]+(?:\.[0-9]+)?)\s+hours?\s+max\)/i';
+
+    if (preg_match($hourlyPattern, $text, $hourly)) {
+        $parsed['pay_model'] = 'HOURLY_CAPPED';
+        $parsed['pay_rate'] = round((float)$hourly[1], 2);
+        $parsed['max_hours'] = round((float)$hourly[2], 2);
+        $parsed['estimated_gross'] = round(
+            (float)$parsed['pay_rate']
+            * (float)$parsed['max_hours'],
+            2
+        );
+    }
+
+    return $parsed;
+}
 function field_ops_parse_fieldnation_email(string $subject, string $bodyText, string $sender = '', ?string $receivedAt = null): array
 {
     $subject = trim($subject);
@@ -4397,10 +4508,9 @@ function field_ops_parse_fieldnation_email(string $subject, string $bodyText, st
         $parsed['confidence'] += 6;
     }
 
-    if (preg_match('/Hourly Rate:\s*\$?([\d.]+)\s*\/\s*hour\s*\(([\d.]+)\s+hours?\s+max\)/i', $haystack, $m)) {
-        $parsed['pay_rate'] = round((float)$m[1], 2);
-        $parsed['max_hours'] = round((float)$m[2], 2);
-        $parsed['estimated_gross'] = round($parsed['pay_rate'] * $parsed['max_hours'], 2);
+    $parsed = field_ops_fn_parse_pay_terms($haystack, $parsed);
+
+    if (($parsed['pay_model'] ?? 'UNKNOWN') !== 'UNKNOWN') {
         $parsed['confidence'] += 14;
     } elseif (preg_match('/\$\s*([\d,.]+)\b/', $haystack, $m)) {
         $parsed['estimated_gross'] = round((float)str_replace(',', '', $m[1]), 2);
@@ -4472,7 +4582,13 @@ function field_ops_opportunity_profitability(array $data): array
     );
 
     $payRate = max(0.0, (float)($data['pay_rate'] ?? 0));
-    $gross = max(0.0, (float)($data['estimated_gross'] ?? 0));
+    $grossOverride = $data['projected_gross_override'] ?? null;
+    $hasGrossOverride = $grossOverride !== null
+        && trim((string)$grossOverride) !== ''
+        && (float)$grossOverride > 0;
+    $gross = $hasGrossOverride
+        ? max(0.0, (float)$grossOverride)
+        : max(0.0, (float)($data['estimated_gross'] ?? 0));
 
     $onsiteOverride = $data['profit_onsite_hours'] ?? null;
     $onsiteHours = $onsiteOverride !== null
@@ -4563,6 +4679,9 @@ function field_ops_opportunity_profitability(array $data): array
         'onsite_hours' => round($onsiteHours, 2),
         'total_hours' => round($totalHours, 2),
         'gross' => round($gross, 2),
+        'gross_source' => $hasGrossOverride
+            ? 'MANUAL_OVERRIDE'
+            : 'PARSED',
         'platform_fee' => $platformFee,
         'insurance_fee' => $insuranceFee,
         'oai_applies' => $oaiApplies,
@@ -4839,6 +4958,8 @@ function field_ops_refine_fieldnation_parsed_from_body(array $parsed, string $su
         }
     }
 
+    $parsed = field_ops_fn_parse_pay_terms($text, $parsed);
+
     if (empty($parsed['pay_rate']) && preg_match('/Hourly\s+Rate:\s*\$?([0-9]+(?:\.[0-9]{1,2})?)\s*\/\s*hour/i', $text, $m)) {
         $parsed['pay_rate'] = (float)$m[1];
     }
@@ -5042,6 +5163,14 @@ function field_ops_apply_email_event_to_opportunity(int $eventId): array
     $existing = $woNumber !== ''
         ? field_ops_find_opportunity_by_external_number($woNumber)
         : null;
+    $parsedPayload = json_decode(
+        (string)($event['parsed_payload_json'] ?? ''),
+        true
+    );
+
+    if (!is_array($parsedPayload)) {
+        $parsedPayload = [];
+    }
 
     $data = [
         'buyer_id' => $buyerId,
@@ -5053,6 +5182,17 @@ function field_ops_apply_email_event_to_opportunity(int $eventId): array
         'pay_rate' => $event['parsed_pay_rate'],
         'max_hours' => $event['parsed_max_hours'],
         'estimated_gross' => $event['parsed_estimated_gross'],
+        'pay_model' => strtoupper(
+            (string)($parsedPayload['pay_model'] ?? 'UNKNOWN')
+        ),
+        'initial_block_amount' =>
+            $parsedPayload['initial_block_amount'] ?? null,
+        'initial_block_hours' =>
+            $parsedPayload['initial_block_hours'] ?? null,
+        'additional_hour_rate' =>
+            $parsedPayload['additional_hour_rate'] ?? null,
+        'additional_max_hours' =>
+            $parsedPayload['additional_max_hours'] ?? null,
     ];
 
     if ($existing) {
@@ -5064,6 +5204,7 @@ function field_ops_apply_email_event_to_opportunity(int $eventId): array
             'profit_round_trip_miles',
             'profit_drive_minutes',
             'profit_oai_applies',
+            'projected_gross_override',
         ] as $profitField) {
             if (array_key_exists($profitField, $existing)) {
                 $data[$profitField] = $existing[$profitField];
@@ -5102,6 +5243,11 @@ function field_ops_apply_email_event_to_opportunity(int $eventId): array
                 pay_rate = ?,
                 max_hours = ?,
                 estimated_gross = ?,
+                pay_model = ?,
+                initial_block_amount = ?,
+                initial_block_hours = ?,
+                additional_hour_rate = ?,
+                additional_max_hours = ?,
                 status = CASE
                     WHEN status IN ('REQUESTED', 'IGNORED', 'DECLINED') THEN status
                     ELSE ?
@@ -5128,6 +5274,11 @@ function field_ops_apply_email_event_to_opportunity(int $eventId): array
             $event['parsed_pay_rate'] ?: null,
             $event['parsed_max_hours'] ?: null,
             $event['parsed_estimated_gross'] ?: 0,
+            $data['pay_model'],
+            $data['initial_block_amount'],
+            $data['initial_block_hours'],
+            $data['additional_hour_rate'],
+            $data['additional_max_hours'],
             $data['status'],
             $rating['score'],
             $rating['recommendation'],
@@ -5142,9 +5293,10 @@ function field_ops_apply_email_event_to_opportunity(int $eventId): array
             INSERT INTO field_opportunities
               (platform, external_work_order_number, buyer_id, buyer_name_snapshot, title, work_type, city, state, zip,
                distance_miles, scheduled_start_at, scheduled_end_at, pay_rate, max_hours, estimated_gross,
+               pay_model, initial_block_amount, initial_block_hours, additional_hour_rate, additional_max_hours,
                status, score, recommendation, score_breakdown_json, source_email_event_id, source_url, notes)
             VALUES
-              ('FieldNation', ?, ?, ?, ?, 'Field service', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ('FieldNation', ?, ?, ?, ?, 'Field service', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ")->execute([
             $woNumber !== '' ? $woNumber : null,
             $buyerId,
@@ -5159,6 +5311,11 @@ function field_ops_apply_email_event_to_opportunity(int $eventId): array
             $event['parsed_pay_rate'] ?: null,
             $event['parsed_max_hours'] ?: null,
             $event['parsed_estimated_gross'] ?: 0,
+            $data['pay_model'],
+            $data['initial_block_amount'],
+            $data['initial_block_hours'],
+            $data['additional_hour_rate'],
+            $data['additional_max_hours'],
             $data['status'],
             $rating['score'],
             $rating['recommendation'],
@@ -5359,6 +5516,11 @@ function field_ops_update_opportunity_profitability(
         ? null
         : (int)round($driveMinutesFloat);
     $oaiApplies = !empty($input['profit_oai_applies']) ? 1 : 0;
+    $projectedGrossOverride = $numberOrNull(
+        $input['projected_gross_override'] ?? '',
+        0.01,
+        1000000.0
+    );
 
     db()->prepare("
         UPDATE field_opportunities
@@ -5369,6 +5531,7 @@ function field_ops_update_opportunity_profitability(
             profit_round_trip_miles = ?,
             profit_drive_minutes = ?,
             profit_oai_applies = ?,
+            projected_gross_override = ?,
             updated_at = NOW()
         WHERE opportunity_id = ?
         LIMIT 1
@@ -5380,6 +5543,7 @@ function field_ops_update_opportunity_profitability(
         $roundTripMiles,
         $driveMinutes,
         $oaiApplies,
+        $projectedGrossOverride,
         $opportunityId,
     ]);
 
@@ -5556,7 +5720,11 @@ function field_ops_promote_opportunity_to_work_order(int $opportunityId): array
     }
 
     $table = 'field_work_orders';
-    $grossPay = field_ops_money($op['estimated_gross'] ?? 0);
+    $grossPay = field_ops_money(
+        (float)($op['projected_gross_override'] ?? 0) > 0
+            ? $op['projected_gross_override']
+            : ($op['estimated_gross'] ?? 0)
+    );
     $fnFees = field_ops_fn_fee_estimates($grossPay);
     $scheduleErrors = field_ops_schedule_validation_errors(
         $op['scheduled_start_at'] ?? null,
@@ -5581,14 +5749,22 @@ function field_ops_promote_opportunity_to_work_order(int $opportunityId): array
         'payment_status' => 'UNPAID',
         'gross_pay' => $grossPay,
         'authorized_rate' => (float)($op['pay_rate'] ?? 0) > 0
-            ? field_ops_money($op['pay_rate'])
+            ? field_ops_money(
+                $op['additional_hour_rate'] ?? $op['pay_rate']
+            )
             : null,
         'authorized_hours' => (float)($op['max_hours'] ?? 0) > 0
             ? field_ops_decimal($op['max_hours'])
             : null,
         'platform_fee' => $fnFees['platform_fee'],
         'insurance_fee' => $fnFees['insurance_fee'],
-        'notes' => "Promoted from Field Ops opportunity #{$opportunityId}.\nRecommendation: {$op['recommendation']}.\nScore: {$op['score']}.\n\n" . (string)($op['notes'] ?? ''),
+        'notes' => "Promoted from Field Ops opportunity #{$opportunityId}."
+            . "\nRecommendation: {$op['recommendation']}."
+            . "\nScore: {$op['score']}."
+            . "\nPay model: " . ($op['pay_model'] ?? 'UNKNOWN') . "."
+            . "\nProjected/max gross: $"
+            . number_format($grossPay, 2, '.', '')
+            . ".\n\n" . (string)($op['notes'] ?? ''),
     ];
 
     $cols = [];

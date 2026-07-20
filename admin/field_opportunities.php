@@ -622,8 +622,34 @@ OLD,
             </td>
             <td><?= $h(field_ops_datetime_display($op['scheduled_start_at'] ?? '')) ?></td>
             <td>
-              <?php if ((float)$op['pay_rate'] > 0): ?>$<?= number_format((float)$op['pay_rate'], 2) ?>/hr<br><?php endif; ?>
-              <?php if ((float)$op['estimated_gross'] > 0): ?><strong>$<?= number_format((float)$op['estimated_gross'], 2) ?></strong><?php endif; ?>
+              <?php
+                $payModel = strtoupper(
+                    (string)($op['pay_model'] ?? 'UNKNOWN')
+                );
+                $hasGrossOverride =
+                    (float)($op['projected_gross_override'] ?? 0) > 0;
+                $projectedGross = $hasGrossOverride
+                    ? (float)$op['projected_gross_override']
+                    : (float)($op['estimated_gross'] ?? 0);
+              ?>
+              <?php if ($payModel === 'BLENDED'): ?>
+                $<?= number_format((float)$op['initial_block_amount'], 2) ?>
+                / <?= number_format((float)$op['initial_block_hours'], 2) ?> hrs<br>
+                <span class="muted">
+                  +$<?= number_format((float)$op['additional_hour_rate'], 2) ?>/hr
+                  <?php if ((float)$op['additional_max_hours'] > 0): ?>
+                    up to <?= number_format((float)$op['additional_max_hours'], 2) ?> hrs
+                  <?php endif; ?>
+                </span><br>
+              <?php elseif ((float)$op['pay_rate'] > 0): ?>
+                $<?= number_format((float)$op['pay_rate'], 2) ?>/hr<br>
+              <?php endif; ?>
+              <?php if ($projectedGross > 0): ?>
+                <strong>Max $<?= number_format($projectedGross, 2) ?></strong>
+                <?php if ($hasGrossOverride): ?>
+                  <br><span class="muted">Manual override</span>
+                <?php endif; ?>
+              <?php endif; ?>
             </td>
             <td class="profit-quick">
               <?php if (!empty($profit['complete'])): ?>
@@ -713,19 +739,40 @@ OLD,
                   </div>
                   <div class="detail-item">
                     <strong>Pay model</strong>
-                    <?php if ((float)$op['pay_rate'] > 0): ?>
+                    <?php if ($payModel === 'BLENDED'): ?>
+                      <strong>Blended</strong><br>
+                      $<?= number_format((float)$op['initial_block_amount'], 2) ?>
+                      for <?= number_format((float)$op['initial_block_hours'], 2) ?> hrs
+                      <br>
+                      <span class="muted">
+                        Then $<?= number_format((float)$op['additional_hour_rate'], 2) ?>/hr
+                        <?php if ((float)$op['additional_max_hours'] > 0): ?>
+                          for up to <?= number_format((float)$op['additional_max_hours'], 2) ?> more hrs
+                        <?php endif; ?>
+                      </span>
+                      <br>
+                      <span class="muted">
+                        <?= number_format((float)$op['max_hours'], 2) ?> total max hrs
+                      </span>
+                    <?php elseif ((float)$op['pay_rate'] > 0): ?>
                       $<?= number_format((float)$op['pay_rate'], 2) ?>/hr
+                      <?php if ((float)$op['max_hours'] > 0): ?>
+                        <br><span class="muted"><?= number_format((float)$op['max_hours'], 2) ?> max hrs</span>
+                      <?php endif; ?>
                     <?php else: ?>
                       <span class="muted">Rate unknown</span>
                     <?php endif; ?>
-                    <?php if ((float)$op['max_hours'] > 0): ?>
-                      <br><span class="muted"><?= number_format((float)$op['max_hours'], 2) ?> max hrs</span>
-                    <?php endif; ?>
                   </div>
                   <div class="detail-item">
-                    <strong>Estimated gross</strong>
-                    <?php if ((float)$op['estimated_gross'] > 0): ?>
-                      $<?= number_format((float)$op['estimated_gross'], 2) ?>
+                    <strong>Projected / max gross</strong>
+                    <?php if ($projectedGross > 0): ?>
+                      $<?= number_format($projectedGross, 2) ?>
+                      <br>
+                      <span class="muted">
+                        <?= $hasGrossOverride
+                            ? 'Manual override'
+                            : 'Parsed from FieldNation' ?>
+                      </span>
                     <?php else: ?>
                       <span class="muted">Unknown</span>
                     <?php endif; ?>
@@ -734,7 +781,7 @@ OLD,
                   <div class="detail-item full">
                     <strong>Real profitability</strong>
                     <div class="profit-grid">
-                      <div class="profit-metric"><span>Estimated gross</span><strong>$<?= number_format((float)($profit['gross'] ?? 0), 2) ?></strong></div>
+                      <div class="profit-metric"><span>Projected / max gross</span><strong>$<?= number_format((float)($profit['gross'] ?? 0), 2) ?></strong></div>
                       <div class="profit-metric"><span>Provider fee</span><strong>-$<?= number_format((float)($profit['platform_fee'] ?? 0), 2) ?></strong></div>
                       <div class="profit-metric"><span>GL insurance</span><strong>-$<?= number_format((float)($profit['insurance_fee'] ?? 0), 2) ?></strong></div>
                       <div class="profit-metric"><span>OAI fee</span><strong>-$<?= number_format((float)($profit['oai_fee'] ?? 0), 2) ?></strong></div>
@@ -753,6 +800,19 @@ OLD,
                       <input type="hidden" name="action" value="update_opportunity_profitability">
                       <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
 
+                      <label>
+                        Projected / max gross override
+                        <input
+                          name="projected_gross_override"
+                          inputmode="decimal"
+                          value="<?= $op['projected_gross_override'] !== null
+                              ? number_format((float)$op['projected_gross_override'], 2, '.', '')
+                              : '' ?>"
+                          placeholder="<?= $projectedGross > 0
+                              ? number_format($projectedGross, 2, '.', '')
+                              : 'Optional' ?>"
+                        >
+                      </label>
                       <label>Target hourly<input name="profit_target_hourly" inputmode="decimal" value="<?= number_format((float)($op['profit_target_hourly'] ?? 35), 2, '.', '') ?>"></label>
                       <label>Mileage rate<input name="profit_mileage_rate" inputmode="decimal" value="<?= number_format((float)($op['profit_mileage_rate'] ?? .67), 4, '.', '') ?>"></label>
                       <label>Average driving MPH<input name="profit_average_mph" inputmode="decimal" value="<?= number_format((float)($op['profit_average_mph'] ?? 55), 2, '.', '') ?>"></label>
@@ -760,7 +820,7 @@ OLD,
                       <label>Round-trip miles<input name="profit_round_trip_miles" inputmode="decimal" value="<?= $op['profit_round_trip_miles'] !== null ? number_format((float)$op['profit_round_trip_miles'], 2, '.', '') : '' ?>" placeholder="2 × FN distance"></label>
                       <label>Round-trip drive minutes<input name="profit_drive_minutes" inputmode="numeric" value="<?= $op['profit_drive_minutes'] !== null ? (int)$op['profit_drive_minutes'] : '' ?>" placeholder="Calculated from miles / MPH"></label>
                       <label class="check-label"><input type="checkbox" name="profit_oai_applies" value="1" <?= !empty($op['profit_oai_applies']) ? 'checked' : '' ?>> OAI applies (0.5%)</label>
-                      <div class="profit-note muted">Blank onsite, mileage, or drive overrides use the values parsed from FieldNation. Counteroffer gross targets your selected hourly rate after fees and mileage cost.</div>
+                      <div class="profit-note muted">Blank fields use values parsed from FieldNation. A projected/max gross override controls scoring, fees, net, and W/O promotion without being replaced by later email imports. Counteroffer gross targets your selected hourly rate after fees and mileage cost.</div>
                       <div><button class="btn btn-primary" type="submit">Save assumptions &amp; rescore</button></div>
                     </form>
                   </div>
