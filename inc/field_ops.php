@@ -4029,6 +4029,33 @@ function field_ops_ensure_opportunity_schema(): void
             INDEX idx_field_opportunities_promoted (promoted_work_order_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     ");
+
+    foreach ([
+        'profit_target_hourly' => "DECIMAL(12,2) NOT NULL DEFAULT 35.00",
+        'profit_mileage_rate' => "DECIMAL(12,4) NOT NULL DEFAULT 0.6700",
+        'profit_average_mph' => "DECIMAL(8,2) NOT NULL DEFAULT 55.00",
+        'profit_onsite_hours' => "DECIMAL(12,2) NULL",
+        'profit_round_trip_miles' => "DECIMAL(12,2) NULL",
+        'profit_drive_minutes' => "INT UNSIGNED NULL",
+        'profit_oai_applies' => "TINYINT(1) NOT NULL DEFAULT 0",
+    ] as $column => $definition) {
+        if (
+            function_exists('db_column_exists')
+            && !db_column_exists('field_opportunities', $column)
+        ) {
+            try {
+                $pdo->exec(
+                    "ALTER TABLE field_opportunities "
+                    . "ADD COLUMN {$column} {$definition}"
+                );
+            } catch (Throwable $e) {
+                error_log(
+                    'Unable to add field_opportunities.'
+                    . $column . ': ' . $e->getMessage()
+                );
+            }
+        }
+    }
 }
 
 function field_ops_fn_h($value): string
@@ -4429,58 +4456,219 @@ function field_ops_find_or_create_buyer(string $platform, string $buyerName): in
     return (int)db()->lastInsertId();
 }
 
+function field_ops_opportunity_profitability(array $data): array
+{
+    $targetHourly = max(
+        1.0,
+        (float)($data['profit_target_hourly'] ?? 35.00)
+    );
+    $mileageRate = max(
+        0.0,
+        (float)($data['profit_mileage_rate'] ?? 0.67)
+    );
+    $averageMph = max(
+        5.0,
+        (float)($data['profit_average_mph'] ?? 55.00)
+    );
+
+    $payRate = max(0.0, (float)($data['pay_rate'] ?? 0));
+    $gross = max(0.0, (float)($data['estimated_gross'] ?? 0));
+
+    $onsiteOverride = $data['profit_onsite_hours'] ?? null;
+    $onsiteHours = $onsiteOverride !== null
+        && trim((string)$onsiteOverride) !== ''
+        ? max(0.0, (float)$onsiteOverride)
+        : max(0.0, (float)($data['max_hours'] ?? 0));
+
+    if ($onsiteHours <= 0 && !empty($data['scheduled_start_at']) && !empty($data['scheduled_end_at'])) {
+        try {
+            $start = new DateTimeImmutable((string)$data['scheduled_start_at']);
+            $end = new DateTimeImmutable((string)$data['scheduled_end_at']);
+
+            if ($end > $start) {
+                $onsiteHours = ($end->getTimestamp() - $start->getTimestamp()) / 3600;
+            }
+        } catch (Throwable $e) {
+            $onsiteHours = 0.0;
+        }
+    }
+
+    if ($gross <= 0 && $payRate > 0 && $onsiteHours > 0) {
+        $gross = round($payRate * $onsiteHours, 2);
+    }
+
+    $distanceKnown = array_key_exists('distance_miles', $data)
+        && $data['distance_miles'] !== null
+        && trim((string)$data['distance_miles']) !== '';
+    $oneWayMiles = $distanceKnown
+        ? max(0.0, (float)$data['distance_miles'])
+        : null;
+
+    $roundTripOverride = $data['profit_round_trip_miles'] ?? null;
+    $roundTripMiles = $roundTripOverride !== null
+        && trim((string)$roundTripOverride) !== ''
+        ? max(0.0, (float)$roundTripOverride)
+        : ($oneWayMiles !== null ? $oneWayMiles * 2 : null);
+
+    $driveOverride = $data['profit_drive_minutes'] ?? null;
+    $driveMinutes = $driveOverride !== null
+        && trim((string)$driveOverride) !== ''
+        ? max(0, (int)$driveOverride)
+        : ($roundTripMiles !== null
+            ? (int)round(($roundTripMiles / $averageMph) * 60)
+            : null);
+
+    $oaiApplies = !empty($data['profit_oai_applies']);
+    $platformFee = field_ops_fn_minimum_provider_fee($gross);
+    $insuranceFee = round(
+        $gross * field_ops_fn_insurance_fee_rate(),
+        2
+    );
+    $oaiFee = $oaiApplies ? field_ops_fn_oai_fee($gross) : 0.0;
+    $mileageCost = $roundTripMiles !== null
+        ? round($roundTripMiles * $mileageRate, 2)
+        : 0.0;
+    $fees = round($platformFee + $insuranceFee + $oaiFee, 2);
+    $estimatedNet = round($gross - $fees - $mileageCost, 2);
+    $totalHours = $onsiteHours + (($driveMinutes ?? 0) / 60);
+    $effectiveHourly = $totalHours > 0
+        ? round($estimatedNet / $totalHours, 2)
+        : 0.0;
+
+    $feeRate = 0.10
+        + field_ops_fn_insurance_fee_rate()
+        + ($oaiApplies ? field_ops_fn_oai_fee_rate() : 0.0);
+    $grossToTarget = $totalHours > 0 && $feeRate < 1
+        ? round(
+            (($targetHourly * $totalHours) + $mileageCost)
+            / (1 - $feeRate),
+            2
+        )
+        : 0.0;
+    $counterofferGross = max($gross, $grossToTarget);
+
+    return [
+        'complete' => $gross > 0
+            && $onsiteHours > 0
+            && $roundTripMiles !== null,
+        'gross_known' => $gross > 0,
+        'onsite_known' => $onsiteHours > 0,
+        'travel_known' => $roundTripMiles !== null,
+        'target_hourly' => $targetHourly,
+        'mileage_rate' => $mileageRate,
+        'average_mph' => $averageMph,
+        'one_way_miles' => $oneWayMiles,
+        'round_trip_miles' => $roundTripMiles,
+        'drive_minutes' => $driveMinutes,
+        'onsite_hours' => round($onsiteHours, 2),
+        'total_hours' => round($totalHours, 2),
+        'gross' => round($gross, 2),
+        'platform_fee' => $platformFee,
+        'insurance_fee' => $insuranceFee,
+        'oai_applies' => $oaiApplies,
+        'oai_fee' => $oaiFee,
+        'fees' => $fees,
+        'mileage_cost' => $mileageCost,
+        'estimated_net' => $estimatedNet,
+        'effective_hourly' => $effectiveHourly,
+        'counteroffer_gross' => round($counterofferGross, 2),
+        'counteroffer_increase' => round(
+            max(0.0, $counterofferGross - $gross),
+            2
+        ),
+    ];
+}
+
 function field_ops_rate_opportunity(array $data): array
 {
     $score = 0;
     $breakdown = [];
-
-    $payRate = (float)($data['pay_rate'] ?? 0);
-    $estimatedGross = (float)($data['estimated_gross'] ?? 0);
-    $distance = isset($data['distance_miles']) ? (float)$data['distance_miles'] : null;
+    $profit = field_ops_opportunity_profitability($data);
     $status = strtoupper((string)($data['status'] ?? 'AVAILABLE'));
     $title = strtolower((string)($data['title'] ?? ''));
+    $effectiveHourly = (float)$profit['effective_hourly'];
+    $targetHourly = (float)$profit['target_hourly'];
 
-    if ($payRate >= 90) {
-        $score += 30;
-        $breakdown['pay'] = '+30 strong hourly pay';
-    } elseif ($payRate >= 65) {
-        $score += 23;
-        $breakdown['pay'] = '+23 good hourly pay';
-    } elseif ($estimatedGross >= 300) {
-        $score += 18;
-        $breakdown['pay'] = '+18 solid estimated gross';
-    } elseif ($payRate > 0 || $estimatedGross > 0) {
-        $score += 10;
-        $breakdown['pay'] = '+10 visible pay, but not great';
-    } else {
+    if (!$profit['gross_known'] || !$profit['onsite_known']) {
         $score -= 8;
-        $breakdown['pay'] = '-8 pay not visible';
+        $breakdown['profit'] = '-8 profitability incomplete';
+    } elseif ($profit['complete']) {
+        if ($effectiveHourly >= $targetHourly * 1.5) {
+            $score += 45;
+            $breakdown['profit'] = sprintf(
+                '+45 excellent $%.2f/hr door-to-door',
+                $effectiveHourly
+            );
+        } elseif ($effectiveHourly >= $targetHourly * 1.2) {
+            $score += 38;
+            $breakdown['profit'] = sprintf(
+                '+38 strong $%.2f/hr door-to-door',
+                $effectiveHourly
+            );
+        } elseif ($effectiveHourly >= $targetHourly) {
+            $score += 30;
+            $breakdown['profit'] = sprintf(
+                '+30 meets $%.2f/hr door-to-door target',
+                $effectiveHourly
+            );
+        } elseif ($effectiveHourly >= $targetHourly * 0.8) {
+            $score += 18;
+            $breakdown['profit'] = sprintf(
+                '+18 marginal $%.2f/hr door-to-door',
+                $effectiveHourly
+            );
+        } else {
+            $score += 5;
+            $breakdown['profit'] = sprintf(
+                '+5 weak $%.2f/hr door-to-door',
+                $effectiveHourly
+            );
+        }
+    } else {
+        $score += 8;
+        $breakdown['profit'] = '+8 partial profitability; travel unknown';
     }
 
-    if ($distance !== null) {
-        if ($distance <= 15) {
-            $score += 20;
-            $breakdown['distance'] = '+20 close drive';
-        } elseif ($distance <= 45) {
-            $score += 12;
-            $breakdown['distance'] = '+12 workable drive';
-        } elseif ($distance <= 80) {
-            $score -= 4;
-            $breakdown['distance'] = '-4 long drive';
+    $driveMinutes = $profit['drive_minutes'];
+
+    if ($driveMinutes !== null) {
+        if ($driveMinutes <= 45) {
+            $score += 15;
+            $breakdown['travel'] = '+15 short round-trip drive';
+        } elseif ($driveMinutes <= 120) {
+            $score += 8;
+            $breakdown['travel'] = '+8 workable round-trip drive';
+        } elseif ($driveMinutes <= 180) {
+            $score -= 2;
+            $breakdown['travel'] = '-2 long round-trip drive';
         } else {
-            $score -= 12;
-            $breakdown['distance'] = '-12 very long drive';
+            $score -= 10;
+            $breakdown['travel'] = '-10 very long round-trip drive';
         }
     } else {
         $score -= 3;
-        $breakdown['distance'] = '-3 distance unknown';
+        $breakdown['travel'] = '-3 travel unknown';
+    }
+
+    $breakdown['net'] = sprintf(
+        '+0 est net $%.2f after $%.2f fees and $%.2f travel',
+        (float)$profit['estimated_net'],
+        (float)$profit['fees'],
+        (float)$profit['mileage_cost']
+    );
+
+    if ((float)$profit['counteroffer_increase'] > 0) {
+        $breakdown['counteroffer'] = sprintf(
+            '+0 counter about $%.2f gross to target $%.2f/hr',
+            (float)$profit['counteroffer_gross'],
+            $targetHourly
+        );
     }
 
     if ($status === 'ROUTED') {
         $score += 8;
         $breakdown['routed'] = '+8 buyer routed it directly';
     } elseif ($status === 'AVAILABLE') {
-        $score += 0;
         $breakdown['routed'] = '+0 public available work';
     }
 
@@ -4554,6 +4742,7 @@ function field_ops_rate_opportunity(array $data): array
         'score' => $score,
         'recommendation' => $recommendation,
         'breakdown' => $breakdown,
+        'profitability' => $profit,
     ];
 }
 
@@ -4850,6 +5039,9 @@ function field_ops_apply_email_event_to_opportunity(int $eventId): array
     $buyerId = field_ops_find_or_create_buyer('FieldNation', $buyerName);
 
     $title = trim((string)($event['parsed_title'] ?? '')) ?: ('FieldNation opportunity ' . ($woNumber !== '' ? $woNumber : '#' . $eventId));
+    $existing = $woNumber !== ''
+        ? field_ops_find_opportunity_by_external_number($woNumber)
+        : null;
 
     $data = [
         'buyer_id' => $buyerId,
@@ -4857,9 +5049,27 @@ function field_ops_apply_email_event_to_opportunity(int $eventId): array
         'status' => $status === 'MESSAGE' ? 'AVAILABLE' : $status,
         'distance_miles' => $event['parsed_distance_miles'],
         'scheduled_start_at' => $event['parsed_schedule_start_at'],
+        'scheduled_end_at' => $event['parsed_schedule_end_at'],
         'pay_rate' => $event['parsed_pay_rate'],
+        'max_hours' => $event['parsed_max_hours'],
         'estimated_gross' => $event['parsed_estimated_gross'],
     ];
+
+    if ($existing) {
+        foreach ([
+            'profit_target_hourly',
+            'profit_mileage_rate',
+            'profit_average_mph',
+            'profit_onsite_hours',
+            'profit_round_trip_miles',
+            'profit_drive_minutes',
+            'profit_oai_applies',
+        ] as $profitField) {
+            if (array_key_exists($profitField, $existing)) {
+                $data[$profitField] = $existing[$profitField];
+            }
+        }
+    }
 
     $rating = field_ops_rate_opportunity($data);
 
@@ -4874,8 +5084,6 @@ function field_ops_apply_email_event_to_opportunity(int $eventId): array
             $notes .= "\n\n--- Email body snapshot ---\n" . $snapshot;
         }
     }
-
-    $existing = $woNumber !== '' ? field_ops_find_opportunity_by_external_number($woNumber) : null;
 
     if ($existing) {
         $opportunityId = (int)$existing['opportunity_id'];
@@ -5060,8 +5268,14 @@ function field_ops_opportunities(int $limit = 200, array $options = []): array
 
     $statement = db()->prepare($sql);
     $statement->execute($params);
+    $rows = $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
 
-    return $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    foreach ($rows as &$row) {
+        $row['profitability'] = field_ops_opportunity_profitability($row);
+    }
+    unset($row);
+
+    return $rows;
 }
 
 function field_ops_find_opportunity(int $opportunityId): ?array
@@ -5073,7 +5287,176 @@ function field_ops_find_opportunity(int $opportunityId): ?array
 
     $row = $st->fetch(PDO::FETCH_ASSOC);
 
-    return is_array($row) ? $row : null;
+    if (!is_array($row)) {
+        return null;
+    }
+
+    $row['profitability'] = field_ops_opportunity_profitability($row);
+
+    return $row;
+}
+
+function field_ops_update_opportunity_profitability(
+    array $input
+): array {
+    field_ops_ensure_opportunity_schema();
+
+    $opportunityId = (int)($input['opportunity_id'] ?? 0);
+    $opportunity = field_ops_find_opportunity($opportunityId);
+
+    if (!$opportunity) {
+        return [
+            'ok' => false,
+            'errors' => ['Opportunity not found.'],
+        ];
+    }
+
+    $numberOrNull = static function (
+        mixed $value,
+        float $minimum,
+        float $maximum
+    ): ?float {
+        $value = trim((string)$value);
+
+        if ($value === '') {
+            return null;
+        }
+
+        return min($maximum, max($minimum, (float)$value));
+    };
+
+    $targetHourly = $numberOrNull(
+        $input['profit_target_hourly'] ?? '35.00',
+        1.0,
+        500.0
+    ) ?? 35.0;
+    $mileageRate = $numberOrNull(
+        $input['profit_mileage_rate'] ?? '0.6700',
+        0.0,
+        10.0
+    ) ?? 0.67;
+    $averageMph = $numberOrNull(
+        $input['profit_average_mph'] ?? '55.00',
+        5.0,
+        100.0
+    ) ?? 55.0;
+    $onsiteHours = $numberOrNull(
+        $input['profit_onsite_hours'] ?? '',
+        0.0,
+        100.0
+    );
+    $roundTripMiles = $numberOrNull(
+        $input['profit_round_trip_miles'] ?? '',
+        0.0,
+        2000.0
+    );
+    $driveMinutesFloat = $numberOrNull(
+        $input['profit_drive_minutes'] ?? '',
+        0.0,
+        2880.0
+    );
+    $driveMinutes = $driveMinutesFloat === null
+        ? null
+        : (int)round($driveMinutesFloat);
+    $oaiApplies = !empty($input['profit_oai_applies']) ? 1 : 0;
+
+    db()->prepare("
+        UPDATE field_opportunities
+        SET profit_target_hourly = ?,
+            profit_mileage_rate = ?,
+            profit_average_mph = ?,
+            profit_onsite_hours = ?,
+            profit_round_trip_miles = ?,
+            profit_drive_minutes = ?,
+            profit_oai_applies = ?,
+            updated_at = NOW()
+        WHERE opportunity_id = ?
+        LIMIT 1
+    ")->execute([
+        $targetHourly,
+        $mileageRate,
+        $averageMph,
+        $onsiteHours,
+        $roundTripMiles,
+        $driveMinutes,
+        $oaiApplies,
+        $opportunityId,
+    ]);
+
+    $updated = field_ops_find_opportunity($opportunityId);
+    $rating = field_ops_rate_opportunity($updated ?: []);
+
+    db()->prepare("
+        UPDATE field_opportunities
+        SET score = ?,
+            recommendation = ?,
+            score_breakdown_json = ?,
+            updated_at = NOW()
+        WHERE opportunity_id = ?
+        LIMIT 1
+    ")->execute([
+        $rating['score'],
+        $rating['recommendation'],
+        json_encode(
+            $rating['breakdown'],
+            JSON_UNESCAPED_SLASHES
+        ),
+        $opportunityId,
+    ]);
+
+    return [
+        'ok' => true,
+        'opportunity_id' => $opportunityId,
+        'score' => $rating['score'],
+        'recommendation' => $rating['recommendation'],
+        'profitability' => $rating['profitability'],
+    ];
+}
+
+function field_ops_rescore_opportunities(int $limit = 500): array
+{
+    $opportunities = field_ops_opportunities($limit);
+    $rescored = 0;
+    $failed = 0;
+    $statement = db()->prepare("
+        UPDATE field_opportunities
+        SET score = ?,
+            recommendation = ?,
+            score_breakdown_json = ?,
+            updated_at = NOW()
+        WHERE opportunity_id = ?
+        LIMIT 1
+    ");
+
+    foreach ($opportunities as $opportunity) {
+        try {
+            $rating = field_ops_rate_opportunity($opportunity);
+            $statement->execute([
+                $rating['score'],
+                $rating['recommendation'],
+                json_encode(
+                    $rating['breakdown'],
+                    JSON_UNESCAPED_SLASHES
+                ),
+                (int)$opportunity['opportunity_id'],
+            ]);
+            $rescored++;
+        } catch (Throwable $e) {
+            $failed++;
+            error_log(
+                'Opportunity rescore failed: ' . $e->getMessage()
+            );
+        }
+    }
+
+    return [
+        'ok' => $failed === 0,
+        'rescored' => $rescored,
+        'failed' => $failed,
+        'errors' => $failed > 0
+            ? ["{$failed} opportunities could not be rescored."]
+            : [],
+    ];
 }
 
 function field_ops_ignore_opportunity(int $opportunityId): array

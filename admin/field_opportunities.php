@@ -37,6 +37,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $result = field_ops_watch_opportunity((int)($_POST['opportunity_id'] ?? 0));
     } elseif ($action === 'unwatch_opportunity') {
         $result = field_ops_unwatch_opportunity((int)($_POST['opportunity_id'] ?? 0));
+    } elseif ($action === 'update_opportunity_profitability') {
+        $result = field_ops_update_opportunity_profitability($_POST);
+    } elseif ($action === 'rescore_opportunities') {
+        $result = field_ops_rescore_opportunities(500);
     }
 
     if (!empty($result['ok'])) {
@@ -57,6 +61,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'ignore_opportunity' => 'Opportunity ignored.',
             'watch_opportunity' => 'Opportunity marked as watching.',
             'unwatch_opportunity' => 'Opportunity returned to available.',
+            'update_opportunity_profitability' => 'Profitability assumptions saved and opportunity rescored.',
+            'rescore_opportunities' => 'Active opportunities rescored using real profitability.',
             default => 'Saved.',
         };
         }
@@ -84,18 +90,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $returnParams['event_filter'] = $returnEventFilter;
         }
 
-        $returnAnchor = match ($action) {
-            'promote_opportunity',
-            'ignore_opportunity',
-            'watch_opportunity',
-            'unwatch_opportunity' => '#opportunity-board-filters',
+        $updatedOpportunityId = (int)($_POST['opportunity_id'] ?? 0);
 
-            'apply_email_event',
-            'apply_assigned_email_event',
-            'apply_declined_email_event' => '#email-event-filters',
+        if (
+            $action === 'update_opportunity_profitability'
+            && $updatedOpportunityId > 0
+        ) {
+            $returnParams['open_opportunity'] = $updatedOpportunityId;
+        }
 
-            default => '',
-        };
+        $returnAnchor = $action === 'update_opportunity_profitability'
+            && $updatedOpportunityId > 0
+            ? '#opportunity-' . $updatedOpportunityId
+            : match ($action) {
+                'promote_opportunity',
+                'ignore_opportunity',
+                'watch_opportunity',
+                'unwatch_opportunity' => '#opportunity-board-filters',
+                'rescore_opportunities' => '#opportunity-board-filters',
+
+                'apply_email_event',
+                'apply_assigned_email_event',
+                'apply_declined_email_event' => '#email-event-filters',
+
+                default => '',
+            };
 
         $returnUrl = BASE_URL . '/admin/field_opportunities.php';
 
@@ -116,6 +135,7 @@ if (!empty($_SESSION['flash_msg'])) {
 }
 
 $searchQuery = substr(trim((string)($_GET['q'] ?? '')), 0, 120);
+$openOpportunityId = max(0, (int)($_GET['open_opportunity'] ?? 0));
 $opportunitySort = strtolower((string)($_GET['sort'] ?? 'date'));
 
 if (!in_array($opportunitySort, ['date', 'score'], true)) {
@@ -321,6 +341,51 @@ OLD,
     .detail-notes { white-space:pre-wrap; overflow-wrap:anywhere; }
     .detail-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
     @media (max-width:1000px) { .stats,.two,.form-grid { grid-template-columns:1fr; } .full { grid-column:auto; } }
+    .profit-quick strong { display:block; color:#86efac; font-size:16px; }
+    .profit-quick .weak { color:#fecaca; }
+    .profit-quick .target { color:#fde68a; }
+    .profit-grid {
+      display:grid;
+      grid-template-columns:repeat(4,minmax(0,1fr));
+      gap:10px;
+      margin:12px 0;
+    }
+    .profit-metric {
+      border:1px solid rgba(134,239,172,.2);
+      border-radius:14px;
+      padding:11px;
+      background:rgba(20,83,45,.12);
+      min-width:0;
+    }
+    .profit-metric span { display:block; color:var(--muted); font-size:11px; margin-bottom:4px; }
+    .profit-metric strong { display:block; font-size:18px; overflow-wrap:anywhere; }
+    .profit-metric .weak { color:#fecaca; }
+    .profit-metric .target { color:#fde68a; }
+    .profit-form {
+      display:grid;
+      grid-template-columns:repeat(3,minmax(0,1fr));
+      gap:10px;
+      margin-top:12px;
+      padding:14px;
+      border:1px solid rgba(96,165,250,.22);
+      border-radius:16px;
+      background:rgba(15,23,42,.38);
+    }
+    .profit-form .check-label {
+      display:flex;
+      align-items:center;
+      gap:9px;
+      min-height:43px;
+    }
+    .profit-form .check-label input { width:auto; }
+    .profit-note { grid-column:1 / -1; font-size:12px; line-height:1.5; }
+    @media (max-width:1000px) {
+      .profit-grid,.profit-form { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    }
+    @media (max-width:620px) {
+      .profit-grid,.profit-form { grid-template-columns:1fr; }
+      .profit-note { grid-column:auto; }
+    }
   </style>
 </head>
 <body>
@@ -398,20 +463,27 @@ OLD,
     </article>
 
     <article class="card">
-      <h2>Scoring v1</h2>
-      <p>Opportunities get rated before they touch the real W/O table.</p>
+      <h2>Profitability scoring v2</h2>
+      <p>OPS estimates real door-to-door income before an opportunity touches the W/O table.</p>
       <div class="grid">
         <div><span class="badge green">80-100</span> <span class="muted">Request this</span></div>
         <div><span class="badge yellow">65-79</span> <span class="muted">Worth reviewing</span></div>
         <div><span class="badge">45-64</span> <span class="muted">Maybe if schedule is open</span></div>
         <div><span class="badge red">0-44</span> <span class="muted">Skip</span></div>
       </div>
-      <p>Scoring considers pay, distance, routed bonus, work type, schedule freshness, and buyer preference.</p>
+      <p>Scoring now uses provider, GL and optional OAI fees, round-trip mileage cost, drive time, onsite time, real net, target hourly, routed bonus, work type, schedule freshness, and buyer preference.</p>
     </article>
   </section>
 
   <section class="card" style="margin-top:16px;">
-    <h2>Opportunity board</h2>
+    <div class="actions" style="justify-content:space-between;align-items:center;">
+      <h2 style="margin:0;">Opportunity board</h2>
+      <form method="post" style="margin:0;">
+        <?= csrf_field() ?>
+        <input type="hidden" name="action" value="rescore_opportunities">
+        <button class="btn" type="submit">Rescore active opportunities</button>
+      </form>
+    </div>
     <p class="muted" style="margin-top:-4px;">
       Showing <?= (int)$opportunityCount ?> of <?= (int)$totalOpportunityCount ?> active opportunities.
       <?php if ($searchQuery !== ''): ?>
@@ -481,13 +553,14 @@ OLD,
             <th>Location</th>
             <th>Schedule</th>
             <th>Pay</th>
+            <th>Real profit</th>
             <th>Actions</th>
           </tr>
         </thead>
         <tbody>
         <?php if (!$opportunities): ?>
           <tr>
-            <td colspan="9" class="muted">
+            <td colspan="10" class="muted">
               <?php if ($searchQuery !== ''): ?>
                 No active opportunities match “<?= $h($searchQuery) ?>”.
               <?php elseif ($totalOpportunityCount > 0): ?>
@@ -509,6 +582,12 @@ OLD,
               'REQUESTED' => 'badge-requested',
               default => '',
           };
+          $profit = (array)($op['profitability'] ?? []);
+          $effectiveHourly = (float)($profit['effective_hourly'] ?? 0);
+          $targetHourly = (float)($profit['target_hourly'] ?? 35);
+          $profitClass = $effectiveHourly >= $targetHourly
+              ? ''
+              : ($effectiveHourly >= ($targetHourly * .8) ? 'target' : 'weak');
           $isExactSearchMatch = $searchQuery !== ''
               && strcasecmp(
                   trim((string)($op['external_work_order_number'] ?? '')),
@@ -545,6 +624,15 @@ OLD,
             <td>
               <?php if ((float)$op['pay_rate'] > 0): ?>$<?= number_format((float)$op['pay_rate'], 2) ?>/hr<br><?php endif; ?>
               <?php if ((float)$op['estimated_gross'] > 0): ?><strong>$<?= number_format((float)$op['estimated_gross'], 2) ?></strong><?php endif; ?>
+            </td>
+            <td class="profit-quick">
+              <?php if (!empty($profit['complete'])): ?>
+                <strong class="<?= $h($profitClass) ?>">$<?= number_format((float)$profit['effective_hourly'], 2) ?>/hr</strong>
+                <span class="muted">$<?= number_format((float)$profit['estimated_net'], 2) ?> net</span>
+              <?php else: ?>
+                <strong class="target">Needs assumptions</strong>
+                <span class="muted">Open details</span>
+              <?php endif; ?>
             </td>
             <td>
               <div class="actions">
@@ -585,8 +673,12 @@ OLD,
             </td>
           </tr>
           <tr class="op-detail-row">
-            <td colspan="9">
-              <details class="op-detail">
+            <td colspan="10">
+              <details
+                id="opportunity-<?= (int)$op['opportunity_id'] ?>"
+                class="op-detail"
+                <?= $openOpportunityId === (int)$op['opportunity_id'] ? 'open' : '' ?>
+              >
                 <summary>View opportunity details</summary>
 
                 <div class="detail-grid">
@@ -637,6 +729,40 @@ OLD,
                     <?php else: ?>
                       <span class="muted">Unknown</span>
                     <?php endif; ?>
+                  </div>
+
+                  <div class="detail-item full">
+                    <strong>Real profitability</strong>
+                    <div class="profit-grid">
+                      <div class="profit-metric"><span>Estimated gross</span><strong>$<?= number_format((float)($profit['gross'] ?? 0), 2) ?></strong></div>
+                      <div class="profit-metric"><span>Provider fee</span><strong>-$<?= number_format((float)($profit['platform_fee'] ?? 0), 2) ?></strong></div>
+                      <div class="profit-metric"><span>GL insurance</span><strong>-$<?= number_format((float)($profit['insurance_fee'] ?? 0), 2) ?></strong></div>
+                      <div class="profit-metric"><span>OAI fee</span><strong>-$<?= number_format((float)($profit['oai_fee'] ?? 0), 2) ?></strong></div>
+                      <div class="profit-metric"><span>Round-trip mileage</span><strong><?= $profit['round_trip_miles'] !== null ? number_format((float)$profit['round_trip_miles'], 1) . ' mi' : 'Unknown' ?></strong></div>
+                      <div class="profit-metric"><span>Vehicle cost</span><strong>-$<?= number_format((float)($profit['mileage_cost'] ?? 0), 2) ?></strong></div>
+                      <div class="profit-metric"><span>Drive + onsite</span><strong><?= number_format((float)($profit['total_hours'] ?? 0), 2) ?> hrs</strong></div>
+                      <div class="profit-metric"><span>Real net</span><strong>$<?= number_format((float)($profit['estimated_net'] ?? 0), 2) ?></strong></div>
+                      <div class="profit-metric"><span>Door-to-door hourly</span><strong class="<?= $h($profitClass) ?>">$<?= number_format((float)($profit['effective_hourly'] ?? 0), 2) ?>/hr</strong></div>
+                      <div class="profit-metric"><span>Target hourly</span><strong>$<?= number_format((float)($profit['target_hourly'] ?? 35), 2) ?>/hr</strong></div>
+                      <div class="profit-metric"><span>Suggested counter gross</span><strong>$<?= number_format((float)($profit['counteroffer_gross'] ?? 0), 2) ?></strong></div>
+                      <div class="profit-metric"><span>Suggested increase</span><strong>$<?= number_format((float)($profit['counteroffer_increase'] ?? 0), 2) ?></strong></div>
+                    </div>
+
+                    <form method="post" class="profit-form">
+                      <?= csrf_field() ?>
+                      <input type="hidden" name="action" value="update_opportunity_profitability">
+                      <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
+
+                      <label>Target hourly<input name="profit_target_hourly" inputmode="decimal" value="<?= number_format((float)($op['profit_target_hourly'] ?? 35), 2, '.', '') ?>"></label>
+                      <label>Mileage rate<input name="profit_mileage_rate" inputmode="decimal" value="<?= number_format((float)($op['profit_mileage_rate'] ?? .67), 4, '.', '') ?>"></label>
+                      <label>Average driving MPH<input name="profit_average_mph" inputmode="decimal" value="<?= number_format((float)($op['profit_average_mph'] ?? 55), 2, '.', '') ?>"></label>
+                      <label>Expected onsite hours<input name="profit_onsite_hours" inputmode="decimal" value="<?= $op['profit_onsite_hours'] !== null ? number_format((float)$op['profit_onsite_hours'], 2, '.', '') : '' ?>" placeholder="Uses FN max hours"></label>
+                      <label>Round-trip miles<input name="profit_round_trip_miles" inputmode="decimal" value="<?= $op['profit_round_trip_miles'] !== null ? number_format((float)$op['profit_round_trip_miles'], 2, '.', '') : '' ?>" placeholder="2 × FN distance"></label>
+                      <label>Round-trip drive minutes<input name="profit_drive_minutes" inputmode="numeric" value="<?= $op['profit_drive_minutes'] !== null ? (int)$op['profit_drive_minutes'] : '' ?>" placeholder="Calculated from miles / MPH"></label>
+                      <label class="check-label"><input type="checkbox" name="profit_oai_applies" value="1" <?= !empty($op['profit_oai_applies']) ? 'checked' : '' ?>> OAI applies (0.5%)</label>
+                      <div class="profit-note muted">Blank onsite, mileage, or drive overrides use the values parsed from FieldNation. Counteroffer gross targets your selected hourly rate after fees and mileage cost.</div>
+                      <div><button class="btn btn-primary" type="submit">Save assumptions &amp; rescore</button></div>
+                    </form>
                   </div>
 
                   <?php
