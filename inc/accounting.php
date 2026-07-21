@@ -45,6 +45,7 @@ function accounting_ensure_invoice_line_item_link(): void {
          'payments' => ['/payments/index.php', 'Payments'],
          'recurring' => ['/accounting/recurring.php', 'Recurring'],
          'receivables' => ['/accounting/receivables.php', 'Receivables'],
+         'bank_import' => ['/accounting/bank_import.php', 'Bank Import'],
          'reconcile' => ['/accounting/reconcile.php', 'Reconcile'],
          'capital' => ['/accounting/capital.php', 'Capital'],
      ];
