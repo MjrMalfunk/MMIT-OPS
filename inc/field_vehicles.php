@@ -12,6 +12,11 @@ declare(strict_types=1);
 
 function field_vehicles_ensure_schema(): void
 {
+    static $schemaReady = false;
+
+    if ($schemaReady) {
+        return;
+    }
     $pdo = db();
 
     $pdo->exec("
@@ -180,6 +185,8 @@ function field_vehicles_ensure_schema(): void
             }
         }
     }
+
+    $schemaReady = true;
 }
 
 function field_vehicle_event_types(): array
