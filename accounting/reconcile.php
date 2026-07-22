@@ -333,4 +333,34 @@ accounting_subnav('reconcile');
     </div>
   <?php endif; ?>
 </div>
+<script>
+(() => {
+  const form = document.querySelector('.recon-filter-form');
+  const dateInput = form?.querySelector(
+    'input[name="statement_ending_date"]'
+  );
+
+  if (!form || !dateInput) {
+    return;
+  }
+
+  let submitting = false;
+
+  dateInput.addEventListener('change', () => {
+    if (!dateInput.value || submitting) {
+      return;
+    }
+
+    submitting = true;
+    dateInput.setAttribute('aria-busy', 'true');
+
+    if (typeof form.requestSubmit === 'function') {
+      form.requestSubmit();
+      return;
+    }
+
+    form.submit();
+  });
+})();
+</script>
 <?php page_footer(); ?>

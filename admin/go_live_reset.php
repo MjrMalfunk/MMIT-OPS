@@ -66,6 +66,7 @@ page_header('Go-Live Reset', 'admin');
       'Payments' => $snapshot['payments'],
       'Expenses' => $snapshot['expenses'],
       'Reconciliations' => $snapshot['reconciliations'],
+      'Bank-import batches' => $snapshot['bank_import_batches'] ?? 0,
       'Webhook logs' => $snapshot['webhooks'],
       'Portal invites' => $snapshot['portal_invites'] ?? 0,
       'Test files' => $snapshot['test_files'],
@@ -85,7 +86,7 @@ page_header('Go-Live Reset', 'admin');
     <ul style="margin:0;padding-left:18px;line-height:1.7;opacity:.9;">
       <li>Clients, contacts, locations, contracts, onboarding tasks, client services, and recurring services</li>
       <li>Invoices, invoice lines, invoice delivery history, payments, payment applications, and Stripe webhook logs</li>
-      <li>Bills / expenses, attachments, reconciliations, and all journals except opening-balance manual entries</li>
+      <li>Bills / expenses, attachments, bank-import batches, reconciliations, and all journals except opening-balance manual entries</li>
       <li>Customer portal users and all portal invites, so testing can be reset cleanly</li>
       <li>Files in <code>uploads/contracts</code> and local uploaded expense attachments</li>
     </ul>

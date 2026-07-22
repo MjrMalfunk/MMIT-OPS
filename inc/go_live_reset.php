@@ -103,6 +103,8 @@ function go_live_reset_snapshot(): array {
         'expense_attachments' => go_live_reset_count_table('expense_attachment'),
         'webhooks' => go_live_reset_count_table('gateway_webhook_event'),
         'reconciliations' => go_live_reset_count_table('bank_reconciliation'),
+        'bank_import_batches' => go_live_reset_count_table('bank_import_batch'),
+        'bank_import_transactions' => go_live_reset_count_table('bank_import_transaction'),
         'journals_total' => go_live_reset_count_table('gl_journal'),
         'journals_preserved' => count(go_live_reset_opening_journal_ids()),
         'customer_users' => count(go_live_reset_customer_user_ids()),
@@ -178,6 +180,8 @@ function go_live_reset_execute(bool $deleteFiles = true): array {
 
         // Transactional / client-side data.
         $deleteAll = [
+            'bank_import_transaction',
+            'bank_import_batch',
             'bank_reconciliation_item',
             'bank_reconciliation',
             'gateway_webhook_event',
@@ -236,6 +240,8 @@ function go_live_reset_execute(bool $deleteFiles = true): array {
         'payment_receipt' => 'payment_id',
         'payment_invoice_apply' => 'payment_apply_id',
         'gateway_webhook_event' => 'webhook_event_id',
+        'bank_import_batch' => 'batch_id',
+        'bank_import_transaction' => 'bank_transaction_id',
         'bank_reconciliation' => 'reconciliation_id',
         'bank_reconciliation_item' => 'reconciliation_item_id',
         'recurring_service' => 'recurring_service_id',
