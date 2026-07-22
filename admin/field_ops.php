@@ -850,6 +850,7 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_opportunities.php">FN opportunities</a>
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_projects.php">Projects</a>
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_vehicles.php">Service vehicles</a>
+      <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_rideshare.php">Lyft performance</a>
   <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_receipts.php">Receipts</a>
   <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_expense_drafts.php">Expense drafts</a>
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/index.php">Back to admin</a>
