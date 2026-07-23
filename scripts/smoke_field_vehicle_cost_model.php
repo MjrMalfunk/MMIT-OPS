@@ -1,9 +1,18 @@
 <?php
 declare(strict_types=1);
 
-$_SERVER['HTTP_HOST'] =
-    getenv('FIELD_VEHICLE_HOST')
-    ?: 'ops-test.midwestmanagedit.com';
+$targetHost = trim((string)getenv('FIELD_VEHICLE_HOST'));
+$expectedDatabase = trim(
+    (string)getenv('FIELD_VEHICLE_DATABASE')
+);
+
+if ($targetHost === '' || $expectedDatabase === '') {
+    throw new RuntimeException(
+        'FIELD_VEHICLE_HOST and FIELD_VEHICLE_DATABASE are required'
+    );
+}
+
+$_SERVER['HTTP_HOST'] = $targetHost;
 
 $_SERVER['HTTPS'] = 'on';
 $_SERVER['REQUEST_URI'] = '/';
@@ -28,9 +37,17 @@ $assert = static function (
     echo 'FAIL: ', $message, PHP_EOL;
 };
 
-echo 'Database: ',
-    (string)db()->query('SELECT DATABASE()')->fetchColumn(),
-    PHP_EOL;
+$actualDatabase = (string)db()
+    ->query('SELECT DATABASE()')
+    ->fetchColumn();
+
+if (!hash_equals($expectedDatabase, $actualDatabase)) {
+    throw new RuntimeException(
+        "Database guard failed: expected {$expectedDatabase}, connected {$actualDatabase}"
+    );
+}
+
+echo 'Database: ', $actualDatabase, PHP_EOL;
 
 field_vehicles_ensure_schema();
 
