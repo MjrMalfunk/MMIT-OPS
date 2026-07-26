@@ -5340,9 +5340,249 @@ function field_ops_apply_email_event_to_opportunity(int $eventId): array
     return ['ok' => true, 'opportunity_id' => $opportunityId];
 }
 
+
+function field_ops_ensure_fn_packet_schema(): void
+{
+    static $ready = false;
+
+    if ($ready) {
+        return;
+    }
+
+    db()->exec("
+        CREATE TABLE IF NOT EXISTS field_fn_work_order_packets (
+            packet_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            platform VARCHAR(40) NOT NULL DEFAULT 'FieldNation',
+            external_work_order_number VARCHAR(64) NOT NULL,
+            opportunity_id BIGINT UNSIGNED NULL,
+            work_order_id BIGINT UNSIGNED NULL,
+            packet_requirement VARCHAR(16) NOT NULL DEFAULT 'AVAILABLE',
+            capture_status VARCHAR(16) NOT NULL DEFAULT 'MISSING',
+            captured_at DATETIME NULL,
+            content_hash CHAR(64) NULL,
+            source_url TEXT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (packet_id),
+            UNIQUE KEY uq_fn_packet_identity (
+                platform,
+                external_work_order_number
+            ),
+            KEY idx_fn_packet_opportunity (opportunity_id),
+            KEY idx_fn_packet_work_order (work_order_id),
+            KEY idx_fn_packet_state (
+                packet_requirement,
+                capture_status
+            )
+        ) ENGINE=InnoDB
+          DEFAULT CHARSET=utf8mb4
+          COLLATE=utf8mb4_unicode_ci
+    ");
+
+    $ready = true;
+}
+
+function field_ops_fn_packet_requirement(
+    string $lifecycleStatus
+): ?string {
+    return match (strtoupper(trim($lifecycleStatus))) {
+        'ROUTED', 'REQUESTED' => 'AVAILABLE',
+        'ASSIGNED' => 'REQUIRED',
+        default => null,
+    };
+}
+
+function field_ops_upsert_fn_packet(
+    string $platform,
+    string $externalNumber,
+    string $lifecycleStatus,
+    ?int $opportunityId = null,
+    ?int $workOrderId = null,
+    ?string $sourceUrl = null
+): ?array {
+    field_ops_ensure_fn_packet_schema();
+
+    $platform = trim($platform) ?: 'FieldNation';
+    $externalNumber = trim($externalNumber);
+    $requirement = field_ops_fn_packet_requirement($lifecycleStatus);
+
+    if ($externalNumber === '' || $requirement === null) {
+        return null;
+    }
+
+    db()->prepare("
+        INSERT INTO field_fn_work_order_packets (
+            platform,
+            external_work_order_number,
+            opportunity_id,
+            work_order_id,
+            packet_requirement,
+            capture_status,
+            source_url,
+            created_at,
+            updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'MISSING', ?, NOW(), NOW())
+        ON DUPLICATE KEY UPDATE
+            opportunity_id = COALESCE(
+                VALUES(opportunity_id),
+                opportunity_id
+            ),
+            work_order_id = COALESCE(
+                VALUES(work_order_id),
+                work_order_id
+            ),
+            packet_requirement = CASE
+                WHEN packet_requirement = 'REQUIRED'
+                  OR VALUES(packet_requirement) = 'REQUIRED'
+                THEN 'REQUIRED'
+                ELSE 'AVAILABLE'
+            END,
+            source_url = COALESCE(
+                VALUES(source_url),
+                source_url
+            ),
+            updated_at = NOW()
+    ")->execute([
+        $platform,
+        $externalNumber,
+        $opportunityId ?: null,
+        $workOrderId ?: null,
+        $requirement,
+        $sourceUrl !== null && trim($sourceUrl) !== ''
+            ? trim($sourceUrl)
+            : null,
+    ]);
+
+    return field_ops_find_fn_packet($platform, $externalNumber);
+}
+
+function field_ops_find_fn_packet(
+    string $platform,
+    string $externalNumber
+): ?array {
+    field_ops_ensure_fn_packet_schema();
+
+    $st = db()->prepare("
+        SELECT *
+        FROM field_fn_work_order_packets
+        WHERE platform = ?
+          AND external_work_order_number = ?
+        LIMIT 1
+    ");
+    $st->execute([
+        trim($platform) ?: 'FieldNation',
+        trim($externalNumber),
+    ]);
+
+    $row = $st->fetch(PDO::FETCH_ASSOC);
+
+    return is_array($row) ? $row : null;
+}
+
+function field_ops_reconcile_fn_packets(): void
+{
+    field_ops_ensure_fn_packet_schema();
+
+    db()->exec("
+        INSERT INTO field_fn_work_order_packets (
+            platform,
+            external_work_order_number,
+            opportunity_id,
+            packet_requirement,
+            capture_status,
+            source_url,
+            created_at,
+            updated_at
+        )
+        SELECT
+            'FieldNation',
+            o.external_work_order_number,
+            o.opportunity_id,
+            CASE
+                WHEN UPPER(o.status) = 'ASSIGNED'
+                THEN 'REQUIRED'
+                ELSE 'AVAILABLE'
+            END,
+            'MISSING',
+            o.source_url,
+            NOW(),
+            NOW()
+        FROM field_opportunities o
+        WHERE o.external_work_order_number IS NOT NULL
+          AND o.external_work_order_number <> ''
+          AND UPPER(o.status) IN (
+              'ROUTED',
+              'REQUESTED',
+              'ASSIGNED'
+          )
+        ON DUPLICATE KEY UPDATE
+            opportunity_id = VALUES(opportunity_id),
+            packet_requirement = CASE
+                WHEN packet_requirement = 'REQUIRED'
+                  OR VALUES(packet_requirement) = 'REQUIRED'
+                THEN 'REQUIRED'
+                ELSE 'AVAILABLE'
+            END,
+            source_url = COALESCE(
+                VALUES(source_url),
+                field_fn_work_order_packets.source_url
+            ),
+            updated_at = NOW()
+    ");
+
+    db()->exec("
+        INSERT INTO field_fn_work_order_packets (
+            platform,
+            external_work_order_number,
+            work_order_id,
+            packet_requirement,
+            capture_status,
+            source_url,
+            created_at,
+            updated_at
+        )
+        SELECT
+            COALESCE(NULLIF(wo.platform, ''), 'FieldNation'),
+            wo.external_work_order_number,
+            wo.work_order_id,
+            CASE
+                WHEN UPPER(wo.status) = 'ASSIGNED'
+                THEN 'REQUIRED'
+                ELSE 'AVAILABLE'
+            END,
+            'MISSING',
+            wo.source_url,
+            NOW(),
+            NOW()
+        FROM field_work_orders wo
+        WHERE wo.deleted_at IS NULL
+          AND wo.external_work_order_number IS NOT NULL
+          AND wo.external_work_order_number <> ''
+          AND UPPER(wo.status) IN (
+              'REQUESTED',
+              'ASSIGNED'
+          )
+        ON DUPLICATE KEY UPDATE
+            work_order_id = VALUES(work_order_id),
+            packet_requirement = CASE
+                WHEN packet_requirement = 'REQUIRED'
+                  OR VALUES(packet_requirement) = 'REQUIRED'
+                THEN 'REQUIRED'
+                ELSE 'AVAILABLE'
+            END,
+            source_url = COALESCE(
+                VALUES(source_url),
+                field_fn_work_order_packets.source_url
+            ),
+            updated_at = NOW()
+    ");
+}
+
 function field_ops_opportunities(int $limit = 200, array $options = []): array
 {
     field_ops_ensure_opportunity_schema();
+    field_ops_reconcile_fn_packets();
 
     $limit = max(1, min(500, $limit));
     $query = trim((string)($options['q'] ?? ''));
@@ -5804,6 +6044,15 @@ function field_ops_promote_opportunity_to_work_order(int $opportunityId): array
         LIMIT 1
     ")->execute([$workOrderId, $opportunityId]);
 
+    field_ops_upsert_fn_packet(
+        'FieldNation',
+        (string)$op['external_work_order_number'],
+        'REQUESTED',
+        $opportunityId,
+        $workOrderId,
+        $op['source_url'] ?? null
+    );
+
     return ['ok' => true, 'work_order_id' => $workOrderId];
 }
 
@@ -5948,6 +6197,8 @@ function field_ops_apply_assigned_email_event_to_work_order(int $eventId): array
     ];
 
     $table = 'field_work_orders';
+    field_ops_ensure_fn_packet_schema();
+
     $pdo = db();
     $pdo->beginTransaction();
 
@@ -6023,11 +6274,22 @@ function field_ops_apply_assigned_email_event_to_work_order(int $eventId): array
             LIMIT 1
         ")->execute([$workOrderId, $eventId]);
 
+        field_ops_upsert_fn_packet(
+            'FieldNation',
+            $woNumber,
+            'ASSIGNED',
+            isset($opportunityId) ? (int)$opportunityId : null,
+            $workOrderId,
+            $candidate['source_url'] ?? null
+        );
+
         $pdo->commit();
 
         return ['ok' => true, 'work_order_id' => $workOrderId];
     } catch (Throwable $e) {
-        $pdo->rollBack();
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
 
         return ['ok' => false, 'errors' => ['Assigned W/O bridge failed: ' . $e->getMessage()]];
     }

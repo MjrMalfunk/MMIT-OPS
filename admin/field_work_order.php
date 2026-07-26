@@ -18,6 +18,22 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
 
 $workOrderId = (int)($_GET['id'] ?? $_POST['work_order_id'] ?? 0);
 $wo = $workOrderId > 0 ? field_ops_find_work_order($workOrderId) : null;
+$fnPacket = null;
+
+if (
+    $wo
+    && strcasecmp((string)($wo['platform'] ?? ''), 'FieldNation') === 0
+    && trim((string)($wo['external_work_order_number'] ?? '')) !== ''
+) {
+    $fnPacket = field_ops_upsert_fn_packet(
+        'FieldNation',
+        (string)$wo['external_work_order_number'],
+        (string)($wo['status'] ?? ''),
+        null,
+        $workOrderId,
+        $wo['source_url'] ?? null
+    );
+}
 
 if (!$wo) {
     http_response_code(404);
@@ -408,6 +424,49 @@ $receivableStateClass = match ($receivableState) {
         <?= $h($wo['buyer_name'] ?? 'No buyer') ?>
         <?php if (!empty($wo['external_work_order_number'])): ?> · <code><?= $h($wo['external_work_order_number']) ?></code><?php endif; ?>
       </p>
+
+      <?php if ($fnPacket): ?>
+        <?php
+          $packetRequirement = strtoupper(
+              (string)$fnPacket['packet_requirement']
+          );
+          $captureStatus = strtoupper(
+              (string)$fnPacket['capture_status']
+          );
+          $packetLabel = $captureStatus === 'CAPTURED'
+              ? 'FN packet captured'
+              : (
+                  $packetRequirement === 'REQUIRED'
+                      ? 'FN packet required'
+                      : 'FN packet available'
+              );
+          $packetBackground = $captureStatus === 'CAPTURED'
+              ? '#166534'
+              : (
+                  $packetRequirement === 'REQUIRED'
+                      ? '#b91c1c'
+                      : '#1d4ed8'
+              );
+        ?>
+        <div style="margin-top:.65rem;">
+          <span
+            style="
+              display:inline-flex;
+              align-items:center;
+              border-radius:999px;
+              padding:.35rem .7rem;
+              background:<?= $h($packetBackground) ?>;
+              color:#fff;
+              font-size:.78rem;
+              font-weight:900;
+              letter-spacing:.035em;
+              text-transform:uppercase;
+            "
+          >
+            <?= $h($packetLabel) ?>
+          </span>
+        </div>
+      <?php endif; ?>
     </div>
     <div class="actions">
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_projects.php">Projects</a>
