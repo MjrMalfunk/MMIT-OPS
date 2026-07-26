@@ -41,6 +41,65 @@ if (!$wo) {
     exit;
 }
 
+$fnCaptureBookmarklet = null;
+$fnCaptureReceiverUrl = null;
+$fnCaptureSourceUrl = null;
+
+if ($fnPacket) {
+    $externalNumber = (string)$fnPacket['external_work_order_number'];
+    $fnCaptureReceiverUrl = BASE_URL
+        . '/admin/field_fn_packet_capture.php?'
+        . http_build_query([
+            'external_work_order_number' => $externalNumber,
+        ]);
+    $baseParts = parse_url(BASE_URL);
+    $baseScheme = strtolower((string)($baseParts['scheme'] ?? ''));
+    $baseHost = (string)($baseParts['host'] ?? '');
+    $basePort = isset($baseParts['port'])
+        ? ':' . (int)$baseParts['port']
+        : '';
+    $captureOrigin = $baseScheme . '://' . $baseHost . $basePort;
+    $numberJson = json_encode(
+        $externalNumber,
+        JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
+    );
+    $receiverJson = json_encode(
+        $fnCaptureReceiverUrl,
+        JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
+    );
+    $originJson = json_encode(
+        $captureOrigin,
+        JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
+    );
+
+    $fnCaptureBookmarklet = "javascript:(()=>{'use strict';"
+        . "const n={$numberJson},r={$receiverJson},o={$originJson};"
+        . "let p=null;"
+        . "const l=e=>{if(e.source!==p||e.origin!==o||!e.data"
+        . "||e.data.type!=='mmit-fn-capture-ready'"
+        . "||String(e.data.work_order_number||'')!==n)return;"
+        . "window.removeEventListener('message',l);"
+        . "const a=[...document.querySelectorAll('a[href]')]"
+        . ".filter(a=>a.getClientRects().length>0).slice(0,750)"
+        . ".map(a=>({text:String(a.innerText||a.textContent||'')"
+        . ".trim().slice(0,500),url:a.href}));"
+        . "p.postMessage({type:'mmit-fn-capture-payload',"
+        . "work_order_number:n,payload:{source_url:location.href,"
+        . "page_title:document.title,"
+        . "visible_text:String(document.body?.innerText||''),"
+        . "captured_at:new Date().toISOString(),links:a}},o)};"
+        . "window.addEventListener('message',l);"
+        . "p=window.open(r,'mmitFnPacketCapture',"
+        . "'popup,width=760,height=760,resizable=yes,scrollbars=yes');"
+        . "if(!p){window.removeEventListener('message',l);"
+        . "alert('Allow pop-ups for Field Nation, then run the capture again.')}})();";
+
+    $candidateSourceUrl = trim((string)($wo['source_url'] ?? ''));
+    $fnCaptureSourceUrl = field_ops_fn_packet_source_is_allowed(
+        $candidateSourceUrl
+    ) ? $candidateSourceUrl : null;
+}
+
 $flashSuccess = '';
 $flashError = '';
 
@@ -476,6 +535,100 @@ $receivableStateClass = match ($receivableState) {
 
   <?php if ($flashSuccess !== ''): ?><div class="flash-success"><?= $h($flashSuccess) ?></div><?php endif; ?>
   <?php if ($flashError !== ''): ?><div class="flash-error"><?= $h($flashError) ?></div><?php endif; ?>
+
+  <?php if ($fnPacket && $fnCaptureBookmarklet !== null): ?>
+    <?php
+      $packetCaptured = strtoupper(
+          (string)$fnPacket['capture_status']
+      ) === 'CAPTURED';
+      $packetRequired = strtoupper(
+          (string)$fnPacket['packet_requirement']
+      ) === 'REQUIRED';
+    ?>
+    <section
+      class="card"
+      aria-labelledby="fn-packet-capture-heading"
+      style="margin-bottom:18px;border-top:3px solid <?= $packetCaptured
+          ? 'rgba(74,222,128,.86)'
+          : ($packetRequired
+              ? 'rgba(248,113,113,.9)'
+              : 'rgba(96,165,250,.82)') ?>;"
+    >
+      <div
+        style="
+          display:flex;
+          justify-content:space-between;
+          gap:16px;
+          align-items:flex-start;
+          flex-wrap:wrap;
+        "
+      >
+        <div style="max-width:760px;">
+          <div class="eyebrow">Field Nation source packet</div>
+          <h2 id="fn-packet-capture-heading" style="margin-top:6px;">
+            <?= $packetCaptured
+                ? 'Captured and integrity checked'
+                : ($packetRequired
+                    ? 'Capture required for this W/O'
+                    : 'Capture available') ?>
+          </h2>
+          <p id="fn-packet-bookmark-help" style="margin-bottom:0;">
+            Drag the capture button to your bookmarks bar. Open this exact
+            W/O in Field Nation, then click the bookmark. OPS receives only
+            the rendered page text and visible HTTP(S) links—never your
+            Field Nation credentials or cookies.
+          </p>
+          <?php if ($packetCaptured): ?>
+            <div class="field-hint" style="margin-top:8px;">
+              Captured <?= $h((string)($fnPacket['captured_at'] ?? '')) ?>
+              · Recapturing atomically replaces the stored snapshot.
+            </div>
+          <?php endif; ?>
+        </div>
+
+        <div class="actions">
+          <?php if ($packetCaptured): ?>
+            <a
+              class="btn btn-primary"
+              href="<?= $h(BASE_URL) ?>/admin/field_fn_packet_view.php?id=<?= (int)$fnPacket['packet_id'] ?>"
+              target="_blank"
+              rel="noopener"
+            >View captured packet</a>
+          <?php endif; ?>
+
+          <?php if ($fnCaptureSourceUrl !== null): ?>
+            <a
+              class="btn"
+              href="<?= $h($fnCaptureSourceUrl) ?>"
+              target="_blank"
+              rel="noopener noreferrer"
+            >Open Field Nation W/O</a>
+          <?php endif; ?>
+        </div>
+      </div>
+
+      <div
+        style="
+          margin-top:16px;
+          padding:14px;
+          border:1px dashed rgba(147,197,253,.5);
+          border-radius:14px;
+          background:rgba(0,0,0,.18);
+        "
+      >
+        <a
+          class="btn btn-primary"
+          href="<?= $h($fnCaptureBookmarklet) ?>"
+          aria-describedby="fn-packet-bookmark-help"
+          onclick="return false;"
+          title="Drag this button to the bookmarks bar"
+        >Capture FN W/O <?= $h($fnPacket['external_work_order_number']) ?></a>
+        <span class="field-hint" style="display:inline-block;margin:0 0 0 10px;">
+          Drag to bookmarks bar—do not click it on this OPS page.
+        </span>
+      </div>
+    </section>
+  <?php endif; ?>
 
   <section class="card receivable-state <?= $h($receivableStateClass) ?>" aria-label="Current receivable state">
     <div class="receivable-state-label">

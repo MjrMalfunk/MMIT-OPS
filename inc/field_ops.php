@@ -5480,6 +5480,286 @@ function field_ops_find_fn_packet(
     return is_array($row) ? $row : null;
 }
 
+function field_ops_find_fn_packet_by_id(int $packetId): ?array
+{
+    field_ops_ensure_fn_packet_schema();
+
+    if ($packetId <= 0) {
+        return null;
+    }
+
+    $st = db()->prepare("
+        SELECT *
+        FROM field_fn_work_order_packets
+        WHERE packet_id = ?
+        LIMIT 1
+    ");
+    $st->execute([$packetId]);
+
+    $row = $st->fetch(PDO::FETCH_ASSOC);
+
+    return is_array($row) ? $row : null;
+}
+
+function field_ops_fn_packet_storage_path(array $packet): string
+{
+    $packetId = (int)($packet['packet_id'] ?? 0);
+
+    if ($packetId <= 0) {
+        throw new InvalidArgumentException('Valid FN packet is required.');
+    }
+
+    return field_ops_storage_dir()
+        . '/fn-packets/packet-'
+        . $packetId
+        . '/snapshot.json';
+}
+
+function field_ops_fn_packet_source_is_allowed(string $sourceUrl): bool
+{
+    $parts = parse_url($sourceUrl);
+
+    if (!is_array($parts)) {
+        return false;
+    }
+
+    $scheme = strtolower((string)($parts['scheme'] ?? ''));
+    $host = strtolower(rtrim((string)($parts['host'] ?? ''), '.'));
+
+    return $scheme === 'https'
+        && (
+            $host === 'fieldnation.com'
+            || str_ends_with($host, '.fieldnation.com')
+        );
+}
+
+function field_ops_fn_packet_text_limit(string $value, int $length): string
+{
+    if (function_exists('mb_substr')) {
+        return mb_substr($value, 0, $length, 'UTF-8');
+    }
+
+    return substr($value, 0, $length);
+}
+
+function field_ops_capture_fn_packet(
+    string $externalNumber,
+    string $payloadJson,
+    int $userId = 0
+): array {
+    field_ops_ensure_fn_packet_schema();
+
+    $externalNumber = trim($externalNumber);
+
+    if ($externalNumber === '') {
+        return ['ok' => false, 'errors' => ['Field Nation W/O number is required.']];
+    }
+
+    $packet = field_ops_find_fn_packet('FieldNation', $externalNumber);
+
+    if (!$packet) {
+        return ['ok' => false, 'errors' => ['Field Nation packet record was not found in OPS.']];
+    }
+
+    $payloadBytes = strlen($payloadJson);
+
+    if ($payloadBytes <= 0 || $payloadBytes > 4 * 1024 * 1024) {
+        return ['ok' => false, 'errors' => ['Capture payload is empty or exceeds 4 MB.']];
+    }
+
+    try {
+        $payload = json_decode($payloadJson, true, 64, JSON_THROW_ON_ERROR);
+    } catch (JsonException $e) {
+        return ['ok' => false, 'errors' => ['Capture payload is not valid JSON.']];
+    }
+
+    if (!is_array($payload)) {
+        return ['ok' => false, 'errors' => ['Capture payload must be a JSON object.']];
+    }
+
+    $sourceUrl = trim((string)($payload['source_url'] ?? ''));
+    $pageTitle = trim((string)($payload['page_title'] ?? ''));
+    $visibleText = trim(str_replace(
+        ["\r\n", "\r"],
+        "\n",
+        (string)($payload['visible_text'] ?? '')
+    ));
+
+    if (!field_ops_fn_packet_source_is_allowed($sourceUrl)) {
+        return ['ok' => false, 'errors' => ['Capture source must be an HTTPS Field Nation page.']];
+    }
+
+    $identityPattern = '/(?<![A-Za-z0-9])'
+        . preg_quote($externalNumber, '/')
+        . '(?![A-Za-z0-9])/';
+
+    if (!preg_match(
+        $identityPattern,
+        rawurldecode($sourceUrl) . "\n" . $visibleText
+    )) {
+        return ['ok' => false, 'errors' => ['Captured page does not match the expected W/O number.']];
+    }
+
+    if ($visibleText === '') {
+        return ['ok' => false, 'errors' => ['Captured page did not include visible work-order text.']];
+    }
+
+    if (strlen($visibleText) > 3 * 1024 * 1024) {
+        return ['ok' => false, 'errors' => ['Captured page text exceeds 3 MB.']];
+    }
+
+    $links = [];
+
+    foreach ((array)($payload['links'] ?? []) as $link) {
+        if (!is_array($link) || count($links) >= 750) {
+            continue;
+        }
+
+        $url = trim((string)($link['url'] ?? ''));
+        $scheme = strtolower((string)(parse_url($url, PHP_URL_SCHEME) ?? ''));
+
+        if (
+            $url === ''
+            || strlen($url) > 4096
+            || !in_array($scheme, ['http', 'https'], true)
+        ) {
+            continue;
+        }
+
+        $links[] = [
+            'text' => field_ops_fn_packet_text_limit(
+                trim((string)($link['text'] ?? '')),
+                500
+            ),
+            'url' => $url,
+        ];
+    }
+
+    $snapshot = [
+        'schema_version' => 1,
+        'platform' => 'FieldNation',
+        'external_work_order_number' => $externalNumber,
+        'source_url' => $sourceUrl,
+        'page_title' => field_ops_fn_packet_text_limit($pageTitle, 1000),
+        'visible_text' => $visibleText,
+        'links' => $links,
+        'browser_captured_at' => trim((string)($payload['captured_at'] ?? '')) ?: null,
+        'stored_at' => gmdate('c'),
+        'captured_by_user_id' => $userId > 0 ? $userId : null,
+    ];
+
+    try {
+        $canonicalJson = json_encode(
+            $snapshot,
+            JSON_PRETTY_PRINT
+            | JSON_UNESCAPED_SLASHES
+            | JSON_UNESCAPED_UNICODE
+            | JSON_THROW_ON_ERROR
+        );
+    } catch (JsonException $e) {
+        return ['ok' => false, 'errors' => ['Could not encode the canonical packet snapshot.']];
+    }
+
+    $path = field_ops_fn_packet_storage_path($packet);
+    $dir = dirname($path);
+
+    if (!is_dir($dir) && !@mkdir($dir, 0750, true) && !is_dir($dir)) {
+        return ['ok' => false, 'errors' => ['Could not create private packet storage.']];
+    }
+
+    $temporaryPath = tempnam($dir, '.snapshot-');
+
+    if ($temporaryPath === false) {
+        return ['ok' => false, 'errors' => ['Could not prepare private packet storage.']];
+    }
+
+    $stored = false;
+
+    try {
+        $written = file_put_contents($temporaryPath, $canonicalJson, LOCK_EX);
+
+        if ($written === false || $written !== strlen($canonicalJson)) {
+            return ['ok' => false, 'errors' => ['Could not write the packet snapshot.']];
+        }
+
+        @chmod($temporaryPath, 0640);
+
+        if (!@rename($temporaryPath, $path)) {
+            return ['ok' => false, 'errors' => ['Could not finalize the packet snapshot.']];
+        }
+
+        $stored = true;
+    } finally {
+        if (!$stored && is_file($temporaryPath)) {
+            @unlink($temporaryPath);
+        }
+    }
+
+    $contentHash = hash('sha256', $canonicalJson);
+
+    try {
+        db()->prepare("
+            UPDATE field_fn_work_order_packets
+            SET capture_status = 'CAPTURED',
+                captured_at = NOW(),
+                content_hash = ?,
+                source_url = ?,
+                updated_at = NOW()
+            WHERE packet_id = ?
+            LIMIT 1
+        ")->execute([
+            $contentHash,
+            $sourceUrl,
+            (int)$packet['packet_id'],
+        ]);
+    } catch (Throwable $e) {
+        @unlink($path);
+        throw $e;
+    }
+
+    return [
+        'ok' => true,
+        'packet' => field_ops_find_fn_packet_by_id((int)$packet['packet_id']),
+        'content_hash' => $contentHash,
+    ];
+}
+
+function field_ops_read_fn_packet_snapshot(array $packet): ?array
+{
+    if (strtoupper((string)($packet['capture_status'] ?? '')) !== 'CAPTURED') {
+        return null;
+    }
+
+    $path = field_ops_fn_packet_storage_path($packet);
+
+    if (!is_file($path) || !is_readable($path)) {
+        return null;
+    }
+
+    $json = file_get_contents($path);
+
+    if ($json === false) {
+        return null;
+    }
+
+    $expectedHash = strtolower(trim((string)($packet['content_hash'] ?? '')));
+
+    if (
+        $expectedHash === ''
+        || !hash_equals($expectedHash, hash('sha256', $json))
+    ) {
+        return null;
+    }
+
+    try {
+        $snapshot = json_decode($json, true, 64, JSON_THROW_ON_ERROR);
+    } catch (JsonException $e) {
+        return null;
+    }
+
+    return is_array($snapshot) ? $snapshot : null;
+}
+
 function field_ops_reconcile_fn_packets(): void
 {
     field_ops_ensure_fn_packet_schema();
