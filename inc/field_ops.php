@@ -4020,6 +4020,7 @@ function field_ops_ensure_opportunity_schema(): void
             ignored_at DATETIME NULL,
             requested_at DATETIME NULL,
             declined_at DATETIME NULL,
+            expired_at DATETIME NULL,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             UNIQUE KEY uniq_field_opportunity_platform_wo (platform, external_work_order_number),
@@ -4044,6 +4045,7 @@ function field_ops_ensure_opportunity_schema(): void
         'additional_hour_rate' => "DECIMAL(12,2) NULL",
         'additional_max_hours' => "DECIMAL(12,2) NULL",
         'projected_gross_override' => "DECIMAL(12,2) NULL",
+        'expired_at' => "DATETIME NULL",
     ] as $column => $definition) {
         if (
             function_exists('db_column_exists')
@@ -5248,8 +5250,12 @@ function field_ops_apply_email_event_to_opportunity(int $eventId): array
                 initial_block_hours = ?,
                 additional_hour_rate = ?,
                 additional_max_hours = ?,
+                expired_at = CASE
+                    WHEN status = 'EXPIRED' THEN NULL
+                    ELSE expired_at
+                END,
                 status = CASE
-                    WHEN status IN ('REQUESTED', 'IGNORED', 'DECLINED') THEN status
+                    WHEN status IN ('WATCHING', 'REQUESTED', 'IGNORED', 'DECLINED') THEN status
                     ELSE ?
                 END,
                 score = ?,
@@ -5859,18 +5865,63 @@ function field_ops_reconcile_fn_packets(): void
     ");
 }
 
+function field_ops_expire_stale_opportunities(
+    ?DateTimeImmutable $now = null
+): int {
+    field_ops_ensure_opportunity_schema();
+
+    $now = $now ?? new DateTimeImmutable('now');
+    $nowSql = $now->format('Y-m-d H:i:s');
+    $todayStartSql = $now->setTime(0, 0)->format('Y-m-d H:i:s');
+
+    $statement = db()->prepare("
+        UPDATE field_opportunities
+        SET status = 'EXPIRED',
+            expired_at = ?,
+            updated_at = NOW()
+        WHERE ignored_at IS NULL
+          AND promoted_work_order_id IS NULL
+          AND status IN ('AVAILABLE', 'ROUTED')
+          AND (
+                (scheduled_end_at IS NOT NULL AND scheduled_end_at <= ?)
+             OR (
+                    scheduled_end_at IS NULL
+                AND scheduled_start_at IS NOT NULL
+                AND scheduled_start_at < ?
+             )
+          )
+    ");
+    $statement->execute([
+        $nowSql,
+        $nowSql,
+        $todayStartSql,
+    ]);
+
+    return $statement->rowCount();
+}
+
 function field_ops_opportunities(int $limit = 200, array $options = []): array
 {
     field_ops_ensure_opportunity_schema();
+    field_ops_expire_stale_opportunities();
     field_ops_reconcile_fn_packets();
 
     $limit = max(1, min(500, $limit));
     $query = trim((string)($options['q'] ?? ''));
     $sort = strtolower(trim((string)($options['sort'] ?? 'date')));
+    $scope = strtolower(trim((string)($options['scope'] ?? 'active')));
 
     if (!in_array($sort, ['date', 'score'], true)) {
         $sort = 'date';
     }
+
+    if (!in_array($scope, ['active', 'expired'], true)) {
+        $scope = 'active';
+    }
+
+    $statusSql = $scope === 'expired'
+        ? "o.status = 'EXPIRED'"
+        : "o.status IN ('AVAILABLE', 'ROUTED', 'WATCHING')";
 
     $sql = "
         SELECT o.*, wo.title AS promoted_work_order_title
@@ -5878,7 +5929,7 @@ function field_ops_opportunities(int $limit = 200, array $options = []): array
         LEFT JOIN field_work_orders wo ON wo.work_order_id = o.promoted_work_order_id
         WHERE o.ignored_at IS NULL
           AND o.promoted_work_order_id IS NULL
-          AND o.status IN ('AVAILABLE', 'ROUTED', 'WATCHING')
+          AND {$statusSql}
     ";
 
     $params = [];
@@ -6239,6 +6290,10 @@ function field_ops_promote_opportunity_to_work_order(int $opportunityId): array
         return ['ok' => true, 'work_order_id' => (int)$op['promoted_work_order_id'], 'message' => 'Already promoted.'];
     }
 
+    if (strtoupper((string)($op['status'] ?? '')) === 'EXPIRED') {
+        return ['ok' => false, 'errors' => ['Expired opportunities cannot be promoted.']];
+    }
+
     $table = 'field_work_orders';
     $grossPay = field_ops_money(
         (float)($op['projected_gross_override'] ?? 0) > 0
@@ -6339,24 +6394,34 @@ function field_ops_promote_opportunity_to_work_order(int $opportunityId): array
 function field_ops_opportunity_summary(): array
 {
     field_ops_ensure_opportunity_schema();
+    field_ops_expire_stale_opportunities();
 
     $row = db()->query("
         SELECT
-          COUNT(*) AS total,
+          SUM(CASE WHEN status IN ('AVAILABLE', 'ROUTED', 'WATCHING') THEN 1 ELSE 0 END) AS total,
           SUM(CASE WHEN status = 'ROUTED' THEN 1 ELSE 0 END) AS routed,
           SUM(CASE WHEN status = 'AVAILABLE' THEN 1 ELSE 0 END) AS available,
-          SUM(CASE WHEN recommendation = 'Request this' THEN 1 ELSE 0 END) AS request_this,
-          AVG(score) AS avg_score
+          SUM(CASE WHEN status = 'EXPIRED' THEN 1 ELSE 0 END) AS expired,
+          SUM(CASE
+              WHEN status IN ('AVAILABLE', 'ROUTED', 'WATCHING')
+               AND recommendation = 'Request this'
+              THEN 1 ELSE 0
+          END) AS request_this,
+          AVG(CASE
+              WHEN status IN ('AVAILABLE', 'ROUTED', 'WATCHING')
+              THEN score
+          END) AS avg_score
         FROM field_opportunities
         WHERE ignored_at IS NULL
           AND promoted_work_order_id IS NULL
-          AND status IN ('AVAILABLE', 'ROUTED', 'WATCHING')
+          AND status IN ('AVAILABLE', 'ROUTED', 'WATCHING', 'EXPIRED')
     ")->fetch(PDO::FETCH_ASSOC) ?: [];
 
     return [
         'total' => (int)($row['total'] ?? 0),
         'routed' => (int)($row['routed'] ?? 0),
         'available' => (int)($row['available'] ?? 0),
+        'expired' => (int)($row['expired'] ?? 0),
         'request_this' => (int)($row['request_this'] ?? 0),
         'avg_score' => round((float)($row['avg_score'] ?? 0), 1),
     ];
@@ -6414,6 +6479,10 @@ function field_ops_apply_assigned_email_event_to_work_order(int $eventId): array
     $buyerName = trim((string)($event['parsed_buyer_name'] ?? 'FieldNation')) ?: 'FieldNation';
     $buyerId = field_ops_find_or_create_buyer('FieldNation', $buyerName);
     $existing = field_ops_find_work_order_by_external_number_safe($woNumber);
+    $opportunity = field_ops_find_opportunity_by_external_number($woNumber);
+    $opportunityId = $opportunity
+        ? (int)$opportunity['opportunity_id']
+        : null;
 
     $title = trim((string)($event['parsed_title'] ?? '')) ?: ('FieldNation W/O ' . $woNumber);
     $scheduleErrors = field_ops_schedule_validation_errors(
@@ -6545,6 +6614,24 @@ function field_ops_apply_assigned_email_event_to_work_order(int $eventId): array
             $workOrderId = (int)$pdo->lastInsertId();
         }
 
+        if ($opportunityId !== null) {
+            $pdo->prepare("
+                UPDATE field_opportunities
+                SET status = 'ASSIGNED',
+                    promoted_work_order_id = ?,
+                    requested_at = COALESCE(requested_at, NOW()),
+                    expired_at = NULL,
+                    source_email_event_id = ?,
+                    updated_at = NOW()
+                WHERE opportunity_id = ?
+                LIMIT 1
+            ")->execute([
+                $workOrderId,
+                $eventId,
+                $opportunityId,
+            ]);
+        }
+
         $pdo->prepare("
             UPDATE field_email_events
             SET matched_work_order_id = ?,
@@ -6558,7 +6645,7 @@ function field_ops_apply_assigned_email_event_to_work_order(int $eventId): array
             'FieldNation',
             $woNumber,
             'ASSIGNED',
-            isset($opportunityId) ? (int)$opportunityId : null,
+            $opportunityId,
             $workOrderId,
             $candidate['source_url'] ?? null
         );
@@ -7163,6 +7250,8 @@ function field_ops_import_fieldnation_mailbox(array $options = []): array
     }
 
     imap_close($imap);
+
+    $stats['expired'] = field_ops_expire_stale_opportunities();
 
     return $stats;
 }
