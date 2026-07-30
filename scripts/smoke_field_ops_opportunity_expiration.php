@@ -195,7 +195,7 @@ $verify->execute(array_column($cases, 'number'));
 
 $assert(
     (int)$verify->fetchColumn() === 0,
-    'rollback removed every synthetic opportunity'
+    'cleanup removed every synthetic opportunity'
 );
 
 if ($failures > 0) {
