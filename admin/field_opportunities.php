@@ -142,13 +142,6 @@ if (!in_array($opportunitySort, ['date', 'score'], true)) {
     $opportunitySort = 'date';
 }
 
-$summary = field_ops_opportunity_summary();
-$allEvents = field_ops_email_events(80);
-$allOpportunities = field_ops_opportunities(200, [
-    'q' => $searchQuery,
-    'sort' => $opportunitySort,
-]);
-
 $opportunityFilters = [
     'all' => 'All',
     'routed' => 'Routed',
@@ -156,12 +149,22 @@ $opportunityFilters = [
     'watching' => 'Watching',
     'review' => 'Review',
     'skip' => 'Skip',
+    'expired' => 'Expired',
 ];
 
 $opportunityFilter = strtolower((string)($_GET['opportunity_filter'] ?? 'all'));
 if (!array_key_exists($opportunityFilter, $opportunityFilters)) {
     $opportunityFilter = 'all';
 }
+
+$summary = field_ops_opportunity_summary();
+$opportunityFilters['expired'] = 'Expired (' . (int)$summary['expired'] . ')';
+$allEvents = field_ops_email_events(80);
+$allOpportunities = field_ops_opportunities(200, [
+    'q' => $searchQuery,
+    'sort' => $opportunitySort,
+    'scope' => $opportunityFilter === 'expired' ? 'expired' : 'active',
+]);
 
 $opportunities = array_values(array_filter($allOpportunities, static function (array $op) use ($opportunityFilter): bool {
     $status = strtoupper((string)($op['status'] ?? 'AVAILABLE'));
@@ -174,12 +177,15 @@ $opportunities = array_values(array_filter($allOpportunities, static function (a
         'watching' => $status === 'WATCHING',
         'review' => $score >= 45 && $score < 80,
         'skip' => $recommendation === 'skip' || $score < 45,
+        'expired' => $status === 'EXPIRED',
         default => true,
     };
 }));
 
 $opportunityCount = count($opportunities);
-$totalOpportunityCount = (int)($summary['total'] ?? count($allOpportunities));
+$totalOpportunityCount = $opportunityFilter === 'expired'
+    ? (int)($summary['expired'] ?? count($allOpportunities))
+    : (int)($summary['total'] ?? count($allOpportunities));
 
 $eventFilters = [
     'all' => 'All',
@@ -485,7 +491,8 @@ OLD,
       </form>
     </div>
     <p class="muted" style="margin-top:-4px;">
-      Showing <?= (int)$opportunityCount ?> of <?= (int)$totalOpportunityCount ?> active opportunities.
+      Showing <?= (int)$opportunityCount ?> of <?= (int)$totalOpportunityCount ?>
+      <?= $opportunityFilter === 'expired' ? 'expired opportunities' : 'active opportunities' ?>.
       <?php if ($searchQuery !== ''): ?>
         Search: <strong><?= $h($searchQuery) ?></strong>.
       <?php endif; ?>
@@ -562,7 +569,7 @@ OLD,
           <tr>
             <td colspan="10" class="muted">
               <?php if ($searchQuery !== ''): ?>
-                No active opportunities match “<?= $h($searchQuery) ?>”.
+                No <?= $opportunityFilter === 'expired' ? 'expired' : 'active' ?> opportunities match “<?= $h($searchQuery) ?>”.
               <?php elseif ($totalOpportunityCount > 0): ?>
                 No opportunities match the <?= $h($opportunityFilters[$opportunityFilter] ?? 'selected') ?> filter.
               <?php else: ?>
@@ -580,6 +587,7 @@ OLD,
               'AVAILABLE' => 'badge-available',
               'WATCHING' => 'badge-watching',
               'REQUESTED' => 'badge-requested',
+              'EXPIRED' => 'red',
               default => '',
           };
           $profit = (array)($op['profitability'] ?? []);
@@ -609,6 +617,8 @@ OLD,
                 <div class="muted op-context">Routed to you. Not accepted, assigned, or calendar-blocking.</div>
               <?php elseif ($status === 'AVAILABLE'): ?>
                 <div class="muted op-context">Public/new opportunity. Safe to review before request.</div>
+              <?php elseif ($status === 'EXPIRED'): ?>
+                <div class="muted op-context">Scheduled time passed. Preserved as read-only history.</div>
               <?php endif; ?>
             </td>
             <td><?php if (!empty($op['external_work_order_number'])): ?><code><?= $h($op['external_work_order_number']) ?></code><?php endif; ?></td>
@@ -665,6 +675,9 @@ OLD,
                 <?php if (!empty($op['promoted_work_order_id'])): ?>
                   <a class="btn btn-table" href="<?= $h(BASE_URL) ?>/admin/field_work_order.php?id=<?= (int)$op['promoted_work_order_id'] ?>">Open W/O</a>
                   <span class="badge badge-requested">REQUESTED W/O</span>
+                <?php elseif ($status === 'EXPIRED'): ?>
+                  <span class="badge red">AUTO-EXPIRED</span>
+                  <div class="muted action-note">Read-only history. A later FieldNation lifecycle email can still reconcile this W/O.</div>
                 <?php else: ?>
                   <form method="post" style="margin:0;" onsubmit="return confirm(&quot;Create a REQUESTED W/O only? This will not accept, assign, schedule, or block your calendar.&quot;);">
                     <?= csrf_field() ?>
@@ -725,8 +738,12 @@ OLD,
                     <?= $h(field_ops_datetime_display($op['created_at'] ?? '')) ?>
                   </div>
                   <div class="detail-item">
-                    <strong>Updated</strong>
-                    <?= $h(field_ops_datetime_display($op['updated_at'] ?? '')) ?>
+                    <strong><?= $status === 'EXPIRED' ? 'Expired' : 'Updated' ?></strong>
+                    <?= $h(field_ops_datetime_display(
+                        $status === 'EXPIRED'
+                            ? ($op['expired_at'] ?? '')
+                            : ($op['updated_at'] ?? '')
+                    )) ?>
                   </div>
 
                   <div class="detail-item">
