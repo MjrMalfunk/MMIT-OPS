@@ -99,7 +99,6 @@ $cases = [
 ];
 
 $pdo = db();
-$pdo->beginTransaction();
 
 try {
     $insert = $pdo->prepare("
@@ -175,7 +174,15 @@ try {
         'second expiration pass is idempotent'
     );
 } finally {
-    $pdo->rollBack();
+    if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+    }
+
+    $cleanup = $pdo->prepare("
+        DELETE FROM field_opportunities
+        WHERE external_work_order_number LIKE ?
+    ");
+    $cleanup->execute([$prefix . '-%']);
 }
 
 $placeholders = implode(',', array_fill(0, count($cases), '?'));
