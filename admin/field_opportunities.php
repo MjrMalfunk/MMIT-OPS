@@ -70,12 +70,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $returnParams = [];
 
         $returnQuery = substr(trim((string)($_GET['q'] ?? '')), 0, 120);
+        $returnBuyer = substr(
+            trim((string)($_GET['buyer'] ?? '')),
+            0,
+            190
+        );
         $returnSort = strtolower((string)($_GET['sort'] ?? 'date'));
         $returnOpportunityFilter = strtolower((string)($_GET['opportunity_filter'] ?? 'all'));
         $returnEventFilter = strtolower((string)($_GET['event_filter'] ?? 'all'));
 
         if ($returnQuery !== '') {
             $returnParams['q'] = $returnQuery;
+        }
+
+        if ($returnBuyer !== '') {
+            $returnParams['buyer'] = $returnBuyer;
         }
 
         if (in_array($returnSort, ['date', 'score'], true)) {
@@ -135,6 +144,7 @@ if (!empty($_SESSION['flash_msg'])) {
 }
 
 $searchQuery = substr(trim((string)($_GET['q'] ?? '')), 0, 120);
+$buyerFilter = substr(trim((string)($_GET['buyer'] ?? '')), 0, 190);
 $openOpportunityId = max(0, (int)($_GET['open_opportunity'] ?? 0));
 $opportunitySort = strtolower((string)($_GET['sort'] ?? 'date'));
 
@@ -160,10 +170,41 @@ if (!array_key_exists($opportunityFilter, $opportunityFilters)) {
 $summary = field_ops_opportunity_summary();
 $opportunityFilters['expired'] = 'Expired (' . (int)$summary['expired'] . ')';
 $allEvents = field_ops_email_events(80);
+$opportunityScope = $opportunityFilter === 'expired'
+    ? 'expired'
+    : 'active';
+$opportunityBuyers = field_ops_opportunity_buyers($opportunityScope);
+
+if ($buyerFilter !== '') {
+    $selectedBuyerExists = array_filter(
+        $opportunityBuyers,
+        static fn(array $buyer): bool => strcasecmp(
+            trim((string)($buyer['buyer_name'] ?? '')),
+            $buyerFilter
+        ) === 0
+    );
+
+    if (!$selectedBuyerExists) {
+        $opportunityBuyers[] = [
+            'buyer_name' => $buyerFilter,
+            'opportunity_count' => 0,
+        ];
+
+        usort(
+            $opportunityBuyers,
+            static fn(array $left, array $right): int => strcasecmp(
+                (string)($left['buyer_name'] ?? ''),
+                (string)($right['buyer_name'] ?? '')
+            )
+        );
+    }
+}
+
 $allOpportunities = field_ops_opportunities(200, [
     'q' => $searchQuery,
+    'buyer' => $buyerFilter,
     'sort' => $opportunitySort,
-    'scope' => $opportunityFilter === 'expired' ? 'expired' : 'active',
+    'scope' => $opportunityScope,
 ]);
 
 $opportunities = array_values(array_filter($allOpportunities, static function (array $op) use ($opportunityFilter): bool {
@@ -496,6 +537,9 @@ OLD,
       <?php if ($searchQuery !== ''): ?>
         Search: <strong><?= $h($searchQuery) ?></strong>.
       <?php endif; ?>
+      <?php if ($buyerFilter !== ''): ?>
+        Buyer: <strong><?= $h($buyerFilter) ?></strong>.
+      <?php endif; ?>
     </p>
 
     <form method="get" class="board-tools" role="search">
@@ -511,6 +555,26 @@ OLD,
           placeholder="W/O #, buyer, title, city, state"
           autocomplete="off"
         >
+      </label>
+
+      <label>
+        Buyer / company
+        <select name="buyer">
+          <option value="">All buyers</option>
+          <?php foreach ($opportunityBuyers as $buyerOption): ?>
+            <?php
+            $buyerName = (string)($buyerOption['buyer_name'] ?? '');
+            $buyerOpportunityCount =
+                (int)($buyerOption['opportunity_count'] ?? 0);
+            ?>
+            <option
+              value="<?= $h($buyerName) ?>"
+              <?= strcasecmp($buyerFilter, $buyerName) === 0
+                  ? 'selected'
+                  : '' ?>
+            ><?= $h($buyerName) ?> (<?= $buyerOpportunityCount ?>)</option>
+          <?php endforeach; ?>
+        </select>
       </label>
 
       <label>
@@ -539,6 +603,7 @@ OLD,
           class="filter-pill <?= $opportunityFilter === $filterKey ? 'active' : '' ?>"
           href="<?= $h(BASE_URL . '/admin/field_opportunities.php?' . http_build_query([
               'q' => $searchQuery,
+              'buyer' => $buyerFilter,
               'sort' => $opportunitySort,
               'opportunity_filter' => $filterKey,
               'event_filter' => $eventFilter,
@@ -947,6 +1012,7 @@ OLD,
           class="filter-pill <?= $eventFilter === $filterKey ? 'active' : '' ?>"
           href="<?= $h(BASE_URL . '/admin/field_opportunities.php?' . http_build_query([
               'q' => $searchQuery,
+              'buyer' => $buyerFilter,
               'sort' => $opportunitySort,
               'opportunity_filter' => $opportunityFilter,
               'event_filter' => $filterKey,

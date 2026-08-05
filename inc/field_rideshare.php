@@ -29,6 +29,8 @@ function field_rideshare_ensure_schema(): void
             odometer_start DECIMAL(12,1) NOT NULL,
             odometer_end DECIMAL(12,1) NOT NULL,
             business_miles DECIMAL(12,2) NOT NULL,
+            deadhead_miles DECIMAL(12,2) NOT NULL DEFAULT 0,
+            deadhead_minutes INT UNSIGNED NOT NULL DEFAULT 0,
 
             online_minutes INT UNSIGNED NOT NULL DEFAULT 0,
             booked_minutes INT UNSIGNED NOT NULL DEFAULT 0,
@@ -66,6 +68,20 @@ function field_rideshare_ensure_schema(): void
           COLLATE=utf8mb4_unicode_ci"
     );
 
+    foreach ([
+        'deadhead_miles' =>
+            'DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER business_miles',
+        'deadhead_minutes' =>
+            'INT UNSIGNED NOT NULL DEFAULT 0 AFTER deadhead_miles',
+    ] as $column => $definition) {
+        if (!db_column_exists('field_rideshare_shifts', $column)) {
+            db()->exec(
+                "ALTER TABLE field_rideshare_shifts "
+                . "ADD COLUMN {$column} {$definition}"
+            );
+        }
+    }
+
     $schemaReady = true;
 }
 
@@ -94,6 +110,14 @@ function field_rideshare_calculate(array $input): array
     }
 
     $businessMiles = round($odometerEnd - $odometerStart, 2);
+    $deadheadMiles = round(
+        max(0.0, (float)($input['deadhead_miles'] ?? 0)),
+        2
+    );
+    $totalBusinessMiles = round(
+        $businessMiles + $deadheadMiles,
+        2
+    );
 
     $vehicleCpm = round(
         max(0.0, (float)($input['vehicle_cpm_snapshot'] ?? 0)),
@@ -124,7 +148,9 @@ function field_rideshare_calculate(array $input): array
         2
     );
 
-    $vehicleCost = round($businessMiles * $vehicleCpm, 2);
+    $onlineVehicleCost = round($businessMiles * $vehicleCpm, 2);
+    $deadheadVehicleCost = round($deadheadMiles * $vehicleCpm, 2);
+    $vehicleCost = round($totalBusinessMiles * $vehicleCpm, 2);
 
     $profit = round(
         $recognizedRevenue - $directCosts - $vehicleCost,
@@ -137,10 +163,22 @@ function field_rideshare_calculate(array $input): array
     );
 
     $onlineHours = $onlineMinutes / 60;
+    $deadheadMinutes = max(
+        0,
+        (int)($input['deadhead_minutes'] ?? 0)
+    );
+    $totalWorkMinutes = $onlineMinutes + $deadheadMinutes;
+    $totalWorkHours = $totalWorkMinutes / 60;
 
     return [
         'business_miles' => $businessMiles,
+        'deadhead_miles' => $deadheadMiles,
+        'total_business_miles' => $totalBusinessMiles,
+        'deadhead_minutes' => $deadheadMinutes,
+        'total_work_minutes' => $totalWorkMinutes,
         'vehicle_cpm_snapshot' => $vehicleCpm,
+        'online_vehicle_cost' => $onlineVehicleCost,
+        'deadhead_vehicle_cost' => $deadheadVehicleCost,
         'vehicle_cost' => $vehicleCost,
         'recognized_revenue' => $recognizedRevenue,
         'true_operating_profit' => $profit,
@@ -153,12 +191,28 @@ function field_rideshare_calculate(array $input): array
             ? round($profit / $businessMiles, 2)
             : null,
 
+        'gross_per_total_business_mile' => $totalBusinessMiles > 0
+            ? round($recognizedRevenue / $totalBusinessMiles, 2)
+            : null,
+
+        'profit_per_total_business_mile' => $totalBusinessMiles > 0
+            ? round($profit / $totalBusinessMiles, 2)
+            : null,
+
         'gross_per_online_hour' => $onlineHours > 0
             ? round($recognizedRevenue / $onlineHours, 2)
             : null,
 
         'profit_per_online_hour' => $onlineHours > 0
             ? round($profit / $onlineHours, 2)
+            : null,
+
+        'gross_per_total_hour' => $totalWorkHours > 0
+            ? round($recognizedRevenue / $totalWorkHours, 2)
+            : null,
+
+        'profit_per_total_hour' => $totalWorkHours > 0
+            ? round($profit / $totalWorkHours, 2)
             : null,
     ];
 }
@@ -389,6 +443,10 @@ function field_rideshare_save_shift(
         ),
         'business_miles' =>
             $calculation['business_miles'],
+        'deadhead_miles' =>
+            $calculation['deadhead_miles'],
+        'deadhead_minutes' =>
+            $calculation['deadhead_minutes'],
 
         'online_minutes' => $onlineMinutes,
         'booked_minutes' => $bookedMinutes,
@@ -472,6 +530,8 @@ function field_rideshare_save_shift(
                     odometer_start = :odometer_start,
                     odometer_end = :odometer_end,
                     business_miles = :business_miles,
+                    deadhead_miles = :deadhead_miles,
+                    deadhead_minutes = :deadhead_minutes,
                     online_minutes = :online_minutes,
                     booked_minutes = :booked_minutes,
                     passenger_minutes = :passenger_minutes,
@@ -602,7 +662,11 @@ function field_rideshare_summary(
     $summary = [
         'shift_count' => count($shifts),
         'business_miles' => 0.0,
+        'deadhead_miles' => 0.0,
+        'total_business_miles' => 0.0,
         'online_minutes' => 0,
+        'deadhead_minutes' => 0,
+        'total_work_minutes' => 0,
         'booked_minutes' => 0,
         'passenger_minutes' => 0,
         'recognized_revenue' => 0.0,
@@ -615,8 +679,22 @@ function field_rideshare_summary(
         $summary['business_miles'] +=
             (float)$shift['business_miles'];
 
+        $summary['deadhead_miles'] +=
+            (float)($shift['deadhead_miles'] ?? 0);
+
+        $summary['total_business_miles'] +=
+            (float)$shift['business_miles']
+            + (float)($shift['deadhead_miles'] ?? 0);
+
         $summary['online_minutes'] +=
             (int)$shift['online_minutes'];
+
+        $summary['deadhead_minutes'] +=
+            (int)($shift['deadhead_minutes'] ?? 0);
+
+        $summary['total_work_minutes'] +=
+            (int)$shift['online_minutes']
+            + (int)($shift['deadhead_minutes'] ?? 0);
 
         $summary['booked_minutes'] +=
             (int)$shift['booked_minutes'];
@@ -638,6 +716,7 @@ function field_rideshare_summary(
     }
 
     $onlineHours = $summary['online_minutes'] / 60;
+    $totalWorkHours = $summary['total_work_minutes'] / 60;
 
     $summary['gross_per_online_hour'] = $onlineHours > 0
         ? round(
@@ -649,6 +728,20 @@ function field_rideshare_summary(
     $summary['profit_per_online_hour'] = $onlineHours > 0
         ? round(
             $summary['true_operating_profit'] / $onlineHours,
+            2
+        )
+        : null;
+
+    $summary['gross_per_total_hour'] = $totalWorkHours > 0
+        ? round(
+            $summary['recognized_revenue'] / $totalWorkHours,
+            2
+        )
+        : null;
+
+    $summary['profit_per_total_hour'] = $totalWorkHours > 0
+        ? round(
+            $summary['true_operating_profit'] / $totalWorkHours,
             2
         )
         : null;
@@ -671,9 +764,29 @@ function field_rideshare_summary(
             )
             : null;
 
+    $summary['gross_per_total_business_mile'] =
+        $summary['total_business_miles'] > 0
+            ? round(
+                $summary['recognized_revenue']
+                / $summary['total_business_miles'],
+                2
+            )
+            : null;
+
+    $summary['profit_per_total_business_mile'] =
+        $summary['total_business_miles'] > 0
+            ? round(
+                $summary['true_operating_profit']
+                / $summary['total_business_miles'],
+                2
+            )
+            : null;
+
     foreach (
         [
             'business_miles',
+            'deadhead_miles',
+            'total_business_miles',
             'recognized_revenue',
             'vehicle_cost',
             'direct_trip_costs',

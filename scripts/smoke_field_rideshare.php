@@ -73,6 +73,22 @@ $assert(
     'true operating profit column exists'
 );
 
+$assert(
+    db_column_exists(
+        'field_rideshare_shifts',
+        'deadhead_miles'
+    ),
+    'off-app deadhead mileage column exists'
+);
+
+$assert(
+    db_column_exists(
+        'field_rideshare_shifts',
+        'deadhead_minutes'
+    ),
+    'off-app deadhead time column exists'
+);
+
 $result = field_rideshare_calculate([
     'odometer_start' => 10000.0,
     'odometer_end' => 10100.0,
@@ -120,6 +136,36 @@ $assert(
 $assert(
     abs((float)$result['profit_per_online_hour'] - 17.00) < 0.001,
     'true-profit hourly rate uses online time'
+);
+
+$outing = field_rideshare_calculate([
+    'odometer_start' => 80060.1,
+    'odometer_end' => 80222.4,
+    'deadhead_miles' => 113.2,
+    'online_minutes' => 300,
+    'deadhead_minutes' => 120,
+    'vehicle_cpm_snapshot' => 0.2200,
+    'base_ride_earnings' => 100.00,
+]);
+
+$assert(
+    abs((float)$outing['business_miles'] - 162.30) < 0.001,
+    'odometer mileage preserves one-tenth-mile precision'
+);
+
+$assert(
+    abs((float)$outing['total_business_miles'] - 275.50) < 0.001,
+    'total outing mileage includes off-app deadhead miles'
+);
+
+$assert(
+    abs((float)$outing['vehicle_cost'] - 60.61) < 0.001,
+    'vehicle cost includes online and off-app business mileage'
+);
+
+$assert(
+    abs((float)$outing['profit_per_total_hour'] - 5.63) < 0.001,
+    'door-to-door hourly profit includes deadhead time'
 );
 
 $rejected = false;

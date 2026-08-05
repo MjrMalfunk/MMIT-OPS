@@ -5908,6 +5908,7 @@ function field_ops_opportunities(int $limit = 200, array $options = []): array
 
     $limit = max(1, min(500, $limit));
     $query = trim((string)($options['q'] ?? ''));
+    $buyer = trim((string)($options['buyer'] ?? ''));
     $sort = strtolower(trim((string)($options['sort'] ?? 'date')));
     $scope = strtolower(trim((string)($options['scope'] ?? 'active')));
 
@@ -5934,6 +5935,11 @@ function field_ops_opportunities(int $limit = 200, array $options = []): array
 
     $params = [];
 
+    if ($buyer !== '') {
+        $sql .= " AND TRIM(o.buyer_name_snapshot) = ? ";
+        $params[] = $buyer;
+    }
+
     if ($query !== '') {
         $sql .= "
           AND (
@@ -5947,7 +5953,7 @@ function field_ops_opportunities(int $limit = 200, array $options = []): array
         ";
 
         $searchValue = '%' . $query . '%';
-        $params = array_fill(0, 6, $searchValue);
+        array_push($params, ...array_fill(0, 6, $searchValue));
     }
 
     $exactMatchOrder = '';
@@ -6004,6 +6010,33 @@ function field_ops_opportunities(int $limit = 200, array $options = []): array
     unset($row);
 
     return $rows;
+}
+
+function field_ops_opportunity_buyers(string $scope = 'active'): array
+{
+    field_ops_ensure_opportunity_schema();
+    field_ops_expire_stale_opportunities();
+
+    $scope = strtolower(trim($scope));
+    $statusSql = $scope === 'expired'
+        ? "status = 'EXPIRED'"
+        : "status IN ('AVAILABLE', 'ROUTED', 'WATCHING')";
+
+    $statement = db()->query("
+        SELECT
+            TRIM(buyer_name_snapshot) AS buyer_name,
+            COUNT(*) AS opportunity_count
+        FROM field_opportunities
+        WHERE ignored_at IS NULL
+          AND promoted_work_order_id IS NULL
+          AND {$statusSql}
+          AND buyer_name_snapshot IS NOT NULL
+          AND TRIM(buyer_name_snapshot) <> ''
+        GROUP BY TRIM(buyer_name_snapshot)
+        ORDER BY buyer_name ASC
+    ");
+
+    return $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
 }
 
 function field_ops_find_opportunity(int $opportunityId): ?array

@@ -182,6 +182,8 @@ $form += [
     'ended_at' => '',
     'odometer_start' => '',
     'odometer_end' => '',
+    'deadhead_miles' => '',
+    'deadhead_minutes' => '',
     'online_minutes' => '',
     'booked_minutes' => '',
     'passenger_minutes' => '',
@@ -737,33 +739,36 @@ $rangeLabel = match ($range) {
         <?= $h($money($summary['vehicle_cost'])) ?>
       </div>
       <div class="stat-detail">
-        <?= $h(number_format((float)$summary['business_miles'], 1)) ?>
-        business miles
+        <?= $h(number_format((float)$summary['total_business_miles'], 1)) ?>
+        outing miles ·
+        <?= $h(number_format((float)$summary['deadhead_miles'], 1)) ?>
+        deadhead
       </div>
     </article>
 
     <article class="card stat rate">
-      <div class="stat-label">Profit per online hour</div>
+      <div class="stat-label">Profit per door-to-door hour</div>
       <div class="stat-value">
-        <?= $summary['profit_per_online_hour'] !== null
-            ? $h($money($summary['profit_per_online_hour']))
+        <?= $summary['profit_per_total_hour'] !== null
+            ? $h($money($summary['profit_per_total_hour']))
             : '—' ?>
       </div>
       <div class="stat-detail">
         Gross:
-        <?= $summary['gross_per_online_hour'] !== null
-            ? $h($money($summary['gross_per_online_hour']))
+        <?= $summary['gross_per_total_hour'] !== null
+            ? $h($money($summary['gross_per_total_hour']))
             : '—' ?>
       </div>
     </article>
 
     <article class="card stat">
-      <div class="stat-label">Online time</div>
+      <div class="stat-label">Door-to-door time</div>
       <div class="stat-value">
-        <?= $h($hours((int)$summary['online_minutes'])) ?>
+        <?= $h($hours((int)$summary['total_work_minutes'])) ?>
       </div>
       <div class="stat-detail">
-        <?= $h($hours((int)$summary['booked_minutes'])) ?> booked
+        <?= $h($hours((int)$summary['online_minutes'])) ?> online ·
+        <?= $h($hours((int)$summary['deadhead_minutes'])) ?> deadhead
       </div>
     </article>
 
@@ -776,16 +781,16 @@ $rangeLabel = match ($range) {
     </article>
 
     <article class="card stat rate">
-      <div class="stat-label">Profit per business mile</div>
+      <div class="stat-label">Profit per outing mile</div>
       <div class="stat-value">
-        <?= $summary['profit_per_business_mile'] !== null
-            ? $h($money($summary['profit_per_business_mile']))
+        <?= $summary['profit_per_total_business_mile'] !== null
+            ? $h($money($summary['profit_per_total_business_mile']))
             : '—' ?>
       </div>
       <div class="stat-detail">
         Gross:
-        <?= $summary['gross_per_business_mile'] !== null
-            ? $h($money($summary['gross_per_business_mile']))
+        <?= $summary['gross_per_total_business_mile'] !== null
+            ? $h($money($summary['gross_per_total_business_mile']))
             : '—' ?>
       </div>
     </article>
@@ -914,6 +919,41 @@ $rangeLabel = match ($range) {
               required
             >
           </label>
+
+          <fieldset>
+            <legend>Off-app deadhead / repositioning</legend>
+
+            <label>
+              Business miles driven offline
+              <input
+                type="number"
+                name="deadhead_miles"
+                id="deadhead_miles"
+                step="0.1"
+                min="0"
+                inputmode="decimal"
+                value="<?= $h($form['deadhead_miles']) ?>"
+              >
+            </label>
+
+            <label>
+              Offline business minutes
+              <input
+                type="number"
+                name="deadhead_minutes"
+                id="deadhead_minutes"
+                step="1"
+                min="0"
+                inputmode="numeric"
+                value="<?= $h($form['deadhead_minutes']) ?>"
+              >
+            </label>
+
+            <p class="full" style="margin:0;">
+              Include return-home or repositioning travel directly tied
+              to this outing after you went offline.
+            </p>
+          </fieldset>
 
           <fieldset>
             <legend>Time and utilization</legend>
@@ -1057,8 +1097,18 @@ $rangeLabel = match ($range) {
 
       <div class="preview-grid">
         <div class="preview-item">
-          <span class="preview-label">Business miles</span>
-          <strong class="preview-value" id="preview-miles">0.0</strong>
+          <span class="preview-label">Online miles</span>
+          <strong class="preview-value" id="preview-online-miles">0.0</strong>
+        </div>
+
+        <div class="preview-item">
+          <span class="preview-label">Deadhead miles</span>
+          <strong class="preview-value" id="preview-deadhead-miles">0.0</strong>
+        </div>
+
+        <div class="preview-item">
+          <span class="preview-label">Total outing miles</span>
+          <strong class="preview-value" id="preview-total-miles">0.0</strong>
         </div>
 
         <div class="preview-item">
@@ -1082,14 +1132,15 @@ $rangeLabel = match ($range) {
         </div>
 
         <div class="preview-item">
-          <span class="preview-label">Profit / online hour</span>
+          <span class="preview-label">Profit / door-to-door hour</span>
           <strong class="preview-value" id="preview-hourly">—</strong>
         </div>
       </div>
 
       <div class="formula">
-        True profit = recognized revenue − snapshotted vehicle cost
-        − direct trip costs. Lyft platform fees remain informational
+        True profit = recognized revenue − vehicle cost across online
+        and deadhead miles − direct trip costs. Door-to-door hourly adds
+        off-app business time. Lyft platform fees remain informational
         because base earnings already represent your driver earnings.
       </div>
     </aside>
@@ -1112,14 +1163,18 @@ $rangeLabel = match ($range) {
         <?php foreach ($shifts as $shift): ?>
           <?php
           $onlineMinutes = (int)$shift['online_minutes'];
-          $grossHourly = $onlineMinutes > 0
+          $deadheadMinutes = (int)($shift['deadhead_minutes'] ?? 0);
+          $totalWorkMinutes = $onlineMinutes + $deadheadMinutes;
+          $deadheadMiles = (float)($shift['deadhead_miles'] ?? 0);
+          $totalMiles = (float)$shift['business_miles'] + $deadheadMiles;
+          $grossHourly = $totalWorkMinutes > 0
               ? (float)$shift['recognized_revenue']
-                  / ($onlineMinutes / 60)
+                  / ($totalWorkMinutes / 60)
               : null;
 
-          $profitHourly = $onlineMinutes > 0
+          $profitHourly = $totalWorkMinutes > 0
               ? (float)$shift['true_operating_profit']
-                  / ($onlineMinutes / 60)
+                  / ($totalWorkMinutes / 60)
               : null;
           ?>
           <article class="shift">
@@ -1131,11 +1186,15 @@ $rangeLabel = match ($range) {
                 )) ?>
               </div>
               <div class="shift-meta">
-                <?= $h($hours($onlineMinutes)) ?> online ·
+                <?= $h($hours($totalWorkMinutes)) ?> door-to-door ·
                 <?= $h(number_format(
-                    (float)$shift['business_miles'],
+                    $totalMiles,
                     1
                 )) ?> miles
+                <?php if ($deadheadMiles > 0 || $deadheadMinutes > 0): ?>
+                  · <?= $h(number_format($deadheadMiles, 1)) ?> mi /
+                  <?= $h($hours($deadheadMinutes)) ?> deadhead
+                <?php endif; ?>
               </div>
             </div>
 
@@ -1157,7 +1216,7 @@ $rangeLabel = match ($range) {
             </div>
 
             <div class="shift-metric">
-              <span>Gross / profit hourly</span>
+              <span>Gross / profit door-to-door</span>
               <strong>
                 <?= $grossHourly !== null ? $h($money($grossHourly)) : '—' ?>
                 /
@@ -1227,10 +1286,12 @@ $rangeLabel = match ($range) {
     const selected = vehicle?.options[vehicle.selectedIndex];
     const cpm = Number.parseFloat(selected?.dataset.cpm ?? '0') || 0;
 
-    const miles = Math.max(
+    const onlineMiles = Math.max(
       0,
       numberValue('odometer_end') - numberValue('odometer_start')
     );
+    const deadheadMiles = Math.max(0, numberValue('deadhead_miles'));
+    const totalMiles = onlineMiles + deadheadMiles;
 
     const revenue =
       numberValue('base_ride_earnings')
@@ -1239,16 +1300,24 @@ $rangeLabel = match ($range) {
       + numberValue('adjustments')
       + numberValue('toll_reimbursements');
 
-    const vehicleCost = miles * cpm;
+    const vehicleCost = totalMiles * cpm;
     const directCosts = numberValue('direct_trip_costs');
     const profit = revenue - vehicleCost - directCosts;
     const onlineMinutes = numberValue('online_minutes');
-    const profitHourly = onlineMinutes > 0
-      ? profit / (onlineMinutes / 60)
+    const deadheadMinutes = Math.max(0, numberValue('deadhead_minutes'));
+    const totalWorkMinutes = onlineMinutes + deadheadMinutes;
+    const profitHourly = totalWorkMinutes > 0
+      ? profit / (totalWorkMinutes / 60)
       : null;
 
-    document.getElementById('preview-miles').textContent =
-      miles.toFixed(1);
+    document.getElementById('preview-online-miles').textContent =
+      onlineMiles.toFixed(1);
+
+    document.getElementById('preview-deadhead-miles').textContent =
+      deadheadMiles.toFixed(1);
+
+    document.getElementById('preview-total-miles').textContent =
+      totalMiles.toFixed(1);
 
     document.getElementById('preview-cpm').textContent =
       money(cpm);

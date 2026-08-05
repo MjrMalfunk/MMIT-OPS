@@ -334,7 +334,7 @@ foreach ($vehicles as $vehicle) {
               <div class="stat-value">
                 <?= number_format(
                     (float)($vehicle['current_odometer'] ?? 0),
-                    0
+                    1
                 ) ?>
               </div>
               <div class="stat-label">Current odometer</div>
