@@ -110,6 +110,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_validate_or_die();
 
     try {
+        if (
+            (string)($_POST['action'] ?? 'save_shift')
+            === 'post_accounting'
+        ) {
+            $postResult = field_rideshare_post_shift_to_accounting(
+                (int)($_POST['shift_id'] ?? 0),
+                (int)(current_user()['user_id'] ?? 0)
+            );
+
+            if (empty($postResult['ok'])) {
+                throw new RuntimeException(
+                    implode(
+                        ' ',
+                        $postResult['errors']
+                            ?? ['Unable to post shift to Accounting.']
+                    )
+                );
+            }
+
+            $_SESSION['flash_msg'] = !empty(
+                $postResult['already_posted']
+            )
+                ? 'Shift was already posted to Accounting.'
+                : 'Shift posted to Accounting.';
+
+            header(
+                'Location: '
+                . BASE_URL
+                . '/admin/field_rideshare.php'
+            );
+            exit;
+        }
         field_rideshare_save_shift(
             $_POST,
             (int)($user['user_id'] ?? 0)
@@ -1089,6 +1121,35 @@ $rangeLabel = match ($range) {
           </div>
         </div>
       </form>
+      <?php if ($editShift): ?>
+        <div style="margin-top:16px;">
+          <?php if (!empty($editShift['accounting_journal_id'])): ?>
+            <p style="margin:0;">
+              <strong>Posted to Accounting</strong><br>
+              <span class="muted">
+                Journal #<?= (int)$editShift['accounting_journal_id'] ?>
+              </span>
+            </p>
+          <?php elseif ((float)$editShift['recognized_revenue'] > 0): ?>
+            <form method="post">
+              <?= csrf_field() ?>
+              <input
+                type="hidden"
+                name="action"
+                value="post_accounting"
+              >
+              <input
+                type="hidden"
+                name="shift_id"
+                value="<?= (int)$editShift['shift_id'] ?>"
+              >
+              <button class="btn" type="submit">
+                Post to Accounting
+              </button>
+            </form>
+          <?php endif; ?>
+        </div>
+      <?php endif; ?>
     </article>
 
     <aside class="card preview" aria-labelledby="preview-heading">

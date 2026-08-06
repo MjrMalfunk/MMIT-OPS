@@ -2388,6 +2388,48 @@ function field_ops_update_work_order_state(array $input): array
             'errors' => ['Valid work order is required.'],
         ];
     }
+    /*
+     * Once revenue is posted, source financial values become historical.
+     * Corrections must use an explicit Accounting adjustment.
+     */
+    if (!empty($existing['accounting_journal_id'])) {
+        $financialFields = [
+            'gross_pay',
+            'platform_fee',
+            'insurance_fee',
+            'oai_fee',
+            'bonus_pay',
+            'reimbursement_amount',
+            'mileage',
+            'mileage_rate',
+            'drive_minutes',
+            'onsite_minutes',
+            'admin_minutes',
+        ];
+
+        foreach ($financialFields as $field) {
+            if (!array_key_exists($field, $input)) {
+                continue;
+            }
+
+            $incoming = (float)str_replace(
+                [',', '$'],
+                '',
+                trim((string)$input[$field])
+            );
+            $stored = (float)($existing[$field] ?? 0);
+
+            if (abs($incoming - $stored) > 0.004) {
+                return [
+                    'ok' => false,
+                    'errors' => [
+                        'This work order is already posted to Accounting. '
+                        . 'Financial values cannot be rewritten.',
+                    ],
+                ];
+            }
+        }
+    }
 
     $status = field_ops_clean_status(
         (string)($input['status'] ?? $existing['status']),
@@ -2395,14 +2437,29 @@ function field_ops_update_work_order_state(array $input): array
         (string)$existing['status']
     );
 
-    $paymentStatus = field_ops_clean_status(
-        (string)(
-            $input['payment_status']
-            ?? $existing['payment_status']
-        ),
-        field_ops_payment_statuses(),
-        (string)$existing['payment_status']
-    );
+    /*
+     * Work-order Status is authoritative. Payment remains persisted for
+     * reporting and Accounting, but it is never independently edited.
+     */
+    $paymentStatus = match ($status) {
+        'PAID' => 'PAID',
+        'APPROVED' => 'PENDING',
+        'CANCELLED', 'DECLINED' => 'VOID',
+        default => 'UNPAID',
+    };
+
+    if (
+        (string)$existing['status'] === 'PAID'
+        && $status !== 'PAID'
+    ) {
+        return [
+            'ok' => false,
+            'errors' => [
+                'A paid work order cannot be moved backward. '
+                . 'Use an Accounting adjustment instead.',
+            ],
+        ];
+    }
 
     $scheduledStartAt = $existing['scheduled_start_at'] ?? null;
     $scheduledEndAt = $existing['scheduled_end_at'] ?? null;
@@ -7289,3 +7346,188 @@ function field_ops_import_fieldnation_mailbox(array $options = []): array
     return $stats;
 }
 
+
+/**
+ * Post finalized FieldNation earnings to Accounting.
+ *
+ * Debit:  1110 FieldNation Receivable
+ * Credit: 4100 Field Service Income
+ *
+ * @return array{
+ *     ok:bool,
+ *     journal_id?:int,
+ *     already_posted?:bool,
+ *     errors?:array
+ * }
+ */
+function field_ops_post_work_order_to_accounting(
+    int $workOrderId,
+    int $userId = 0
+): array {
+    require_once __DIR__ . '/accounting_source_posting.php';
+
+    if ($workOrderId <= 0) {
+        return [
+            'ok' => false,
+            'errors' => ['Valid work order is required.'],
+        ];
+    }
+
+    $pdo = db();
+    $ownsTransaction = !$pdo->inTransaction();
+
+    if ($ownsTransaction) {
+        $pdo->beginTransaction();
+    }
+
+    try {
+        $statement = $pdo->prepare(
+            'SELECT *
+             FROM field_work_orders
+             WHERE work_order_id = ?
+             LIMIT 1
+             FOR UPDATE'
+        );
+        $statement->execute([$workOrderId]);
+
+        $workOrder = $statement->fetch(PDO::FETCH_ASSOC);
+
+        if (!$workOrder) {
+            throw new RuntimeException('Work order not found.');
+        }
+
+        $existingJournalId =
+            (int)($workOrder['accounting_journal_id'] ?? 0);
+
+        if ($existingJournalId > 0) {
+            if ($ownsTransaction) {
+                $pdo->commit();
+            }
+
+            return [
+                'ok' => true,
+                'journal_id' => $existingJournalId,
+                'already_posted' => true,
+            ];
+        }
+
+        if (!in_array(
+            (string)$workOrder['status'],
+            ['APPROVED', 'PAID'],
+            true
+        )) {
+            throw new RuntimeException(
+                'The work order must be APPROVED or PAID before posting.'
+            );
+        }
+
+        $grossPay = round((float)$workOrder['gross_pay'], 2);
+
+        if ($grossPay <= 0) {
+            throw new RuntimeException(
+                'Authorized gross must be greater than zero.'
+            );
+        }
+
+        $approvedAt = trim(
+            (string)($workOrder['approved_at'] ?? '')
+        );
+
+        if ($approvedAt === '') {
+            throw new RuntimeException(
+                'The work order does not have an approval date.'
+            );
+        }
+
+        $accountStatement = $pdo->prepare(
+            'SELECT account_id
+             FROM gl_account
+             WHERE account_code = ?
+               AND is_active = 1
+             LIMIT 1'
+        );
+
+        $accountStatement->execute(['1110']);
+        $receivableAccountId = (int)$accountStatement->fetchColumn();
+
+        $accountStatement->execute(['4100']);
+        $incomeAccountId = (int)$accountStatement->fetchColumn();
+
+        if ($receivableAccountId <= 0 || $incomeAccountId <= 0) {
+            throw new RuntimeException(
+                'Required FieldNation Accounting accounts are missing.'
+            );
+        }
+
+        $externalNumber = trim(
+            (string)($workOrder['external_work_order_number'] ?? '')
+        );
+        $title = trim((string)($workOrder['title'] ?? ''));
+        $amount = number_format($grossPay, 2, '.', '');
+
+        $journalId = accounting_post_source_journal(
+            $pdo,
+            [
+                'journal_date' => substr($approvedAt, 0, 10),
+                'source_type' => 'FIELD_WORK_ORDER',
+                'source_id' => $workOrderId,
+                'reference_number' => $externalNumber !== ''
+                    ? 'FN-' . $externalNumber
+                    : 'FIELD-WO-' . $workOrderId,
+                'memo' => $title !== ''
+                    ? 'Field service revenue: ' . $title
+                    : 'Field service work order revenue.',
+                'posted_by' => $userId > 0 ? $userId : null,
+            ],
+            [
+                [
+                    'account_id' => $receivableAccountId,
+                    'debit_amount' => $amount,
+                    'credit_amount' => '0.00',
+                    'line_memo' =>
+                        'FieldNation earnings awaiting settlement.',
+                ],
+                [
+                    'account_id' => $incomeAccountId,
+                    'debit_amount' => '0.00',
+                    'credit_amount' => $amount,
+                    'line_memo' => 'Field service income.',
+                ],
+            ]
+        );
+
+        $link = $pdo->prepare(
+            'UPDATE field_work_orders
+             SET accounting_journal_id = ?,
+                 updated_at = NOW()
+             WHERE work_order_id = ?
+               AND accounting_journal_id IS NULL'
+        );
+        $link->execute([$journalId, $workOrderId]);
+
+        if ($link->rowCount() !== 1) {
+            throw new RuntimeException(
+                'Work-order journal link was not saved.'
+            );
+        }
+
+        if ($ownsTransaction) {
+            $pdo->commit();
+        }
+
+        return [
+            'ok' => true,
+            'journal_id' => $journalId,
+            'already_posted' => false,
+        ];
+    } catch (Throwable $exception) {
+        if ($ownsTransaction && $pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+
+        return [
+            'ok' => false,
+            'errors' => [$exception->getMessage()],
+        ];
+    }
+}

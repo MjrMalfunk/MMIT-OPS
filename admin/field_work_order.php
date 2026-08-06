@@ -127,6 +127,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         );
     } elseif ($action === 'update_state') {
         $result = field_ops_update_work_order_state($_POST);
+    } elseif ($action === 'post_accounting') {
+        $result = field_ops_post_work_order_to_accounting(
+            (int)($_POST['work_order_id'] ?? 0),
+            (int)(current_user()['user_id'] ?? 0)
+        );
     } elseif ($action === 'save_sli_terms') {
         $result = field_ops_save_sli_terms($_POST);
     } elseif ($action === 'create_pay_change') {
@@ -1179,6 +1184,41 @@ $receivableStateClass = match ($receivableState) {
 
   <section class="grid two">
     <article class="card">
+      <h2>Accounting</h2>
+
+      <?php if (!empty($wo['accounting_journal_id'])): ?>
+        <p style="margin-bottom:0;">
+          <strong>Posted</strong><br>
+          <span class="muted">
+            Journal #<?= (int)$wo['accounting_journal_id'] ?>
+          </span>
+        </p>
+      <?php elseif (in_array((string)$wo['status'], ['APPROVED', 'PAID'], true)): ?>
+        <p>
+          Post <?= $fmtMoney((float)$wo['gross_pay']) ?> of finalized
+          FieldNation revenue.
+        </p>
+
+        <form method="post">
+          <?= csrf_field() ?>
+          <input type="hidden" name="action" value="post_accounting">
+          <input
+            type="hidden"
+            name="work_order_id"
+            value="<?= (int)$workOrderId ?>"
+          >
+          <button class="btn" type="submit">
+            Post to Accounting
+          </button>
+        </form>
+      <?php else: ?>
+        <p class="muted" style="margin-bottom:0;">
+          Available after the work order reaches APPROVED or PAID.
+        </p>
+      <?php endif; ?>
+    </article>
+
+    <article class="card">
       <h2>Update job state</h2>
       <form method="post" class="form-grid">
         <?= csrf_field() ?>
@@ -1196,11 +1236,24 @@ $receivableStateClass = match ($receivableState) {
 
         <label>
           Payment
-          <select name="payment_status">
-            <?php foreach (field_ops_payment_statuses() as $status): ?>
-              <option value="<?= $h($status) ?>" <?= (string)$wo['payment_status'] === $status ? 'selected' : '' ?>><?= $h($status) ?></option>
-            <?php endforeach; ?>
-          </select>
+          <span
+            role="status"
+            style="
+              display:flex;
+              align-items:center;
+              min-height:42px;
+              padding:0 12px;
+              border:1px solid var(--border);
+              border-radius:8px;
+              background:var(--surface-soft, rgba(127,127,127,.08));
+              font-weight:700;
+            "
+          >
+            <?= $h((string)$wo['payment_status']) ?>
+          </span>
+          <span style="font-size:11px;color:var(--muted);margin-top:-4px;">
+            Automatically derived from Status
+          </span>
         </label>
 
         <label>

@@ -514,9 +514,27 @@ function field_rideshare_save_shift(
 
     try {
         if ($shiftId > 0) {
-            if (!field_rideshare_find_shift($shiftId)) {
+            $lockStatement = $pdo->prepare(
+                'SELECT shift_id, accounting_journal_id
+                 FROM field_rideshare_shifts
+                 WHERE shift_id = ?
+                 LIMIT 1
+                 FOR UPDATE'
+            );
+            $lockStatement->execute([$shiftId]);
+
+            $lockedShift = $lockStatement->fetch(PDO::FETCH_ASSOC);
+
+            if (!$lockedShift) {
                 throw new InvalidArgumentException(
                     'Rideshare shift not found.'
+                );
+            }
+
+            if (!empty($lockedShift['accounting_journal_id'])) {
+                throw new RuntimeException(
+                    'This shift is already posted to Accounting. '
+                    . 'Use an Accounting adjustment instead of editing it.'
                 );
             }
 
@@ -797,4 +815,173 @@ function field_rideshare_summary(
     }
 
     return $summary;
+}
+/**
+ * Post a saved rideshare shift to Accounting.
+ *
+ * Debit:  1020 Lyft Direct
+ * Credit: 4110 Rideshare Income
+ *
+ * @return array{
+ *     ok:bool,
+ *     journal_id?:int,
+ *     already_posted?:bool,
+ *     errors?:array
+ * }
+ */
+function field_rideshare_post_shift_to_accounting(
+    int $shiftId,
+    int $userId = 0
+): array {
+    require_once __DIR__ . '/accounting_source_posting.php';
+
+    if ($shiftId <= 0) {
+        return [
+            'ok' => false,
+            'errors' => ['Valid rideshare shift is required.'],
+        ];
+    }
+
+    $pdo = db();
+    $ownsTransaction = !$pdo->inTransaction();
+
+    if ($ownsTransaction) {
+        $pdo->beginTransaction();
+    }
+
+    try {
+        $statement = $pdo->prepare(
+            'SELECT *
+             FROM field_rideshare_shifts
+             WHERE shift_id = ?
+             LIMIT 1
+             FOR UPDATE'
+        );
+        $statement->execute([$shiftId]);
+
+        $shift = $statement->fetch(PDO::FETCH_ASSOC);
+
+        if (!$shift) {
+            throw new RuntimeException('Rideshare shift not found.');
+        }
+
+        $existingJournalId =
+            (int)($shift['accounting_journal_id'] ?? 0);
+
+        if ($existingJournalId > 0) {
+            if ($ownsTransaction) {
+                $pdo->commit();
+            }
+
+            return [
+                'ok' => true,
+                'journal_id' => $existingJournalId,
+                'already_posted' => true,
+            ];
+        }
+
+        $recognizedRevenue = round(
+            (float)$shift['recognized_revenue'],
+            2
+        );
+
+        if ($recognizedRevenue <= 0) {
+            throw new RuntimeException(
+                'Recognized rideshare revenue must be greater than zero.'
+            );
+        }
+
+        $accountStatement = $pdo->prepare(
+            'SELECT account_id
+             FROM gl_account
+             WHERE account_code = ?
+               AND is_active = 1
+             LIMIT 1'
+        );
+
+        $accountStatement->execute(['1020']);
+        $lyftDirectAccountId = (int)$accountStatement->fetchColumn();
+
+        $accountStatement->execute(['4110']);
+        $incomeAccountId = (int)$accountStatement->fetchColumn();
+
+        if ($lyftDirectAccountId <= 0 || $incomeAccountId <= 0) {
+            throw new RuntimeException(
+                'Required rideshare Accounting accounts are missing.'
+            );
+        }
+
+        $platform = trim((string)($shift['platform'] ?? 'Lyft'));
+        $amount = number_format(
+            $recognizedRevenue,
+            2,
+            '.',
+            ''
+        );
+
+        $journalId = accounting_post_source_journal(
+            $pdo,
+            [
+                'journal_date' => (string)$shift['shift_date'],
+                'source_type' => 'RIDESHARE_SHIFT',
+                'source_id' => $shiftId,
+                'reference_number' => strtoupper($platform)
+                    . '-SHIFT-'
+                    . $shiftId,
+                'memo' => $platform
+                    . ' shift revenue for '
+                    . (string)$shift['shift_date']
+                    . '.',
+                'posted_by' => $userId > 0 ? $userId : null,
+            ],
+            [
+                [
+                    'account_id' => $lyftDirectAccountId,
+                    'debit_amount' => $amount,
+                    'credit_amount' => '0.00',
+                    'line_memo' => 'Rideshare earnings deposited.',
+                ],
+                [
+                    'account_id' => $incomeAccountId,
+                    'debit_amount' => '0.00',
+                    'credit_amount' => $amount,
+                    'line_memo' => 'Rideshare income.',
+                ],
+            ]
+        );
+
+        $link = $pdo->prepare(
+            'UPDATE field_rideshare_shifts
+             SET accounting_journal_id = ?,
+                 updated_at = NOW()
+             WHERE shift_id = ?
+               AND accounting_journal_id IS NULL'
+        );
+        $link->execute([$journalId, $shiftId]);
+
+        if ($link->rowCount() !== 1) {
+            throw new RuntimeException(
+                'Rideshare journal link was not saved.'
+            );
+        }
+
+        if ($ownsTransaction) {
+            $pdo->commit();
+        }
+
+        return [
+            'ok' => true,
+            'journal_id' => $journalId,
+            'already_posted' => false,
+        ];
+    } catch (Throwable $exception) {
+        if ($ownsTransaction && $pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+
+        return [
+            'ok' => false,
+            'errors' => [$exception->getMessage()],
+        ];
+    }
 }
