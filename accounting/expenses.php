@@ -36,6 +36,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $vendors = accounting_list_vendors();
+$businessLines = accounting_business_line_options();
 $expenseAccounts = accounting_account_options(['EXPENSE']);
 $liabilityAccounts = accounting_account_options(['LIABILITY']);
 $assetLiabilityAccounts = accounting_account_options(['ASSET', 'LIABILITY']);
@@ -57,6 +58,7 @@ accounting_subnav('expenses');
         <div><label>Posting date</label><br><input type="date" name="posting_date" value="<?= accounting_h((string)$form['posting_date']) ?>" style="width:100%;padding:10px;box-sizing:border-box;"></div>
       </div>
       <div><label>Vendor</label><br><select name="vendor_id" style="width:100%;padding:10px;box-sizing:border-box;"><option value="0">Select vendor</option><?php foreach ($vendors as $vendor): ?><option value="<?= (int)$vendor['vendor_id'] ?>" <?= ((int)($form['vendor_id'] ?? 0) === (int)$vendor['vendor_id']) ? 'selected' : '' ?>><?= accounting_h((string)$vendor['vendor_name']) ?></option><?php endforeach; ?></select></div>
+<div><label>Business line</label><br><select name="business_line_id" required style="width:100%;padding:10px;box-sizing:border-box;"><option value="">Choose business line</option><?php foreach ($businessLines as $businessLine): ?><option value="<?= (int)$businessLine['business_line_id'] ?>" <?= ((int)($form['business_line_id'] ?? 0) === (int)$businessLine['business_line_id']) ? 'selected' : '' ?>><?= accounting_h((string)$businessLine['business_line_name']) ?></option><?php endforeach; ?></select></div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
         <div><label>Subtotal</label><br><input type="number" step="0.01" min="0" name="subtotal_amount" value="<?= accounting_h((string)$form['subtotal_amount']) ?>" style="width:100%;padding:10px;box-sizing:border-box;"></div>
         <div><label>Tax</label><br><input type="number" step="0.01" min="0" name="tax_amount" value="<?= accounting_h((string)$form['tax_amount']) ?>" style="width:100%;padding:10px;box-sizing:border-box;"></div>
@@ -81,6 +83,7 @@ accounting_subnav('expenses');
       <tr style="text-align:left;border-bottom:1px solid rgba(255,255,255,.10)">
         <th style="padding:10px 8px;">Date</th>
         <th style="padding:10px 8px;">Vendor</th>
+        <th style="padding:10px 8px;">Business line</th>
         <th style="padding:10px 8px;">Category</th>
         <th style="padding:10px 8px;">Status</th>
         <th style="padding:10px 8px;">Posting</th>
@@ -91,7 +94,7 @@ accounting_subnav('expenses');
       </thead>
       <tbody>
       <?php if (!$expenses): ?>
-        <tr><td colspan="8" style="padding:18px 8px;opacity:.75;">No expenses entered yet.</td></tr>
+        <tr><td colspan="9" style="padding:18px 8px;opacity:.75;">No expenses entered yet.</td></tr>
       <?php else: ?>
         <?php foreach ($expenses as $expense): ?>
           <?php
@@ -105,6 +108,7 @@ accounting_subnav('expenses');
           <tr style="border-bottom:1px solid rgba(255,255,255,.06)">
             <td style="padding:10px 8px;"><?= accounting_h((string)$expense['expense_date']) ?></td>
             <td style="padding:10px 8px;"><?= accounting_h((string)($expense['vendor_name'] ?? '—')) ?></td>
+            <td style="padding:10px 8px;"><?= accounting_h((string)($expense['business_line_name'] ?? 'Unclassified')) ?></td>
             <td style="padding:10px 8px;"><?= accounting_h((string)$expense['expense_account_code']) ?> · <?= accounting_h((string)$expense['expense_account_name']) ?></td>
             <td style="padding:10px 8px;"><?= accounting_h((string)$expense['status']) ?></td>
             <td style="padding:10px 8px;"><?= !empty($expense['has_journal']) ? 'Posted' : 'Not posted' ?><div style="opacity:.65;font-size:12px;"><?= !empty($expense['payment_account_code']) ? accounting_h((string)$expense['payment_account_code'] . ' · ' . (string)$expense['payment_account_name']) : accounting_h((string)$expense['payable_account_code'] . ' · ' . (string)$expense['payable_account_name']) ?></div></td>

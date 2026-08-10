@@ -58,7 +58,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         'export_expense_draft' => field_vehicle_export_expense_draft_to_accounting(
             (int)($_POST['expense_draft_id'] ?? 0),
-            isset($user['id']) ? (int)$user['id'] : null
+            isset($user['id']) ? (int)$user['id'] : null,
+            (int)($_POST['business_line_id'] ?? 0)
         ),
 
         default => [
@@ -99,6 +100,7 @@ if (!empty($_SESSION['flash_msg'])) {
     unset($_SESSION['flash_msg']);
 }
 
+$businessLines = accounting_business_line_options();
 $vehicles = field_vehicles(true);
 
 $vehicleOptions = [
@@ -854,6 +856,23 @@ $statusShortcuts = [
                     <input type="hidden" name="action" value="export_expense_draft">
                     <input type="hidden" name="expense_draft_id" value="<?= $expenseDraftId ?>">
                     <input type="hidden" name="return_to" value="<?= $h(BASE_URL . '/admin/field_expense_drafts.php' . (!empty($_SERVER['QUERY_STRING']) ? '?' . $_SERVER['QUERY_STRING'] : '')) ?>">
+
+                    <label for="business-line-<?= $expenseDraftId ?>">
+                      Business line
+                    </label>
+                    <select
+                      id="business-line-<?= $expenseDraftId ?>"
+                      name="business_line_id"
+                      required
+                      style="margin:6px 0 8px;width:100%;"
+                    >
+                      <option value="">Choose business line</option>
+                      <?php foreach ($businessLines as $businessLine): ?>
+                        <option value="<?= (int)$businessLine['business_line_id'] ?>">
+                          <?= $h($businessLine['business_line_name']) ?>
+                        </option>
+                      <?php endforeach; ?>
+                    </select>
 
                     <button class="btn btn-primary" type="submit">
                       Post to accounting

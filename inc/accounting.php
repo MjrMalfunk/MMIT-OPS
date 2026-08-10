@@ -664,6 +664,37 @@ function accounting_remove_vendor(int $vendorId): array {
      return ['ok' => true, 'vendor_id' => (int)$pdo->lastInsertId(), 'message' => 'Vendor created.'];
  }
  
+ function accounting_business_line_options(): array {
+     if (!db_table_exists('business_line')) {
+         return [];
+     }
+
+     return db()->query(
+         'SELECT business_line_id,
+                 business_line_code,
+                 business_line_name
+          FROM business_line
+          WHERE is_active = 1
+          ORDER BY sort_order, business_line_name'
+     )->fetchAll();
+ }
+
+ function accounting_business_line_is_active(int $businessLineId): bool {
+     if ($businessLineId <= 0 || !db_table_exists('business_line')) {
+         return false;
+     }
+
+     $statement = db()->prepare(
+         'SELECT COUNT(*)
+          FROM business_line
+          WHERE business_line_id = ?
+            AND is_active = 1'
+     );
+     $statement->execute([$businessLineId]);
+
+     return (int)$statement->fetchColumn() === 1;
+ }
+
  function accounting_list_expenses(int $limit = 100, array $statuses = []): array {
      $limit = max(1, min(500, $limit));
      $statuses = array_values(array_filter(array_map(static fn($status) => strtoupper(trim((string)$status)), $statuses)));
@@ -676,12 +707,14 @@ function accounting_remove_vendor(int $vendorId): array {
      }
  
      $sql = "SELECT e.*, v.vendor_name,
+                    bl.business_line_code, bl.business_line_name,
                     exp.account_code AS expense_account_code, exp.account_name AS expense_account_name,
                     pay.account_code AS payable_account_code, pay.account_name AS payable_account_name,
                     pm.account_code AS payment_account_code, pm.account_name AS payment_account_name,
                     EXISTS(SELECT 1 FROM gl_journal j WHERE j.source_type = 'EXPENSE' AND j.source_id = e.expense_id AND j.status <> 'VOID') AS has_journal
              FROM expense e
              LEFT JOIN vendor v ON v.vendor_id = e.vendor_id
+             LEFT JOIN business_line bl ON bl.business_line_id = e.business_line_id
              INNER JOIN gl_account exp ON exp.account_id = e.expense_account_id
              INNER JOIN gl_account pay ON pay.account_id = e.payable_account_id
              LEFT JOIN gl_account pm ON pm.account_id = e.payment_account_id
@@ -700,6 +733,7 @@ function accounting_remove_vendor(int $vendorId): array {
  
  function accounting_post_expense_journal(PDO $pdo, array $expense, int $userId): void {
      $status = (string)$expense['status'];
+     $businessLineId = (int)($expense['business_line_id'] ?? 0);
      $sourceType = 'EXPENSE';
      $reference = $expense['reference_number'] ?: null;
      $memo = trim((string)($expense['memo'] ?? '')) ?: 'Expense posting';
@@ -708,11 +742,17 @@ function accounting_remove_vendor(int $vendorId): array {
      $st->execute([$expense['posting_date'], $sourceType, $expense['expense_id'], $reference, $memo, $userId]);
      $journalId = (int)$pdo->lastInsertId();
  
-     $line = $pdo->prepare('INSERT INTO gl_journal_line (journal_id, line_number, account_id, vendor_id, debit_amount, credit_amount, line_memo) VALUES (?, ?, ?, ?, ?, ?, ?)');
+     if ($businessLineId <= 0) {
+         throw new RuntimeException(
+             'A business line is required before posting an expense.'
+         );
+     }
+
+     $line = $pdo->prepare('INSERT INTO gl_journal_line (journal_id, line_number, account_id, business_line_id, vendor_id, debit_amount, credit_amount, line_memo) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
      $total = (float)$expense['total_amount'];
      $vendorId = $expense['vendor_id'] ? (int)$expense['vendor_id'] : null;
  
-     $line->execute([$journalId, 1, (int)$expense['expense_account_id'], $vendorId, $total, 0, 'Expense']);
+     $line->execute([$journalId, 1, (int)$expense['expense_account_id'], $businessLineId, $vendorId, $total, 0, 'Expense']);
  
      $creditAccountId = (int)$expense['payable_account_id'];
      $creditMemo = 'Accounts payable';
@@ -720,7 +760,7 @@ function accounting_remove_vendor(int $vendorId): array {
          $creditAccountId = (int)$expense['payment_account_id'];
          $creditMemo = 'Paid from account';
      }
-     $line->execute([$journalId, 2, $creditAccountId, $vendorId, 0, $total, $creditMemo]);
+     $line->execute([$journalId, 2, $creditAccountId, $businessLineId, $vendorId, 0, $total, $creditMemo]);
  }
  
  function accounting_has_expense_journal(int $expenseId): bool {
@@ -748,6 +788,7 @@ function accounting_update_expense(int $expenseId, array $data, int $userId): ar
     }
 
     $vendorId = (int)($data['vendor_id'] ?? 0);
+    $businessLineId = (int)($data['business_line_id'] ?? 0);
     $expenseDate = trim((string)($data['expense_date'] ?? ''));
     $postingDate = trim((string)($data['posting_date'] ?? ''));
     $dueDate = trim((string)($data['due_date'] ?? ''));
@@ -766,6 +807,9 @@ function accounting_update_expense(int $expenseId, array $data, int $userId): ar
     if ($payableAccountId <= 0) $payableAccountId = accounting_find_account_id_by_code('2000') ?? 0;
 
     $errors = [];
+    if (!accounting_business_line_is_active($businessLineId)) {
+        $errors[] = 'Choose a valid business line.';
+    }
     if (!in_array($status, accounting_get_expense_statuses(), true)) $errors[] = 'Choose a valid expense status.';
     if ($subtotalAmount < 0) $errors[] = 'Subtotal cannot be negative.';
     if ($taxAmount < 0) $errors[] = 'Tax cannot be negative.';
@@ -778,9 +822,10 @@ function accounting_update_expense(int $expenseId, array $data, int $userId): ar
     $pdo = db();
     $pdo->beginTransaction();
     try {
-        $st = $pdo->prepare('UPDATE expense SET vendor_id = ?, expense_date = ?, posting_date = ?, due_date = ?, reference_number = ?, status = ?, subtotal_amount = ?, tax_amount = ?, total_amount = ?, expense_account_id = ?, payable_account_id = ?, payment_account_id = ?, memo = ?, payment_date = ?, updated_at = CURRENT_TIMESTAMP WHERE expense_id = ?');
+        $st = $pdo->prepare('UPDATE expense SET vendor_id = ?, business_line_id = ?, expense_date = ?, posting_date = ?, due_date = ?, reference_number = ?, status = ?, subtotal_amount = ?, tax_amount = ?, total_amount = ?, expense_account_id = ?, payable_account_id = ?, payment_account_id = ?, memo = ?, payment_date = ?, updated_at = CURRENT_TIMESTAMP WHERE expense_id = ?');
         $st->execute([
             $vendorId > 0 ? $vendorId : null,
+            $businessLineId,
             $expenseDate,
             $postingDate,
             $dueDate !== '' ? $dueDate : null,
@@ -800,6 +845,7 @@ function accounting_update_expense(int $expenseId, array $data, int $userId): ar
         if (in_array($status, ['SUBMITTED', 'APPROVED'], true) && !accounting_has_expense_journal($expenseId)) {
             accounting_post_expense_journal($pdo, [
                 'expense_id' => $expenseId,
+                'business_line_id' => $businessLineId,
                 'posting_date' => $postingDate,
                 'reference_number' => $referenceNumber,
                 'memo' => $memo,
@@ -822,6 +868,7 @@ function accounting_update_expense(int $expenseId, array $data, int $userId): ar
 
 function accounting_create_expense(array $data, int $userId): array {
      $vendorId = (int)($data['vendor_id'] ?? 0);
+     $businessLineId = (int)($data['business_line_id'] ?? 0);
      $expenseDate = trim((string)($data['expense_date'] ?? ''));
      $postingDate = trim((string)($data['posting_date'] ?? ''));
      $dueDate = trim((string)($data['due_date'] ?? ''));
@@ -840,6 +887,9 @@ function accounting_create_expense(array $data, int $userId): array {
      if ($payableAccountId <= 0) $payableAccountId = accounting_find_account_id_by_code('2000') ?? 0;
  
      $errors = [];
+     if (!accounting_business_line_is_active($businessLineId)) {
+         $errors[] = 'Choose a valid business line.';
+     }
      if (!in_array($status, accounting_get_expense_statuses(), true)) $errors[] = 'Choose a valid expense status.';
      if ($subtotalAmount < 0) $errors[] = 'Subtotal cannot be negative.';
      if ($taxAmount < 0) $errors[] = 'Tax cannot be negative.';
@@ -852,11 +902,12 @@ function accounting_create_expense(array $data, int $userId): array {
      $pdo = db();
      $pdo->beginTransaction();
      try {
-         $st = $pdo->prepare('INSERT INTO expense (vendor_id, expense_date, posting_date, due_date, reference_number, status, subtotal_amount, tax_amount, total_amount, expense_account_id, payable_account_id, payment_account_id, memo, created_by, approved_by, paid_at, payment_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+         $st = $pdo->prepare('INSERT INTO expense (vendor_id, business_line_id, expense_date, posting_date, due_date, reference_number, status, subtotal_amount, tax_amount, total_amount, expense_account_id, payable_account_id, payment_account_id, memo, created_by, approved_by, paid_at, payment_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
          $approvedBy = in_array($status, ['APPROVED', 'PAID'], true) ? $userId : null;
          $paidAt = $status === 'PAID' ? date('Y-m-d H:i:s') : null;
          $st->execute([
              $vendorId > 0 ? $vendorId : null,
+             $businessLineId,
              $expenseDate,
              $postingDate,
              $dueDate !== '' ? $dueDate : null,
@@ -879,6 +930,7 @@ function accounting_create_expense(array $data, int $userId): array {
          if (in_array($status, ['SUBMITTED', 'APPROVED', 'PAID'], true)) {
              accounting_post_expense_journal($pdo, [
                  'expense_id' => $expenseId,
+                 'business_line_id' => $businessLineId,
                  'posting_date' => $postingDate,
                  'reference_number' => $referenceNumber,
                  'memo' => $memo,
@@ -901,13 +953,15 @@ function accounting_create_expense(array $data, int $userId): array {
  
  function accounting_list_bills(int $limit = 100): array {
      $limit = max(1, min(500, $limit));
-     $sql = "SELECT e.expense_id, e.expense_date, e.posting_date, e.due_date, e.reference_number, e.status, e.total_amount, e.payment_date,
+     $sql = "SELECT e.expense_id, e.business_line_id, e.expense_date, e.posting_date, e.due_date, e.reference_number, e.status, e.total_amount, e.payment_date,
                     v.vendor_name,
+                    bl.business_line_code, bl.business_line_name,
                     exp.account_code AS expense_account_code, exp.account_name AS expense_account_name,
                     pay.account_code AS payable_account_code, pay.account_name AS payable_account_name,
                     pm.account_code AS payment_account_code, pm.account_name AS payment_account_name
              FROM expense e
              LEFT JOIN vendor v ON v.vendor_id = e.vendor_id
+             LEFT JOIN business_line bl ON bl.business_line_id = e.business_line_id
              INNER JOIN gl_account exp ON exp.account_id = e.expense_account_id
              INNER JOIN gl_account pay ON pay.account_id = e.payable_account_id
              LEFT JOIN gl_account pm ON pm.account_id = e.payment_account_id
@@ -922,11 +976,13 @@ function accounting_create_expense(array $data, int $userId): array {
 
 function accounting_get_bill(int $expenseId): ?array {
      $sql = "SELECT e.*, v.vendor_name,
+                    bl.business_line_code, bl.business_line_name,
                     exp.account_code AS expense_account_code, exp.account_name AS expense_account_name,
                     pay.account_code AS payable_account_code, pay.account_name AS payable_account_name,
                     pm.account_code AS payment_account_code, pm.account_name AS payment_account_name
              FROM expense e
              LEFT JOIN vendor v ON v.vendor_id = e.vendor_id
+             LEFT JOIN business_line bl ON bl.business_line_id = e.business_line_id
              INNER JOIN gl_account exp ON exp.account_id = e.expense_account_id
              INNER JOIN gl_account pay ON pay.account_id = e.payable_account_id
              LEFT JOIN gl_account pm ON pm.account_id = e.payment_account_id
@@ -1012,6 +1068,7 @@ function accounting_has_expense_payment_journal(int $expenseId): bool {
          if (!accounting_has_expense_journal($expenseId)) {
              accounting_post_expense_journal($pdo, [
                  'expense_id' => $expenseId,
+                 'business_line_id' => (int)$bill['business_line_id'],
                  'posting_date' => $bill['posting_date'],
                  'reference_number' => $bill['reference_number'],
                  'memo' => $bill['memo'],
@@ -1062,6 +1119,7 @@ function accounting_has_expense_payment_journal(int $expenseId): bool {
          if (!accounting_has_expense_journal($expenseId)) {
              accounting_post_expense_journal($pdo, [
                  'expense_id' => $expenseId,
+                 'business_line_id' => (int)$bill['business_line_id'],
                  'posting_date' => $bill['posting_date'],
                  'reference_number' => $bill['reference_number'],
                  'memo' => $bill['memo'],
@@ -1083,11 +1141,19 @@ function accounting_has_expense_payment_journal(int $expenseId): bool {
          $st->execute([$paymentDate, $expenseId, $reference, $memo, $userId]);
          $journalId = (int)$pdo->lastInsertId();
  
-         $line = $pdo->prepare('INSERT INTO gl_journal_line (journal_id, line_number, account_id, vendor_id, debit_amount, credit_amount, line_memo) VALUES (?, ?, ?, ?, ?, ?, ?)');
+         $businessLineId = (int)($bill['business_line_id'] ?? 0);
+
+         if ($businessLineId <= 0) {
+             throw new RuntimeException(
+                 'A business line is required before paying a bill.'
+             );
+         }
+
+         $line = $pdo->prepare('INSERT INTO gl_journal_line (journal_id, line_number, account_id, business_line_id, vendor_id, debit_amount, credit_amount, line_memo) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
          $vendorId = $bill['vendor_id'] ? (int)$bill['vendor_id'] : null;
          $amount = (float)$bill['total_amount'];
-         $line->execute([$journalId, 1, (int)$bill['payable_account_id'], $vendorId, $amount, 0, 'Accounts payable settled']);
-         $line->execute([$journalId, 2, $paymentAccountId, $vendorId, 0, $amount, 'Payment account']);
+         $line->execute([$journalId, 1, (int)$bill['payable_account_id'], $businessLineId, $vendorId, $amount, 0, 'Accounts payable settled']);
+         $line->execute([$journalId, 2, $paymentAccountId, $businessLineId, $vendorId, 0, $amount, 'Payment account']);
  
          $pdo->commit();
          return ['ok' => true, 'message' => 'Bill marked paid and posted.'];

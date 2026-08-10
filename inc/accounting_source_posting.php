@@ -67,6 +67,28 @@ function accounting_post_source_journal(
         );
     }
 
+    $businessLineCode = match ($sourceType) {
+        'FIELD_WORK_ORDER' => 'FIELD_NATION',
+        'RIDESHARE_SHIFT' => 'LYFT',
+    };
+
+    $businessLineStatement = $pdo->prepare(
+        'SELECT business_line_id
+         FROM business_line
+         WHERE business_line_code = ?
+           AND is_active = 1
+         LIMIT 1'
+    );
+    $businessLineStatement->execute([$businessLineCode]);
+
+    $businessLineId = (int)$businessLineStatement->fetchColumn();
+
+    if ($businessLineId <= 0) {
+        throw new RuntimeException(
+            "Active business line {$businessLineCode} is missing."
+        );
+    }
+
     if ($sourceId <= 0) {
         throw new InvalidArgumentException(
             'A positive source record ID is required.'
@@ -198,12 +220,13 @@ function accounting_post_source_journal(
             journal_id,
             line_number,
             account_id,
+            business_line_id,
             client_id,
             vendor_id,
             debit_amount,
             credit_amount,
             line_memo
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
     );
 
     foreach ($normalizedLines as $line) {
@@ -211,6 +234,7 @@ function accounting_post_source_journal(
             $journalId,
             $line['line_number'],
             $line['account_id'],
+            $businessLineId,
             $line['client_id'],
             $line['vendor_id'],
             $line['debit_amount'],

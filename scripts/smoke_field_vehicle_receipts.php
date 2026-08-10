@@ -31,6 +31,21 @@ if (!function_exists('accounting_create_expense')) {
     require_once __DIR__ . '/../inc/accounting.php';
 }
 
+$sharedBusinessLineId = 0;
+
+foreach (accounting_business_line_options() as $businessLine) {
+    $businessLineCode = strtoupper(
+        trim((string)($businessLine['business_line_code'] ?? ''))
+    );
+
+    if ($businessLineCode === 'SHARED') {
+        $sharedBusinessLineId = (int)($businessLine['business_line_id'] ?? 0);
+        break;
+    }
+}
+
+smoke_ok($sharedBusinessLineId > 0, 'active SHARED business line exists');
+
 smoke_ok(db_table_exists('field_vehicle_receipt_drafts'), 'field_vehicle_receipt_drafts exists');
 smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'onedrive_web_url'), 'receipt draft OneDrive URL column exists');
 smoke_ok(db_column_exists('field_vehicle_receipt_drafts', 'parse_status'), 'receipt draft parse status column exists');
@@ -296,7 +311,8 @@ field_vehicle_update_expense_draft_status(
 
 $exportResult = field_vehicle_export_expense_draft_to_accounting(
     (int)$exportDraft['expense_draft_id'],
-    null
+    null,
+    $sharedBusinessLineId
 );
 smoke_ok(!empty($exportResult['ok']), 'ready expense draft exports to accounting');
 smoke_ok((int)($exportResult['accounting_expense_id'] ?? 0) > 0, 'export returns accounting expense id');
@@ -313,7 +329,8 @@ smoke_ok((string)($exportedDraft['expense_status'] ?? '') === 'EXPORTED', 'expor
 
 $exportAgain = field_vehicle_export_expense_draft_to_accounting(
     (int)$exportDraft['expense_draft_id'],
-    null
+    null,
+    $sharedBusinessLineId
 );
 smoke_ok(!empty($exportAgain['already_exported']), 'expense draft export is idempotent');
 
@@ -326,6 +343,62 @@ if ($accountingExpenseId > 0) {
     db()->prepare("DELETE FROM expense WHERE expense_id = ?")
         ->execute([$accountingExpenseId]);
 }
+
+$recoveredExport = field_vehicle_export_expense_draft_to_accounting(
+    (int)$exportDraft['expense_draft_id'],
+    null,
+    $sharedBusinessLineId
+);
+smoke_ok(!empty($recoveredExport['ok']), 'stale accounting expense reference can be recovered');
+smoke_ok(empty($recoveredExport['already_exported']), 'stale reference recovery performs a new export');
+
+$recoveredExpenseId = (int)($recoveredExport['accounting_expense_id'] ?? 0);
+smoke_ok($recoveredExpenseId > 0, 'stale reference recovery returns accounting expense id');
+smoke_ok($recoveredExpenseId !== $accountingExpenseId, 'stale reference recovery creates a replacement expense');
+
+$recoveredExpenseExists = db()->prepare("
+    SELECT 1
+    FROM expense
+    WHERE expense_id = ?
+    LIMIT 1
+");
+$recoveredExpenseExists->execute([$recoveredExpenseId]);
+smoke_ok((bool)$recoveredExpenseExists->fetchColumn(), 'replacement accounting expense exists');
+
+$recoveredDraftRow = db()->prepare("
+    SELECT expense_status, accounting_expense_id
+    FROM field_receipt_expense_drafts
+    WHERE expense_draft_id = ?
+    LIMIT 1
+");
+$recoveredDraftRow->execute([(int)$exportDraft['expense_draft_id']]);
+$recoveredDraft = $recoveredDraftRow->fetch(PDO::FETCH_ASSOC) ?: [];
+
+smoke_ok(
+    (string)($recoveredDraft['expense_status'] ?? '') === 'EXPORTED',
+    'recovered expense draft is exported'
+);
+smoke_ok(
+    (int)($recoveredDraft['accounting_expense_id'] ?? 0) === $recoveredExpenseId,
+    'recovered expense draft references replacement expense'
+);
+
+$recoveredAgain = field_vehicle_export_expense_draft_to_accounting(
+    (int)$exportDraft['expense_draft_id'],
+    null,
+    $sharedBusinessLineId
+);
+smoke_ok(!empty($recoveredAgain['already_exported']), 'replacement expense export remains idempotent');
+smoke_ok(
+    (int)($recoveredAgain['accounting_expense_id'] ?? 0) === $recoveredExpenseId,
+    'idempotent export returns replacement expense id'
+);
+
+db()->prepare("DELETE FROM expense_attachment WHERE expense_id = ?")
+    ->execute([$recoveredExpenseId]);
+
+db()->prepare("DELETE FROM expense WHERE expense_id = ?")
+    ->execute([$recoveredExpenseId]);
 
 if (!empty($exportResult['accounting_vendor_id'])) {
     db()->prepare("

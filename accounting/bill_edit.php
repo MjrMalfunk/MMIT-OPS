@@ -22,6 +22,7 @@ $errors = [];
 $userId = (int)(current_user()['user_id'] ?? 0);
 $form = [
     'vendor_id' => (string)($bill['vendor_id'] ?? '0'),
+    'business_line_id' => (string)($bill['business_line_id'] ?? '0'),
     'expense_date' => (string)($bill['expense_date'] ?? date('Y-m-d')),
     'posting_date' => (string)($bill['posting_date'] ?? date('Y-m-d')),
     'due_date' => (string)($bill['due_date'] ?? ''),
@@ -46,6 +47,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $vendors = accounting_list_vendors();
+$businessLines = accounting_business_line_options();
 $expenseAccounts = accounting_account_options(['EXPENSE']);
 $liabilityAccounts = accounting_account_options(['LIABILITY']);
 $paymentAccounts = accounting_account_options(['ASSET','LIABILITY','EQUITY']);
@@ -64,6 +66,7 @@ accounting_subnav('bills');
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;"><div><label>Bill date</label><br><input type="date" name="expense_date" value="<?= accounting_h((string)$form['expense_date']) ?>" style="width:100%;padding:10px;box-sizing:border-box;"></div><div><label>Posting date</label><br><input type="date" name="posting_date" value="<?= accounting_h((string)$form['posting_date']) ?>" style="width:100%;padding:10px;box-sizing:border-box;"></div></div>
 <div><label>Due date</label><br><input type="date" name="due_date" value="<?= accounting_h((string)$form['due_date']) ?>" style="width:100%;padding:10px;box-sizing:border-box;"></div>
 <div><label>Vendor</label><br><select name="vendor_id" style="width:100%;padding:10px;box-sizing:border-box;"><option value="0">Select vendor</option><?php foreach ($vendors as $vendor): ?><option value="<?= (int)$vendor['vendor_id'] ?>" <?= ((int)($form['vendor_id'] ?? 0) === (int)$vendor['vendor_id']) ? 'selected' : '' ?>><?= accounting_h((string)$vendor['vendor_name']) ?></option><?php endforeach; ?></select></div>
+<div><label>Business line</label><br><select name="business_line_id" required style="width:100%;padding:10px;box-sizing:border-box;"><option value="">Choose business line</option><?php foreach ($businessLines as $businessLine): ?><option value="<?= (int)$businessLine['business_line_id'] ?>" <?= ((int)($form['business_line_id'] ?? 0) === (int)$businessLine['business_line_id']) ? 'selected' : '' ?>><?= accounting_h((string)$businessLine['business_line_name']) ?></option><?php endforeach; ?></select></div>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;"><div><label>Subtotal</label><br><input type="number" step="0.01" min="0" name="subtotal_amount" value="<?= accounting_h((string)$form['subtotal_amount']) ?>" style="width:100%;padding:10px;box-sizing:border-box;"></div><div><label>Tax</label><br><input type="number" step="0.01" min="0" name="tax_amount" value="<?= accounting_h((string)$form['tax_amount']) ?>" style="width:100%;padding:10px;box-sizing:border-box;"></div></div>
 <div><label>Status</label><br><select name="status" style="width:100%;padding:10px;box-sizing:border-box;"><option value="DRAFT" <?= (($form['status'] ?? '') === 'DRAFT') ? 'selected' : '' ?>>DRAFT</option><option value="SUBMITTED" <?= (($form['status'] ?? '') === 'SUBMITTED') ? 'selected' : '' ?>>SUBMITTED</option></select></div>
 <div><label>Reference number</label><br><input type="text" name="reference_number" value="<?= accounting_h((string)($form['reference_number'] ?? '')) ?>" style="width:100%;padding:10px;box-sizing:border-box;"></div>

@@ -1586,7 +1586,8 @@ function field_vehicle_receipt_accounting_expense_account_id(array $draft): ?int
 
 function field_vehicle_export_expense_draft_to_accounting(
     int $expenseDraftId,
-    ?int $userId = null
+    ?int $userId = null,
+    int $businessLineId = 0
 ): array {
     field_vehicle_receipt_expense_drafts_ensure_schema();
 
@@ -1637,12 +1638,59 @@ function field_vehicle_export_expense_draft_to_accounting(
     ) ?: 'DRAFT';
 
     if (!empty($draft['accounting_expense_id'])) {
-        return [
-            'ok' => true,
-            'already_exported' => true,
-            'expense_draft_id' => $expenseDraftId,
-            'accounting_expense_id' => (int)$draft['accounting_expense_id'],
-        ];
+        $referencedExpenseId = (int)$draft['accounting_expense_id'];
+
+        $expenseExists = db()->prepare("
+            SELECT 1
+            FROM expense
+            WHERE expense_id = ?
+            LIMIT 1
+        ");
+        $expenseExists->execute([$referencedExpenseId]);
+
+        if ((bool)$expenseExists->fetchColumn()) {
+            return [
+                'ok' => true,
+                'already_exported' => true,
+                'expense_draft_id' => $expenseDraftId,
+                'accounting_expense_id' => $referencedExpenseId,
+            ];
+        }
+
+        $recoveredStatus = $currentStatus === 'EXPORTED'
+            ? 'READY'
+            : $currentStatus;
+
+        $reset = db()->prepare("
+            UPDATE field_receipt_expense_drafts
+            SET expense_status = ?,
+                accounting_expense_id = NULL,
+                exported_at = NULL,
+                export_error = 'Referenced accounting expense was missing; export reset for retry.',
+                updated_at = NOW()
+            WHERE expense_draft_id = ?
+              AND accounting_expense_id = ?
+              AND deleted_at IS NULL
+            LIMIT 1
+        ");
+        $reset->execute([
+            $recoveredStatus,
+            $expenseDraftId,
+            $referencedExpenseId,
+        ]);
+
+        if ($reset->rowCount() !== 1) {
+            return [
+                'ok' => false,
+                'errors' => [
+                    'Expense draft changed while its accounting reference was being verified. Retry the export.',
+                ],
+            ];
+        }
+
+        $draft['accounting_expense_id'] = null;
+        $draft['expense_status'] = $recoveredStatus;
+        $currentStatus = $recoveredStatus;
     }
 
     if ($currentStatus !== 'READY') {
@@ -1685,6 +1733,7 @@ function field_vehicle_export_expense_draft_to_accounting(
     $create = accounting_create_expense(
         [
             'vendor_id' => $vendorId ?: 0,
+            'business_line_id' => $businessLineId,
             'expense_date' => $expenseDate,
             'posting_date' => $expenseDate,
             'due_date' => '',
