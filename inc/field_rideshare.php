@@ -82,6 +82,24 @@ function field_rideshare_ensure_schema(): void
         }
     }
 
+    db()->exec(
+        "CREATE TABLE IF NOT EXISTS field_rideshare_breaks (
+            break_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            shift_id BIGINT UNSIGNED NOT NULL,
+            break_position SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+            started_at DATETIME NOT NULL,
+            ended_at DATETIME NOT NULL,
+            break_minutes INT UNSIGNED NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (break_id),
+            KEY idx_rideshare_break_shift (
+                shift_id,
+                break_position
+            )
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+          COLLATE=utf8mb4_unicode_ci"
+    );
+
     $schemaReady = true;
 }
 
@@ -274,6 +292,203 @@ function field_rideshare_normalize_datetime(
 }
 
 
+/**
+ * Normalize and validate submitted break intervals.
+ *
+ * @return array<int, array{
+ *     started_at:string,
+ *     ended_at:string,
+ *     break_minutes:int
+ * }>
+ */
+function field_rideshare_normalize_breaks(
+    array $input,
+    ?string $shiftStartedAt,
+    ?string $shiftEndedAt
+): array {
+    $starts = $input['break_started_at'] ?? [];
+    $ends = $input['break_ended_at'] ?? [];
+
+    if (!is_array($starts) || !is_array($ends)) {
+        throw new InvalidArgumentException(
+            'Break intervals are malformed.'
+        );
+    }
+
+    $rowCount = max(count($starts), count($ends));
+    $breaks = [];
+
+    for ($index = 0; $index < $rowCount; $index++) {
+        $rawStart = trim((string)($starts[$index] ?? ''));
+        $rawEnd = trim((string)($ends[$index] ?? ''));
+
+        if ($rawStart === '' && $rawEnd === '') {
+            continue;
+        }
+
+        $rowNumber = $index + 1;
+
+        if ($rawStart === '' || $rawEnd === '') {
+            throw new InvalidArgumentException(
+                "Break {$rowNumber} requires both start and end."
+            );
+        }
+
+        if ($shiftStartedAt === null || $shiftEndedAt === null) {
+            throw new InvalidArgumentException(
+                'Enter the shift start and end before adding breaks.'
+            );
+        }
+
+        $startedAt = field_rideshare_normalize_datetime(
+            $rawStart,
+            "Break {$rowNumber} start"
+        );
+
+        $endedAt = field_rideshare_normalize_datetime(
+            $rawEnd,
+            "Break {$rowNumber} end"
+        );
+
+        if (
+            $startedAt === null
+            || $endedAt === null
+            || strtotime($endedAt) <= strtotime($startedAt)
+        ) {
+            throw new InvalidArgumentException(
+                "Break {$rowNumber} end must be after its start."
+            );
+        }
+
+        if (
+            strtotime($startedAt) < strtotime($shiftStartedAt)
+            || strtotime($endedAt) > strtotime($shiftEndedAt)
+        ) {
+            throw new InvalidArgumentException(
+                "Break {$rowNumber} must fall within the shift."
+            );
+        }
+
+        $minutes = (int)round(
+            (strtotime($endedAt) - strtotime($startedAt)) / 60
+        );
+
+        if ($minutes < 1) {
+            throw new InvalidArgumentException(
+                "Break {$rowNumber} must be at least one minute."
+            );
+        }
+
+        $breaks[] = [
+            'started_at' => $startedAt,
+            'ended_at' => $endedAt,
+            'break_minutes' => $minutes,
+        ];
+    }
+
+    usort(
+        $breaks,
+        static fn(array $left, array $right): int =>
+            strcmp($left['started_at'], $right['started_at'])
+    );
+
+    $previousEnd = null;
+
+    foreach ($breaks as $break) {
+        if (
+            $previousEnd !== null
+            && strtotime($break['started_at']) < strtotime($previousEnd)
+        ) {
+            throw new InvalidArgumentException(
+                'Break intervals cannot overlap.'
+            );
+        }
+
+        $previousEnd = $break['ended_at'];
+    }
+
+    return $breaks;
+}
+
+function field_rideshare_breaks(int $shiftId): array
+{
+    field_rideshare_ensure_schema();
+
+    if ($shiftId <= 0) {
+        return [];
+    }
+
+    $statement = db()->prepare(
+        'SELECT
+            break_id,
+            shift_id,
+            break_position,
+            started_at,
+            ended_at,
+            break_minutes,
+            created_at
+         FROM field_rideshare_breaks
+         WHERE shift_id = ?
+         ORDER BY break_position ASC, break_id ASC'
+    );
+    $statement->execute([$shiftId]);
+
+    return $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
+}
+
+function field_rideshare_total_break_minutes(array $breaks): int
+{
+    $total = 0;
+
+    foreach ($breaks as $break) {
+        $total += max(0, (int)($break['break_minutes'] ?? 0));
+    }
+
+    return $total;
+}
+
+function field_rideshare_replace_breaks(
+    int $shiftId,
+    array $breaks
+): void {
+    field_rideshare_ensure_schema();
+
+    if ($shiftId <= 0) {
+        throw new InvalidArgumentException(
+            'A saved shift is required before storing breaks.'
+        );
+    }
+
+    $delete = db()->prepare(
+        'DELETE FROM field_rideshare_breaks WHERE shift_id = ?'
+    );
+    $delete->execute([$shiftId]);
+
+    if ($breaks === []) {
+        return;
+    }
+
+    $insert = db()->prepare(
+        'INSERT INTO field_rideshare_breaks (
+            shift_id,
+            break_position,
+            started_at,
+            ended_at,
+            break_minutes
+         ) VALUES (?, ?, ?, ?, ?)'
+    );
+
+    foreach ($breaks as $position => $break) {
+        $insert->execute([
+            $shiftId,
+            $position,
+            $break['started_at'],
+            $break['ended_at'],
+            $break['break_minutes'],
+        ]);
+    }
+}
+
 function field_rideshare_save_shift(
     array $input,
     int $userId = 0
@@ -333,21 +548,29 @@ function field_rideshare_save_shift(
         );
     }
 
+    $breaks = field_rideshare_normalize_breaks(
+        $input,
+        $startedAt,
+        $endedAt
+    );
+
     $onlineMinutes = max(
         0,
         (int)($input['online_minutes'] ?? 0)
     );
 
-    if (
-        $onlineMinutes === 0
-        && $startedAt !== null
-        && $endedAt !== null
-    ) {
-        $onlineMinutes = max(
+    if ($startedAt !== null && $endedAt !== null) {
+        $shiftMinutes = max(
             0,
             (int)round(
                 (strtotime($endedAt) - strtotime($startedAt)) / 60
             )
+        );
+
+        $onlineMinutes = max(
+            0,
+            $shiftMinutes
+            - field_rideshare_total_break_minutes($breaks)
         );
     }
 
@@ -605,6 +828,11 @@ function field_rideshare_save_shift(
             $statement->execute($values);
             $shiftId = (int)$pdo->lastInsertId();
         }
+
+        field_rideshare_replace_breaks(
+            $shiftId,
+            $breaks
+        );
 
         if ($ownsTransaction) {
             $pdo->commit();

@@ -232,6 +232,38 @@ $form += [
     'notes' => '',
 ];
 
+$breakRows = [];
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $submittedStarts = $_POST['break_started_at'] ?? [];
+    $submittedEnds = $_POST['break_ended_at'] ?? [];
+
+    if (is_array($submittedStarts) && is_array($submittedEnds)) {
+        $breakRowCount = max(
+            count($submittedStarts),
+            count($submittedEnds)
+        );
+
+        for ($index = 0; $index < $breakRowCount; $index++) {
+            $breakRows[] = [
+                'started_at' =>
+                    (string)($submittedStarts[$index] ?? ''),
+                'ended_at' =>
+                    (string)($submittedEnds[$index] ?? ''),
+            ];
+        }
+    }
+} elseif ($editShiftId > 0) {
+    $breakRows = field_rideshare_breaks($editShiftId);
+}
+
+if ($breakRows === []) {
+    $breakRows[] = [
+        'started_at' => '',
+        'ended_at' => '',
+    ];
+}
+
 $from = $dateFrom?->format('Y-m-d');
 $to = $dateTo?->format('Y-m-d');
 
@@ -489,6 +521,51 @@ $rangeLabel = match ($range) {
       font-weight: 900;
     }
 
+    .break-fieldset {
+      display: block;
+    }
+
+    .break-help {
+      margin: 0 0 12px;
+      font-size: 13px;
+    }
+
+    .break-list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .break-row {
+      display: grid;
+      grid-template-columns:
+        repeat(2, minmax(0, 1fr)) minmax(100px, auto);
+      gap: 12px;
+      align-items: end;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      padding: 12px;
+      background: rgba(255,255,255,.025);
+    }
+
+    .break-remove {
+      min-height: 44px;
+      color: var(--red);
+    }
+
+    .break-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .break-summary {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 800;
+    }
+
     .preview {
       position: sticky;
       top: 16px;
@@ -628,8 +705,13 @@ $rangeLabel = match ($range) {
       .form-grid,
       fieldset,
       .preview-grid,
-      .custom-range {
+      .custom-range,
+      .break-row {
         grid-template-columns: 1fr;
+      }
+
+      .break-remove {
+        width: 100%;
       }
 
       .full { grid-column: auto; }
@@ -923,6 +1005,100 @@ $rangeLabel = match ($range) {
               value="<?= $h($dateInput($form['ended_at'])) ?>"
             >
           </label>
+
+          <fieldset class="break-fieldset">
+            <legend>Off-app breaks</legend>
+
+            <p class="break-help" id="break-help">
+              Waiting for rides still counts as online time. Record only
+              meal, errand, or other off-duty stops.
+            </p>
+
+            <div class="break-list" id="break-list">
+              <?php foreach ($breakRows as $index => $break): ?>
+                <div class="break-row" data-break-row>
+                  <label>
+                    Break start
+                    <input
+                      type="datetime-local"
+                      name="break_started_at[]"
+                      value="<?= $h($dateInput(
+                          $break['started_at'] ?? ''
+                      )) ?>"
+                      data-break-start
+                      aria-describedby="break-help"
+                    >
+                  </label>
+
+                  <label>
+                    Break end
+                    <input
+                      type="datetime-local"
+                      name="break_ended_at[]"
+                      value="<?= $h($dateInput(
+                          $break['ended_at'] ?? ''
+                      )) ?>"
+                      data-break-end
+                      aria-describedby="break-help"
+                    >
+                  </label>
+
+                  <button
+                    class="break-remove"
+                    type="button"
+                    data-remove-break
+                    aria-label="Remove break <?= $index + 1 ?>"
+                  >
+                    Remove
+                  </button>
+                </div>
+              <?php endforeach; ?>
+            </div>
+
+            <div class="break-actions">
+              <button type="button" id="add-break">
+                Add break
+              </button>
+
+              <span
+                class="break-summary"
+                id="break-summary"
+                aria-live="polite"
+              ></span>
+            </div>
+
+            <template id="break-row-template">
+              <div class="break-row" data-break-row>
+                <label>
+                  Break start
+                  <input
+                    type="datetime-local"
+                    name="break_started_at[]"
+                    data-break-start
+                    aria-describedby="break-help"
+                  >
+                </label>
+
+                <label>
+                  Break end
+                  <input
+                    type="datetime-local"
+                    name="break_ended_at[]"
+                    data-break-end
+                    aria-describedby="break-help"
+                  >
+                </label>
+
+                <button
+                  class="break-remove"
+                  type="button"
+                  data-remove-break
+                >
+                  Remove
+                </button>
+              </div>
+            </template>
+          </fieldset>
 
           <label>
             Starting odometer
@@ -1321,10 +1497,61 @@ $rangeLabel = match ($range) {
     currency: 'USD'
   }).format(value);
 
+  const breakList = document.getElementById('break-list');
+  const breakTemplate = document.getElementById('break-row-template');
+  const breakSummary = document.getElementById('break-summary');
+  const addBreakButton = document.getElementById('add-break');
+
+  const renumberBreakRows = () => {
+    breakList?.querySelectorAll('[data-break-row]').forEach(
+      (row, index) => {
+        const removeButton = row.querySelector('[data-remove-break]');
+
+        removeButton?.setAttribute(
+          'aria-label',
+          `Remove break ${index + 1}`
+        );
+      }
+    );
+  };
+
+  const totalBreakMinutes = () => {
+    let minutes = 0;
+
+    breakList?.querySelectorAll('[data-break-row]').forEach((row) => {
+      const start = row.querySelector('[data-break-start]');
+      const end = row.querySelector('[data-break-end]');
+
+      if (!start?.value || !end?.value) {
+        return;
+      }
+
+      const startTime = new Date(start.value).getTime();
+      const endTime = new Date(end.value).getTime();
+
+      if (
+        Number.isFinite(startTime)
+        && Number.isFinite(endTime)
+        && endTime > startTime
+      ) {
+        minutes += Math.round((endTime - startTime) / 60000);
+      }
+    });
+
+    return minutes;
+  };
+
   const updateOnlineMinutes = () => {
     const start = document.getElementById('started_at');
     const end = document.getElementById('ended_at');
     const online = document.getElementById('online_minutes');
+    const breakMinutes = totalBreakMinutes();
+
+    if (breakSummary) {
+      breakSummary.textContent = breakMinutes > 0
+        ? `${breakMinutes} break minutes excluded`
+        : 'No break time excluded';
+    }
 
     if (!start?.value || !end?.value || !online) {
       return;
@@ -1338,9 +1565,54 @@ $rangeLabel = match ($range) {
       && Number.isFinite(endTime)
       && endTime >= startTime
     ) {
-      online.value = String(Math.round((endTime - startTime) / 60000));
+      const shiftMinutes = Math.round(
+        (endTime - startTime) / 60000
+      );
+
+      online.value = String(
+        Math.max(0, shiftMinutes - breakMinutes)
+      );
     }
   };
+
+  const addBreakRow = () => {
+    if (!breakList || !breakTemplate) {
+      return;
+    }
+
+    breakList.append(breakTemplate.content.cloneNode(true));
+    renumberBreakRows();
+
+    const rows = breakList.querySelectorAll('[data-break-row]');
+    const lastRow = rows[rows.length - 1];
+
+    lastRow?.querySelector('[data-break-start]')?.focus();
+  };
+
+  addBreakButton?.addEventListener('click', addBreakRow);
+
+  breakList?.addEventListener('click', (event) => {
+    const removeButton = event.target.closest('[data-remove-break]');
+
+    if (!removeButton) {
+      return;
+    }
+
+    const row = removeButton.closest('[data-break-row]');
+    const rows = breakList.querySelectorAll('[data-break-row]');
+
+    if (rows.length > 1) {
+      row?.remove();
+    } else {
+      row?.querySelectorAll('input').forEach((input) => {
+        input.value = '';
+      });
+    }
+
+    renumberBreakRows();
+    updateOnlineMinutes();
+    updatePreview();
+  });
 
   const updatePreview = () => {
     const vehicle = document.getElementById('vehicle_id');
@@ -1398,19 +1670,29 @@ $rangeLabel = match ($range) {
       profitHourly === null ? '—' : money(profitHourly);
   };
 
+  const affectsWorkingTime = (target) =>
+    target.id === 'started_at'
+    || target.id === 'ended_at'
+    || target.matches('[data-break-start], [data-break-end]');
+
   form.addEventListener('input', (event) => {
-    if (
-      event.target.id === 'started_at'
-      || event.target.id === 'ended_at'
-    ) {
+    if (affectsWorkingTime(event.target)) {
       updateOnlineMinutes();
     }
 
     updatePreview();
   });
 
-  form.addEventListener('change', updatePreview);
+  form.addEventListener('change', (event) => {
+    if (affectsWorkingTime(event.target)) {
+      updateOnlineMinutes();
+    }
 
+    updatePreview();
+  });
+
+  renumberBreakRows();
+  updateOnlineMinutes();
   updatePreview();
 })();
 </script>
