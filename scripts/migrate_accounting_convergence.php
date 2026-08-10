@@ -6,9 +6,15 @@ if (PHP_SAPI !== 'cli') {
     exit;
 }
 
-$_SERVER['HTTP_HOST'] = (string)(
-    getenv('FIELD_VEHICLE_HOST') ?: 'ops-test.midwestmanagedit.com'
-);
+$expectedHost = trim((string)getenv('FIELD_VEHICLE_HOST'));
+
+if ($expectedHost === '') {
+    throw new RuntimeException(
+        'Host guard failed: FIELD_VEHICLE_HOST is required.'
+    );
+}
+
+$_SERVER['HTTP_HOST'] = $expectedHost;
 $_SERVER['HTTPS'] = 'on';
 $_SERVER['REQUEST_URI'] = '/';
 
@@ -17,7 +23,16 @@ require __DIR__ . '/../inc/bootstrap.php';
 ob_end_clean();
 
 $pdo = db();
+$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+
+$expectedDatabase = trim((string)getenv('FIELD_VEHICLE_DATABASE'));
 $database = (string)$pdo->query('SELECT DATABASE()')->fetchColumn();
+
+if ($expectedDatabase === '' || !hash_equals($expectedDatabase, $database)) {
+    throw new RuntimeException(
+        "Database guard failed: expected {$expectedDatabase}; connected {$database}."
+    );
+}
 
 echo "Database: {$database}\n";
 
