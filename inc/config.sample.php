@@ -86,6 +86,9 @@ define('ESIGNATURES_WEBHOOK_URL', '');
 // Controlled staging/testing override only: set true in a private local inc/config.php to allow
 // Syncro POST/PUT/PATCH calls from OPS staging. DELETE remains blocked even when true.
 // Never enable in committed config or without an active manual test window.
+// Set false before cancelling/archiving Syncro. OPS keeps historical IDs and
+// statuses but blocks API calls, cron work, and new onboarding dependencies.
+define('SYNCRO_ENABLED', false);
 define('SYNCRO_ALLOW_STAGING_WRITES', false);
 define('SYNCRO_SUBDOMAIN', 'midwestmanagedit');
 define('SYNCRO_API_KEY', '');

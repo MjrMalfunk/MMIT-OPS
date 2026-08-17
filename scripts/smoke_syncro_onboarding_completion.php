@@ -107,11 +107,8 @@ $GLOBALS['syncro_production_move_api_request_handler'] = static function (string
         foreach ($payload['properties'] as $key => $value) $movedAsset['properties'][$key] = $value;
         return ['ok' => true, 'status' => 200, 'data' => ['customer_asset' => $movedAsset]];
     }
-    if ($method === 'POST' && $path === 'tickets/5000/comments') {
+    if ($method === 'POST' && $path === 'tickets/5000/comment') {
         return ['ok' => true, 'status' => 201, 'data' => ['comment' => ['id' => 90]]];
-    }
-    if ($method === 'PUT' && $path === 'tickets/5000') {
-        return ['ok' => true, 'status' => 200, 'data' => ['ticket' => ['id' => 5000, 'status' => 'Resolved']]];
     }
     return ['ok' => false, 'status' => 500, 'errors' => ['unexpected mover request ' . $method . ' ' . $path]];
 };
@@ -119,11 +116,14 @@ $move = syncro_onboarding_move_ready_asset(35912652, 12561086, 5000, $movedAsset
 smoke_assert(($move['ok'] ?? false) === true, 'mover moves ready asset', $failed);
 smoke_assert(($movedAsset['policy_folder_id'] ?? null) === MMIT_SYNCRO_FOLDER_PRODUCTION_WORKSTATIONS, 'mover uses production folder target', $failed);
 smoke_assert(($movedAsset['properties'][MMIT_SYNCRO_FIELD_ONBOARDING_STATUS] ?? '') === 'COMPLETED', 'mover marks asset completed', $failed);
+$commentedTicket = false;
 $closedTicket = false;
 foreach ($moveRequests as $request) {
+    if (($request['method'] ?? '') === 'POST' && ($request['path'] ?? '') === 'tickets/5000/comment') $commentedTicket = true;
     if (($request['method'] ?? '') === 'PUT' && ($request['path'] ?? '') === 'tickets/5000' && (($request['payload']['ticket']['status'] ?? '') === 'Resolved')) $closedTicket = true;
 }
-smoke_assert($closedTicket, 'mover closes ticket', $failed);
+smoke_assert($commentedTicket, 'mover comments on ticket', $failed);
+smoke_assert(!$closedTicket, 'mover leaves ticket open for manual close', $failed);
 unset($GLOBALS['syncro_production_move_api_request_handler']);
 
 $completedAsset = $movedAsset;

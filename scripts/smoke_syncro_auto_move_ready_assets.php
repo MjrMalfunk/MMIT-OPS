@@ -50,6 +50,26 @@ function syncro_update_customer_asset_policy_folder(int $assetId, int $targetFol
     return ['ok' => true, 'status' => 200];
 }
 
+function syncro_fetch_customer_asset(int $assetId): array
+{
+    $targetFolderId = 0;
+    foreach (array_reverse($GLOBALS['smoke_syncro_auto_move_folder_move']) as $move) {
+        if ((int)($move['asset_id'] ?? 0) === $assetId) {
+            $targetFolderId = (int)($move['target_folder_id'] ?? 0);
+            break;
+        }
+    }
+    return [
+        'ok' => $targetFolderId > 0,
+        'asset' => [
+            'id' => $assetId,
+            'name' => 'MANAGE-WS-01',
+            'policy_folder_id' => $targetFolderId,
+            'properties' => [],
+        ],
+    ];
+}
+
 function syncro_extract_asset_custom_fields(array $asset): array
 {
     return (array)($asset['properties'] ?? []);
@@ -102,7 +122,13 @@ $workstationCandidate = [
     'current_folder_id' => 501,
     'target_folder_id' => 601,
 ];
-$workstation = syncro_auto_move_move_workstation(11, 22, $workstationAsset, $workstationCandidate);
+$workstationTicket = [
+    'id' => 112489921,
+    'number' => 7001,
+    'status' => 'New',
+    'subject' => 'MMIT Auto Move Ready - MANAGE-WS-01',
+];
+$workstation = syncro_auto_move_move_workstation(11, 22, $workstationAsset, $workstationCandidate, $workstationTicket);
 smoke_assert(($workstation['ok'] ?? null) === true, 'workstation move succeeds', $failed);
 smoke_assert(($workstation['ticket_found'] ?? null) === true, 'workstation ticket found', $failed);
 smoke_assert(($workstation['ticket_id'] ?? null) === 112489921, 'workstation internal ticket id extracted', $failed);

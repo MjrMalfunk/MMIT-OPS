@@ -5815,22 +5815,29 @@ function accounting_contract_default_onboarding_tasks(int $contractId): array {
     if ($hasServerBackup) $backupLabelParts[] = 'server backup coverage';
     if ($hasSaasBackup) $backupLabelParts[] = $platformLabel . ' backup coverage';
     $backupLabel = $backupLabelParts ? implode(', ', $backupLabelParts) : 'backup coverage';
-    $syncroOrgRequired = syncro_is_staging_mode() ? 0 : 1;
+    $syncroEnabled = function_exists('syncro_is_enabled') && syncro_is_enabled();
+    $syncroOrgRequired = $syncroEnabled && !syncro_is_staging_mode() ? 1 : 0;
 
     $tasks = [
         ['code' => 'PRIMARY_CONTACT_READY', 'name' => 'Primary and billing contacts confirmed', 'detail' => 'Verify the day-to-day contact, billing contact, email addresses, phone numbers, and approval path before service begins.', 'required' => 1, 'sort' => 10],
-        [
+    ];
+
+    if ($syncroEnabled) {
+        $tasks[] = [
             'code' => 'SYNCRO_ORG_READY',
             'name' => $syncroOrgRequired ? 'Syncro organization created' : 'Syncro organization created - Optional in staging',
             'detail' => $syncroOrgRequired ? 'Push the client into Syncro and confirm the company record is ready for device deployment, policies, and ticket routing.' : 'Live automation check. Syncro writes are intentionally blocked in staging/test so test clients are not sent to Syncro.',
             'required' => $syncroOrgRequired,
             'sort' => 20,
-        ],
-        ['code' => 'SYNCRO_BASELINE_READY', 'name' => 'Syncro policies and monitoring baseline applied', 'detail' => 'Confirm the core Syncro policy stack, patching lane, alerting, tray workflow, and asset standards are applied for the chosen package.', 'required' => 1, 'sort' => 30],
-        ['code' => 'DEVICE_AGENTS_DEPLOYED', 'name' => 'Covered devices checking in', 'detail' => 'Install the Syncro agent on the covered endpoints and verify the contracted workstation or server counts are reporting cleanly.', 'required' => 1, 'sort' => 40],
+        ];
+        $tasks[] = ['code' => 'SYNCRO_BASELINE_READY', 'name' => 'Syncro policies and monitoring baseline applied', 'detail' => 'Confirm the core Syncro policy stack, patching lane, alerting, tray workflow, and asset standards are applied for the chosen package.', 'required' => 1, 'sort' => 30];
+    }
+
+    $tasks = array_merge($tasks, [
+        ['code' => 'DEVICE_AGENTS_DEPLOYED', 'name' => $syncroEnabled ? 'Covered devices checking in' : 'Covered devices documented and checking in', 'detail' => $syncroEnabled ? 'Install the Syncro agent on the covered endpoints and verify the contracted workstation or server counts are reporting cleanly.' : 'Confirm the covered workstation and server inventory, contracted counts, and active security/vendor agents without requiring Syncro.', 'required' => 1, 'sort' => 40],
         ['code' => 'PORTAL_ACCESS_READY', 'name' => 'Client portal and billing access tested', 'detail' => 'Send the client admin invite, confirm the branded portal access lane works, and verify the billing contact can receive invoice mail.', 'required' => 1, 'sort' => 45],
         ['code' => 'SECURITY_STACK_READY', 'name' => 'Managed Microsoft Defender baseline verified', 'detail' => 'Confirm the managed Microsoft Defender baseline, policy enforcement, and healthy device state match the contracted ' . ($packageLane === 'ESSENTIAL' ? 'Manage IT' : ($packageLane === 'SECURE' ? 'Protect IT' : 'Govern IT')) . ' lane.', 'required' => 1, 'sort' => 50],
-    ];
+    ]);
 
     if ($hasCloudTenant) {
         $tasks[] = ['code' => 'CLOUD_TENANT_READY', 'name' => $platformLabel . ' tenant access confirmed', 'detail' => 'Verify admin access, licensing, domain state, and handoff details for the ' . $platformLabel . ' tenant tied to this client.', 'required' => 1, 'sort' => 55];
@@ -5848,7 +5855,7 @@ function accounting_contract_default_onboarding_tasks(int $contractId): array {
         $tasks[] = ['code' => 'SAAS_BACKUP_READY', 'name' => $platformLabel . ' backup scope verified', 'detail' => 'Verify mailbox, OneDrive / SharePoint or Google Drive coverage, retention settings, and the correct protected users for ' . $platformLabel . ' backup.', 'required' => 1, 'sort' => 85];
     }
     if ($hasServerMgmt) {
-        $tasks[] = ['code' => 'SERVER_MANAGEMENT_READY', 'name' => 'Server management access confirmed', 'detail' => 'Verify server access, patching, monitoring, remote support tooling, and any Syncro or security policy differences for protected servers.', 'required' => 1, 'sort' => 90];
+        $tasks[] = ['code' => 'SERVER_MANAGEMENT_READY', 'name' => 'Server management access confirmed', 'detail' => $syncroEnabled ? 'Verify server access, patching, monitoring, remote support tooling, and any Syncro or security policy differences for protected servers.' : 'Verify server access, patching, monitoring, remote support tooling, and security policy differences for protected servers.', 'required' => 1, 'sort' => 90];
     }
     if ($hasServerBackup) {
         $tasks[] = ['code' => 'SERVER_BACKUP_READY', 'name' => 'Server backup scope verified', 'detail' => 'Confirm the selected server backup mode, retention expectations, and recovery notes for each protected server workload.', 'required' => 1, 'sort' => 100];
@@ -5987,8 +5994,11 @@ function accounting_contract_set_onboarding_task(int $taskId, bool $complete, in
 
     $isSyncroOrgTask = strtoupper((string)($task['task_code'] ?? '')) === 'SYNCRO_ORG_READY';
     $syncroStagingSkipped = false;
+    $syncroArchivedSkipped = false;
     if ($complete && $isSyncroOrgTask) {
-        if (syncro_is_staging_mode()) {
+        if (function_exists('syncro_is_enabled') && !syncro_is_enabled()) {
+            $syncroArchivedSkipped = true;
+        } elseif (syncro_is_staging_mode()) {
             $syncroStagingSkipped = true;
         } else {
             $syncroResult = syncro_contract_activation_sync((int)$task['contract_id']);
@@ -6006,7 +6016,11 @@ function accounting_contract_set_onboarding_task(int $taskId, bool $complete, in
         accounting_contract_autocomplete_onboarding_tasks((int)$task['contract_id']);
         $message = (string)$task['task_name'] . ' marked complete.';
         if ($isSyncroOrgTask) {
-            $message .= $syncroStagingSkipped ? ' Syncro push skipped because staging/test writes are blocked.' : ' Syncro organization synced successfully.';
+            if ($syncroArchivedSkipped) {
+                $message .= ' Syncro push skipped because the integration is archived/disabled.';
+            } else {
+                $message .= $syncroStagingSkipped ? ' Syncro push skipped because staging/test writes are blocked.' : ' Syncro organization synced successfully.';
+            }
         }
     } else {
         db()->prepare('UPDATE contract_onboarding_task SET is_completed = 0, completed_at = NULL, completed_by = NULL, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?')->execute([$taskId]);

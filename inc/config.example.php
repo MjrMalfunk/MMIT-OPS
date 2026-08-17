@@ -41,6 +41,8 @@ return [
     ],
 
     'syncro' => [
+        // Set true only while the Syncro subscription and integration are active.
+        'enabled' => false,
         'api_key' => 'CHANGE_ME',
         'subdomain' => 'CHANGE_ME',
         // Staging/testing only. Default false keeps POST/PUT/PATCH/DELETE blocked in OPS staging;

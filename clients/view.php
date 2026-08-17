@@ -6,6 +6,7 @@ require_once __DIR__ . '/../inc/layout.php';
 require_once __DIR__ . '/../inc/accounting.php';
 require_once __DIR__ . '/../inc/syncro.php';
 require_login();
+$syncroEnabled = syncro_is_enabled();
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
 }
@@ -22,7 +23,7 @@ $locations = client_get_locations($clientId);
 $contacts = client_get_contacts($clientId);
 $services = function_exists('accounting_list_client_services') ? accounting_list_client_services(100, $clientId) : [];
 $contracts = function_exists('accounting_list_contracts') ? accounting_list_contracts(50, $clientId) : [];
-$syncroReadiness = syncro_required_fields_status($client);
+$syncroReadiness = $syncroEnabled ? syncro_required_fields_status($client) : ['missing' => []];
 $flashMsg = '';
 $flashError = '';
 if (!empty($_SESSION['flash_msg'])) {
@@ -35,6 +36,12 @@ if (!empty($_SESSION['flash_error'])) {
 }
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = (string)($_POST['action'] ?? '');
+    $syncroActions = ['manual_syncro_link', 'retry_syncro', 'repair_stale_syncro_link', 'retry_syncro_folder_provisioning'];
+    if (!$syncroEnabled && in_array($action, $syncroActions, true)) {
+        $_SESSION['flash_error'] = syncro_disabled_message();
+        header('Location: ' . BASE_URL . '/clients/view.php?client_id=' . $clientId . '#syncro-folder-map', true, 303);
+        exit;
+    }
     if ($action === 'manual_syncro_link') {
         $manualSyncroCustomerId = (int)($_POST['syncro_customer_id'] ?? 0);
         $result = syncro_manual_link_existing_customer($clientId, $manualSyncroCustomerId, true);
@@ -127,18 +134,21 @@ page_header((string)$client['legal_name'], 'clients');
 <p><strong>Tax Exempt:</strong> <?= !empty($client['tax_exempt']) ? 'Yes' : 'No' ?></p>
 <?php if (!empty($client['notes'])): ?><p><strong>Notes:</strong><br><?= nl2br(htmlspecialchars((string)$client['notes'])) ?></p><?php endif; ?>
 <p><strong>Syncro Status:</strong> <?= syncro_status_badge_html((string)($client['syncro_sync_status'] ?? 'PENDING'), !empty($client['syncro_customer_id']) ? (int)$client['syncro_customer_id'] : null) ?><?php if (!empty($client['syncro_last_error'])): ?><br><small style="color:#b91c1c;">Last error: <?= htmlspecialchars((string)$client['syncro_last_error']) ?></small><?php endif; ?></p>
-<p><strong>Syncro Readiness:</strong> <?= empty($syncroReadiness['missing']) ? 'Ready' : 'Missing ' . htmlspecialchars(implode(', ', array_values($syncroReadiness['missing']))) ?></p>
+<p><strong>Syncro Readiness:</strong> <?= $syncroEnabled ? (empty($syncroReadiness['missing']) ? 'Ready' : 'Missing ' . htmlspecialchars(implode(', ', array_values($syncroReadiness['missing'])))) : 'Archived / no longer required' ?></p>
 
 <div id="syncro-folder-map" class="card" style="padding:16px;margin:18px 0;border:1px solid rgba(15,23,42,.12);">
   <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
     <div>
-      <h2 style="margin:0;font-size:20px;">Syncro folder map provisioning</h2>
-      <div style="opacity:.74;line-height:1.45;">Customer-specific policy folder IDs are stored per client. OPS preserves existing IDs, creates only missing supported folders, and never deletes, renames, or moves assets.</div>
+      <h2 style="margin:0;font-size:20px;"><?= $syncroEnabled ? 'Syncro folder map provisioning' : 'Archived Syncro references' ?></h2>
+      <div style="opacity:.74;line-height:1.45;"><?= $syncroEnabled ? 'Customer-specific policy folder IDs are stored per client. OPS preserves existing IDs, creates only missing supported folders, and never deletes, renames, or moves assets.' : 'Historical Syncro customer and folder IDs are retained read-only. API calls and provisioning actions are disabled.' ?></div>
+      <?php if ($syncroEnabled): ?>
       <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
         <span style="display:inline-flex;padding:5px 9px;border-radius:999px;font-size:12px;font-weight:800;background:<?= $syncroStagingWritesEnabled ? 'rgba(245,158,11,.18)' : 'rgba(15,23,42,.06)' ?>;color:<?= $syncroStagingWritesEnabled ? '#92400e' : '#334155' ?>;border:1px solid <?= $syncroStagingWritesEnabled ? 'rgba(245,158,11,.35)' : 'rgba(15,23,42,.12)' ?>;">Staging writes <?= $syncroStagingWritesEnabled ? 'ENABLED' : 'blocked' ?></span>
         <span style="font-size:12px;opacity:.78;"><?= htmlspecialchars($syncroStagingWriteMessage) ?></span>
       </div>
+      <?php endif; ?>
     </div>
+    <?php if ($syncroEnabled): ?>
     <div style="display:flex;gap:8px;flex-wrap:wrap;">
       <form method="post" style="margin:0;">
         <?= csrf_field() ?>
@@ -173,6 +183,7 @@ page_header((string)$client['legal_name'], 'clients');
         <button class="btn btn-primary" style="width:auto;padding:9px 12px;" type="submit">Retry Syncro sync</button>
       </form>
     </div>
+    <?php endif; ?>
   </div>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;">
     <div><strong>Syncro customer ID</strong><br><?= !empty($syncroFolderMap['syncro_customer_id']) ? (int)$syncroFolderMap['syncro_customer_id'] : (!empty($client['syncro_customer_id']) ? (int)$client['syncro_customer_id'] : '—') ?></div>

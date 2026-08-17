@@ -31,6 +31,12 @@ $_SERVER['HTTP_HOST'] = $host;
 $_SERVER['HTTPS'] = 'on';
 $_SERVER['REQUEST_URI'] = '/';
 
+ob_start();
+require_once $root . '/inc/bootstrap.php';
+ob_end_clean();
+
+$syncroEnabled = !defined('SYNCRO_ENABLED') || (bool)SYNCRO_ENABLED;
+
 $lockDir = $root . '/storage/locks';
 
 if (
@@ -132,6 +138,7 @@ $tasks = [
     [
         'key' => 'syncro-root-intake',
         'name' => 'Syncro root asset intake',
+        'requires_syncro' => true,
         'every_minutes' => 5,
         'command' => [
             '/bin/timeout',
@@ -147,6 +154,7 @@ $tasks = [
     [
         'key' => 'syncro-ready-mover',
         'name' => 'Syncro ready asset mover',
+        'requires_syncro' => true,
         'every_minutes' => 5,
         'command' => [
             '/bin/timeout',
@@ -190,6 +198,7 @@ try {
     echo 'OPS automation dispatcher starting.', PHP_EOL;
     echo 'Host: ', $host, PHP_EOL;
     echo 'Force: ', $force ? 'YES' : 'NO', PHP_EOL;
+    echo 'Syncro integration: ', $syncroEnabled ? 'ENABLED' : 'ARCHIVED/DISABLED', PHP_EOL;
 
     foreach ($tasks as $task) {
         $key = (string)$task['key'];
@@ -199,6 +208,14 @@ try {
         }
 
         $selectedTasks++;
+
+        if (!empty($task['requires_syncro']) && !$syncroEnabled) {
+            echo sprintf(
+                'Task %s skipped: Syncro integration is archived/disabled.',
+                $key
+            ), PHP_EOL;
+            continue;
+        }
 
         $everyMinutes = max(
             1,

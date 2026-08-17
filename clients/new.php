@@ -6,6 +6,7 @@ require_once __DIR__ . '/../inc/syncro.php';
 require_once __DIR__ . '/../inc/layout.php';
 
 require_login();
+$syncroEnabled = syncro_is_enabled();
 
 $error = '';
 $form = [
@@ -29,7 +30,7 @@ $form = [
     'state' => '',
     'postal_code' => '',
     'country' => 'US',
-    'syncro_now' => 1,
+    'syncro_now' => $syncroEnabled ? 1 : 0,
 ];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -55,7 +56,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         'state' => trim($_POST['state'] ?? ''),
         'postal_code' => trim($_POST['postal_code'] ?? ''),
         'country' => trim($_POST['country'] ?? 'US'),
-        'syncro_now' => isset($_POST['syncro_now']) ? 1 : 0,
+        'syncro_now' => $syncroEnabled && isset($_POST['syncro_now']) ? 1 : 0,
     ];
 
     try {
@@ -135,7 +136,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $messages = [$usedExistingClient ? 'Existing OPS client matched and updated.' : 'Client created.'];
         $syncroErrors = [];
-        if (!empty($form['syncro_now']) && syncro_is_configured()) {
+        if ($syncroEnabled && !empty($form['syncro_now']) && syncro_is_configured()) {
             $syncResult = syncro_sync_client($clientId);
             if (!empty($syncResult['ok'])) {
                 $messages[] = function_exists('syncro_action_success_message')
@@ -166,14 +167,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 page_header('New Client', 'clients');
 ?>
 <?php if ($error !== ''): ?><div class="flash-error"><?= htmlspecialchars($error) ?></div><?php endif; ?>
-<div style="margin-bottom:14px;opacity:.78;line-height:1.5;">This form now mirrors the contract onboarding flow: company, primary location, primary contact, then optional immediate Syncro push.</div>
+<div style="margin-bottom:14px;opacity:.78;line-height:1.5;">This form mirrors the contract onboarding flow: company, primary location, and primary contact<?= $syncroEnabled ? ', followed by an optional immediate Syncro push' : '' ?>.</div>
 <form method="post" style="display:grid;gap:16px;max-width:1120px;">
   <?= csrf_field() ?>
 
   <div class="card" style="padding:18px;display:grid;gap:14px;">
     <div>
       <h2 style="margin:0 0 4px;font-size:20px;">Company</h2>
-      <div style="opacity:.74;font-size:13px;">Core company record used by contracts, invoicing, and Syncro organization sync.</div>
+      <div style="opacity:.74;font-size:13px;">Core company record used by contracts, invoicing<?= $syncroEnabled ? ', and Syncro organization sync' : '' ?>.</div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
       <div><label>Legal Name *</label><br><input type="text" name="legal_name" required value="<?= htmlspecialchars($form['legal_name']) ?>" style="width:100%;"></div>
@@ -194,7 +195,7 @@ page_header('New Client', 'clients');
   <div class="card" style="padding:18px;display:grid;gap:14px;">
     <div>
       <h2 style="margin:0 0 4px;font-size:20px;">Primary Location</h2>
-      <div style="opacity:.74;font-size:13px;">This location is required for Syncro-ready client records.</div>
+      <div style="opacity:.74;font-size:13px;">This location supports billing, service delivery, and client records<?= $syncroEnabled ? ' prepared for Syncro' : '' ?>.</div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
       <div><label>Location Name *</label><br><input type="text" name="location_name" required value="<?= htmlspecialchars($form['location_name']) ?>" style="width:100%;"></div>
@@ -213,7 +214,7 @@ page_header('New Client', 'clients');
   <div class="card" style="padding:18px;display:grid;gap:14px;">
     <div>
       <h2 style="margin:0 0 4px;font-size:20px;">Primary Contact</h2>
-      <div style="opacity:.74;font-size:13px;">Optional, but strongly recommended for Syncro, receipts, and future portal use.</div>
+      <div style="opacity:.74;font-size:13px;">Optional, but strongly recommended for service coordination, receipts, and future portal use.</div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
       <div><label>First Name</label><br><input type="text" name="contact_first_name" value="<?= htmlspecialchars($form['contact_first_name']) ?>" style="width:100%;"></div>
@@ -227,8 +228,12 @@ page_header('New Client', 'clients');
   </div>
 
   <div class="card" style="padding:18px;display:grid;gap:12px;">
+    <?php if ($syncroEnabled): ?>
     <label style="display:flex;align-items:center;gap:10px;"><input type="checkbox" name="syncro_now" value="1" <?= !empty($form['syncro_now']) ? 'checked' : '' ?>> Push this client to Syncro immediately after save</label>
     <div style="opacity:.74;font-size:13px;">If Syncro is configured and the record is complete, this will create or update the organization right away.</div>
+    <?php else: ?>
+    <div style="opacity:.78;font-size:13px;">Syncro is archived/disabled. The client will be saved only in OPS.</div>
+    <?php endif; ?>
     <div style="display:flex;gap:12px;align-items:center;">
       <button type="submit">Create Client</button>
       <a href="<?= htmlspecialchars(BASE_URL) ?>/clients/index.php">Cancel</a>

@@ -141,6 +141,9 @@ function syncro_production_move_api_path(string $path): string
 
 function syncro_production_move_api_request(string $method, string $path, array $query = [], ?array $payload = null): array
 {
+    if (!syncro_is_enabled()) {
+        return syncro_disabled_result(false);
+    }
     $handler = $GLOBALS['syncro_production_move_api_request_handler'] ?? null;
     if (is_callable($handler)) {
         return (array)$handler(strtoupper($method), ltrim($path, '/'), $query, $payload);

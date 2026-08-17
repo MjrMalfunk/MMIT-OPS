@@ -7,6 +7,19 @@ require_once __DIR__ . '/../inc/syncro_production_mover.php';
 require_login();
 require_recent_mfa(BASE_URL . '/admin/syncro_production_mover.php');
 
+if (!syncro_is_enabled()) {
+    page_header('Syncro Archived', 'admin');
+    ?>
+    <section class="card" style="padding:20px;max-width:820px;">
+      <h1 style="margin:0 0 10px;font-size:28px;">Syncro integration archived</h1>
+      <p style="margin:0 0 16px;line-height:1.6;opacity:.82;"><?= htmlspecialchars(syncro_disabled_message()) ?></p>
+      <a class="btn btn-secondary" style="width:auto;text-decoration:none;" href="<?= htmlspecialchars(BASE_URL) ?>/admin/index.php">Back to admin</a>
+    </section>
+    <?php
+    page_footer();
+    exit;
+}
+
 $result = null;
 $findResult = null;
 $error = null;
@@ -15,7 +28,7 @@ $assetId = (int)($_POST['asset_id'] ?? $_GET['asset_id'] ?? 12561086);
 $ticketIdRaw = trim((string)($_POST['ticket_id'] ?? $_GET['ticket_id'] ?? '4211'));
 $ticketId = $ticketIdRaw !== '' ? (int)ltrim($ticketIdRaw, '#') : null;
 $dryRun = (string)($_POST['dry_run'] ?? $_GET['dry_run'] ?? '1') === '1';
-$closeTicket = isset($_POST['close_ticket']) && (string)$_POST['close_ticket'] === '1';
+$closeTicket = false;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_validate_or_die();
@@ -85,7 +98,7 @@ page_header('Syncro Production Mover', 'admin');
       <label style="display:grid;gap:6px;"><span style="font-size:13px;opacity:.78;">Ready ticket ID (optional)</span><input type="text" name="ticket_id" value="<?= htmlspecialchars($ticketIdRaw) ?>" placeholder="#4211" style="padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.18);color:#fff;"></label>
       <input type="hidden" name="dry_run" value="0">
       <label style="display:flex;gap:8px;align-items:center;"><input type="checkbox" name="dry_run" value="1" <?= $dryRun ? 'checked' : '' ?>> <span>Dry run / preview only</span></label>
-      <label style="display:flex;gap:8px;align-items:center;"><input type="checkbox" name="close_ticket" value="1" <?= $closeTicket ? 'checked' : '' ?>> <span>Close ready ticket after successful verified move</span></label>
+      <div style="font-size:12px;opacity:.76;line-height:1.5;">Successful moves add a completion comment and leave the ready ticket open for manual review and close.</div>
       <label style="display:grid;gap:6px;"><span style="font-size:13px;opacity:.78;">Execute confirmation</span><input type="text" name="confirm_phrase" value="" placeholder="MOVE TO PRODUCTION" autocomplete="off" style="padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.18);color:#fff;"></label>
       <button type="submit" class="btn btn-primary" style="width:auto;padding:12px 16px;">Preview or move asset</button>
       <div style="font-size:12px;opacity:.68;line-height:1.55;">Requirements: MMIT Onboarding Status = READY, MMIT Ready To Move = Yes, and MMIT Production Folder Target = Production/Workstations or Production/Servers.</div>

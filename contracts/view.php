@@ -8,6 +8,7 @@ require_once __DIR__ . '/../inc/esignatures.php';
 require_login();
 accounting_require_ready();
 csrf_check();
+$syncroEnabled = syncro_is_enabled();
 
 $contractId = (int)($_GET['id'] ?? $_POST['contract_id'] ?? 0);
 $message = null;
@@ -59,7 +60,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $contractId > 0) {
     } elseif ($action === 'send_esignatures_test') {
         $result = esignatures_send_test_contract($contractId);
     } elseif ($action === 'retry_syncro') {
-        $result = syncro_retry_contract_sync($contractId);
+        $result = $syncroEnabled
+            ? syncro_retry_contract_sync($contractId)
+            : syncro_disabled_result(false);
         if (!empty($result['ok']) && empty($result['skipped'])) {
             $result['message'] = syncro_action_success_message((string)($result['action'] ?? ''));
         }
@@ -85,7 +88,7 @@ if (!$contract) {
     exit;
 }
 
-$syncroReadiness = syncro_required_fields_status($contract);
+$syncroReadiness = $syncroEnabled ? syncro_required_fields_status($contract) : ['missing' => []];
 $syncroFolderMap = !empty($contract['client_id']) ? syncro_get_client_folder_map((int)$contract['client_id']) : null;
 $packages = accounting_service_packages();
 $services = accounting_expand_contract_service_rows(accounting_get_contract_services($contractId));
@@ -114,7 +117,7 @@ if ($onboardingCompletedAt !== '') {
         : substr($onboardingCompletedAt, 0, 16);
 }
 $onboardingCompleteCollapsed = $currentStatus === 'ACTIVE' && !empty($onboardingProgress['all_complete']) && $onboardingTasks !== [];
-$canRetrySyncro = $hasSignedCopy || in_array($currentStatus, ['ONBOARDING', 'SIGNED_PENDING_ONBOARDING', 'ACTIVE'], true);
+$canRetrySyncro = $syncroEnabled && ($hasSignedCopy || in_array($currentStatus, ['ONBOARDING', 'SIGNED_PENDING_ONBOARDING', 'ACTIVE'], true));
 $canCompleteOnboarding = in_array($currentStatus, ['ONBOARDING', 'SIGNED_PENDING_ONBOARDING'], true) && !empty($onboardingProgress['all_complete']);
 $esignaturesLatestSend = esignatures_latest_send($contractId);
 $esignaturesWebhookUrl = esignatures_webhook_url();
@@ -250,14 +253,14 @@ page_header((string)$contract['contract_number'], 'contracts');
     <div style="opacity:.68;font-size:13px;">Client: <a href="<?= accounting_h(BASE_URL) ?>/clients/view.php?client_id=<?= (int)$contract['client_id'] ?>"><?= accounting_h((string)($contract['dba_name'] ?: $contract['legal_name'])) ?></a></div>
   </div>
   <div style="display:flex;gap:10px;flex-wrap:wrap;">
-    <?php if (!empty($contract['syncro_customer_id']) && defined('SYNCRO_SUBDOMAIN') && SYNCRO_SUBDOMAIN !== ''): ?><a class="btn btn-secondary" style="width:auto;padding:10px 14px;" href="https://<?= accounting_h(syncro_normalize_subdomain((string)SYNCRO_SUBDOMAIN)) ?>.syncromsp.com/customers/<?= (int)$contract['syncro_customer_id'] ?>" target="_blank">Open in Syncro</a><?php endif; ?>
-    <?php if ($canRetrySyncro): ?>
+    <?php if ($syncroEnabled && !empty($contract['syncro_customer_id']) && defined('SYNCRO_SUBDOMAIN') && SYNCRO_SUBDOMAIN !== ''): ?><a class="btn btn-secondary" style="width:auto;padding:10px 14px;" href="https://<?= accounting_h(syncro_normalize_subdomain((string)SYNCRO_SUBDOMAIN)) ?>.syncromsp.com/customers/<?= (int)$contract['syncro_customer_id'] ?>" target="_blank">Open in Syncro</a><?php endif; ?>
+    <?php if ($syncroEnabled && $canRetrySyncro): ?>
     <form method="post" style="margin:0;">
       <?= csrf_field() ?>
       <input type="hidden" name="action" value="retry_syncro">
       <button class="btn btn-secondary" style="width:auto;padding:10px 14px;" type="submit">Retry Syncro sync</button>
     </form>
-    <?php else: ?>
+    <?php elseif ($syncroEnabled): ?>
       <span class="btn btn-secondary" style="width:auto;padding:10px 14px;opacity:.62;cursor:not-allowed;" title="eSignatures must archive the signed agreement before Syncro sync is available.">Retry Syncro sync</span>
     <?php endif; ?>
     <a class="btn btn-secondary" style="width:auto;padding:10px 14px;" href="<?= accounting_h(BASE_URL) ?>/contracts/index.php">Back to contracts</a>
@@ -266,8 +269,8 @@ page_header((string)$contract['contract_number'], 'contracts');
 
 <?php if ($message): ?><div class="flash-success"><?= accounting_h($message) ?></div><?php endif; ?>
 <?php if ($errors): ?><div class="flash-error"><?php foreach ($errors as $e): ?><div><?= accounting_h((string)$e) ?></div><?php endforeach; ?></div><?php endif; ?>
-<?php if (!empty($syncroReadiness['missing'])): ?><div class="card" style="padding:14px;margin-bottom:16px;border:1px solid rgba(248,113,113,.28);background:rgba(127,29,29,.20);"><div style="font-weight:800;margin-bottom:8px;color:#fecaca;">Syncro readiness checklist</div><div style="opacity:.88;margin-bottom:6px;">This client still needs the following before Syncro sync will succeed:</div><div style="display:flex;gap:8px;flex-wrap:wrap;"><?php foreach ($syncroReadiness['missing'] as $label): ?><span style="display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.08);font-size:12px;"><?= accounting_h((string)$label) ?></span><?php endforeach; ?></div><div style="margin-top:10px;font-size:12px;opacity:.78;">Fill in the client core info plus at least one full location, then retry Syncro sync after the signed agreement starts onboarding.</div></div><?php endif; ?>
-<?php if (in_array($currentStatus, ['ONBOARDING','SIGNED_PENDING_ONBOARDING'], true)): ?><div class="card" style="padding:14px;margin-bottom:16px;border:1px solid rgba(14,165,233,.28);background:rgba(3,105,161,.18);"><div style="font-weight:800;margin-bottom:8px;color:#e0f2fe;">Onboarding is now the billing gate</div><div style="opacity:.88;line-height:1.5;">The signed agreement has been stored, Syncro can be pushed during onboarding, and billing will not begin until the onboarding checklist is complete and the contract is marked go-live.</div></div><?php endif; ?>
+<?php if ($syncroEnabled && !empty($syncroReadiness['missing'])): ?><div class="card" style="padding:14px;margin-bottom:16px;border:1px solid rgba(248,113,113,.28);background:rgba(127,29,29,.20);"><div style="font-weight:800;margin-bottom:8px;color:#fecaca;">Syncro readiness checklist</div><div style="opacity:.88;margin-bottom:6px;">This client still needs the following before Syncro sync will succeed:</div><div style="display:flex;gap:8px;flex-wrap:wrap;"><?php foreach ($syncroReadiness['missing'] as $label): ?><span style="display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.08);font-size:12px;"><?= accounting_h((string)$label) ?></span><?php endforeach; ?></div><div style="margin-top:10px;font-size:12px;opacity:.78;">Fill in the client core info plus at least one full location, then retry Syncro sync after the signed agreement starts onboarding.</div></div><?php endif; ?>
+<?php if (in_array($currentStatus, ['ONBOARDING','SIGNED_PENDING_ONBOARDING'], true)): ?><div class="card" style="padding:14px;margin-bottom:16px;border:1px solid rgba(14,165,233,.28);background:rgba(3,105,161,.18);"><div style="font-weight:800;margin-bottom:8px;color:#e0f2fe;">Onboarding is now the billing gate</div><div style="opacity:.88;line-height:1.5;">The signed agreement has been stored<?= $syncroEnabled ? ', Syncro can be pushed during onboarding,' : '' ?> and billing will not begin until the onboarding checklist is complete and the contract is marked go-live.</div></div><?php endif; ?>
 <?php if ($esignaturesStatusMessages || $esignaturesWebhookUrl !== ''): ?><div class="card" style="padding:14px;margin-bottom:16px;border:1px solid rgba(139,92,246,.28);background:rgba(76,29,149,.18);"><div style="font-weight:800;margin-bottom:8px;color:#ede9fe;">eSignatures status</div><?php if ($esignaturesStatusMessages): ?><div style="display:flex;gap:8px;flex-wrap:wrap;"><?php foreach (array_values(array_unique($esignaturesStatusMessages)) as $esignaturesStatusMessage): ?><span style="display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.10);font-size:12px;"><?= accounting_h($esignaturesStatusMessage) ?></span><?php endforeach; ?></div><?php endif; ?><?php if ($esignaturesWebhookUrl !== ''): ?><div style="font-size:12px;opacity:.78;margin-top:8px;word-break:break-all;">Configured eSignatures <?= accounting_h($esignaturesWebhookLabel) ?>: <?= accounting_h($esignaturesWebhookUrl) ?></div><?php endif; ?><?php if (!empty($esignaturesLatestSend['last_webhook_at'])): ?><div style="font-size:12px;opacity:.68;margin-top:8px;">Last eSignatures webhook <?= accounting_h((string)$esignaturesLatestSend['last_webhook_at']) ?></div><?php endif; ?></div><?php endif; ?>
 
 <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:16px;">

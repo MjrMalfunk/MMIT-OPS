@@ -7,6 +7,19 @@ require_once __DIR__ . '/../inc/syncro_production_mover.php';
 require_login();
 require_recent_mfa(BASE_URL . '/admin/syncro_custom_field_metadata_debug.php');
 
+if (!syncro_is_enabled()) {
+    page_header('Syncro Archived', 'admin');
+    ?>
+    <section class="card" style="padding:20px;max-width:820px;">
+      <h1 style="margin:0 0 10px;font-size:28px;">Syncro integration archived</h1>
+      <p style="margin:0 0 16px;line-height:1.6;opacity:.82;"><?= htmlspecialchars(syncro_disabled_message()) ?></p>
+      <a class="btn btn-secondary" style="width:auto;text-decoration:none;" href="<?= htmlspecialchars(BASE_URL) ?>/admin/index.php">Back to admin</a>
+    </section>
+    <?php
+    page_footer();
+    exit;
+}
+
 $diagnostic = null;
 $error = null;
 

@@ -173,6 +173,11 @@ function syncro_root_asset_router_main(array $argv = []): int
     require_once __DIR__ . '/../inc/bootstrap.php';
     require_once __DIR__ . '/../inc/syncro.php';
 
+    if (!syncro_is_enabled()) {
+        echo syncro_disabled_message(), PHP_EOL;
+        return 0;
+    }
+
     $dryRun = !isset($options['apply']);
     $client = [];
     $folderMap = [];

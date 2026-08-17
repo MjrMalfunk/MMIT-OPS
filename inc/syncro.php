@@ -4,6 +4,35 @@ declare(strict_types=1);
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/clients.php';
 
+function syncro_is_enabled(): bool
+{
+    // Backward compatible for existing private configs. Deploying the code alone
+    // does not change production behavior; archived mode requires an explicit
+    // SYNCRO_ENABLED=false in the private OPS configuration.
+    return !defined('SYNCRO_ENABLED') || (bool)SYNCRO_ENABLED;
+}
+
+function syncro_disabled_message(): string
+{
+    return 'Syncro integration is archived and disabled. Historical Syncro IDs and statuses remain read-only in OPS.';
+}
+
+function syncro_disabled_result(bool $successfulSkip = false): array
+{
+    $message = syncro_disabled_message();
+    $result = [
+        'ok' => $successfulSkip,
+        'skipped' => true,
+        'syncro_disabled' => true,
+        'status' => 'SYNCRO_DISABLED',
+        'message' => $message,
+    ];
+    if (!$successfulSkip) {
+        $result['errors'] = [$message];
+    }
+    return $result;
+}
+
 function syncro_is_configured(): bool
 {
     return defined('SYNCRO_API_KEY') && trim((string)SYNCRO_API_KEY) !== ''
@@ -211,6 +240,15 @@ function syncro_block_staging_write_if_needed(string $method, string $path): ?ar
 function syncro_api_request(string $method, string $path, array $query = [], ?array $payload = null): array
 {
     $method = strtoupper($method);
+    if (!syncro_is_enabled()) {
+        static $logged = false;
+        if (!$logged) {
+            syncro_debug_log('integration_disabled', ['status' => 'SYNCRO_DISABLED']);
+            $logged = true;
+        }
+        return syncro_disabled_result(false);
+    }
+
     $stagingBlock = syncro_block_staging_write_if_needed($method, $path);
     if ($stagingBlock !== null) {
         return $stagingBlock;
@@ -2574,6 +2612,7 @@ function syncro_assign_policies_to_folder_tree(int $syncroCustomerId, array $fol
 
 function syncro_provision_client_folder_map(int $clientId, ?int $syncroCustomerId = null, bool $refresh = false): array
 {
+    if (!syncro_is_enabled()) return syncro_disabled_result(true);
     if ($clientId <= 0) {
         return ['ok' => false, 'status' => 'ERROR', 'message' => 'Invalid client for Syncro folder provisioning.', 'errors' => ['Invalid client for Syncro folder provisioning.']];
     }
@@ -2937,6 +2976,7 @@ function syncro_attempt_existing_customer_link(int $clientId, array $payload): a
 
 function syncro_manual_link_existing_customer(int $clientId, int $syncroCustomerId, bool $provisionFolders = true): array
 {
+    if (!syncro_is_enabled()) return syncro_disabled_result(false);
     if ($clientId <= 0) {
         return ['ok' => false, 'errors' => ['Invalid OPS client ID.'], 'status' => 'ERROR'];
     }
@@ -2994,7 +3034,12 @@ function syncro_action_success_message(?string $action): string
 function syncro_status_badge_html(?string $status, ?int $syncroCustomerId = null): string
 {
     $status = strtoupper(trim((string)($status ?: 'PENDING')));
+    $historicalStatus = $status;
+    if (!syncro_is_enabled()) {
+        $status = 'ARCHIVED';
+    }
     $map = [
+        'ARCHIVED' => ['bg' => 'rgba(100,116,139,.20)', 'border' => 'rgba(148,163,184,.32)', 'color' => '#e2e8f0', 'label' => 'ARCHIVED'],
         'PENDING' => ['bg' => 'rgba(148,163,184,.18)', 'border' => 'rgba(148,163,184,.28)', 'color' => '#cbd5e1', 'label' => 'PENDING'],
         'SYNCED' => ['bg' => 'rgba(34,197,94,.18)', 'border' => 'rgba(34,197,94,.28)', 'color' => '#bbf7d0', 'label' => 'SYNCED'],
         'CONFLICT' => ['bg' => 'rgba(245,158,11,.20)', 'border' => 'rgba(245,158,11,.32)', 'color' => '#fde68a', 'label' => 'CONFLICT'],
@@ -3010,11 +3055,15 @@ function syncro_status_badge_html(?string $status, ?int $syncroCustomerId = null
     if (($syncroCustomerId ?? 0) > 0) {
         $html .= '<span style="font-size:12px;opacity:.72;">Customer #' . (int)$syncroCustomerId . '</span>';
     }
+    if ($status === 'ARCHIVED' && $historicalStatus !== '') {
+        $html .= '<span style="font-size:12px;opacity:.72;">Last status: ' . htmlspecialchars($historicalStatus, ENT_QUOTES, 'UTF-8') . '</span>';
+    }
     return $html;
 }
 
 function syncro_retry_contract_sync(int $contractId): array
 {
+    if (!syncro_is_enabled()) return syncro_disabled_result(true);
     $contractId = (int)$contractId;
     if ($contractId <= 0) {
         return ['ok' => false, 'errors' => ['Invalid contract for Syncro retry.']];
@@ -3107,6 +3156,7 @@ function syncro_mark_stale_customer_link(int $clientId, int $syncroCustomerId, a
 
 function syncro_repair_stale_customer_link(int $clientId): array
 {
+    if (!syncro_is_enabled()) return syncro_disabled_result(false);
     if ($clientId <= 0) return ['ok' => false, 'errors' => ['Invalid client for Syncro stale-link repair.']];
     if (!syncro_client_columns_ready()) return ['ok' => false, 'errors' => ['Run the Syncro integration SQL migration first.']];
 
@@ -3150,6 +3200,7 @@ function syncro_mark_client(int $clientId, ?int $syncroCustomerId, string $statu
 
 function syncro_sync_client(int $clientId): array
 {
+    if (!syncro_is_enabled()) return syncro_disabled_result(true);
     if ($clientId <= 0) return ['ok' => false, 'errors' => ['Invalid client for Syncro sync.']];
     if (!syncro_client_columns_ready()) return ['ok' => false, 'errors' => ['Run the Syncro integration SQL migration first.']];
 
@@ -3258,6 +3309,7 @@ function syncro_sync_client(int $clientId): array
 
 function syncro_contract_activation_sync(int $contractId): array
 {
+    if (!syncro_is_enabled()) return syncro_disabled_result(true);
     $contractId = (int)$contractId;
     if ($contractId <= 0) return ['ok' => false, 'errors' => ['Invalid contract for Syncro sync.']];
     $stmt = db()->prepare('SELECT ctr.contract_id, ctr.client_id, ctr.status, c.syncro_customer_id, c.syncro_sync_status FROM contract ctr INNER JOIN clients c ON c.client_id = ctr.client_id WHERE ctr.contract_id = ? LIMIT 1');

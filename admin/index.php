@@ -3,8 +3,10 @@ declare(strict_types=1);
 require_once __DIR__ . '/../inc/bootstrap.php';
 require_once __DIR__ . '/../inc/layout.php';
 require_once __DIR__ . '/../inc/portal_access.php';
+require_once __DIR__ . '/../inc/syncro.php';
 require_login();
 $security = portal_access_security_snapshot();
+$syncroEnabled = syncro_is_enabled();
 page_header('Admin', 'admin');
 ?>
 <div style="display:grid;gap:18px;">
@@ -56,12 +58,16 @@ page_header('Admin', 'admin');
 
     <section class="card admin-card">
       <div style="opacity:.72;text-transform:uppercase;letter-spacing:.08em;font-size:12px;">Syncro onboarding</div>
-      <h2 style="margin:10px 0 10px;">Production mover</h2>
-      <p class="admin-card-copy">Dry-run-first manual moves for READY onboarding assets into allowlisted MMIT production folders.</p>
+      <h2 style="margin:10px 0 10px;"><?= $syncroEnabled ? 'Production mover' : 'Archived integration' ?></h2>
+      <p class="admin-card-copy"><?= $syncroEnabled ? 'Dry-run-first manual moves for READY onboarding assets into allowlisted MMIT production folders.' : 'Syncro API calls and onboarding automation are disabled. Historical customer, asset, folder, and status references remain stored in OPS.' ?></p>
+      <?php if ($syncroEnabled): ?>
       <div class="admin-card-actions">
         <a class="btn btn-secondary btn-inline" style="text-decoration:none;" href="<?= htmlspecialchars(BASE_URL) ?>/admin/syncro_production_mover.php">Open production mover</a>
         <a class="btn btn-secondary btn-inline" style="text-decoration:none;" href="<?= htmlspecialchars(BASE_URL) ?>/admin/syncro_custom_field_metadata_debug.php">Debug field metadata</a>
       </div>
+      <?php else: ?>
+      <div class="admin-card-status"><strong>Status:</strong> Archived / API disabled</div>
+      <?php endif; ?>
     </section>
 
     <section class="card admin-card">

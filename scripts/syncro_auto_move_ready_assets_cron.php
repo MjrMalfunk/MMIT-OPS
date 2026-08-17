@@ -1656,6 +1656,14 @@ function syncro_auto_move_main(array $argv = []): int
     require_once __DIR__ . '/../inc/bootstrap.php';
     require_once __DIR__ . '/../inc/syncro.php';
 
+    if (!syncro_is_enabled()) {
+        syncro_auto_move_log('RUN_SKIPPED', [
+            'status' => 'SYNCRO_DISABLED',
+            'message' => syncro_disabled_message(),
+        ]);
+        return 0;
+    }
+
     $dryRun = !isset($options['apply']);
     $lock = syncro_auto_move_acquire_lock();
     if (empty($lock['ok'])) {

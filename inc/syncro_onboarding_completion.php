@@ -14,6 +14,9 @@ const MMIT_SYNCRO_AUTO_MOVE_TICKET_TYPE = 'MMIT_AUTO_MOVE_READY';
 
 function syncro_onboarding_api_request(string $method, string $path, array $query = [], ?array $payload = null): array
 {
+    if (!syncro_is_enabled()) {
+        return syncro_disabled_result(false);
+    }
     $handler = $GLOBALS['syncro_onboarding_api_request_handler'] ?? null;
     if (is_callable($handler)) {
         return (array)$handler(strtoupper($method), ltrim($path, '/'), $query, $payload);
@@ -409,7 +412,9 @@ function syncro_onboarding_move_ready_asset(int $customerId, int $assetId, ?int 
         return ['ok' => false, 'message' => $message, 'errors' => [$message]];
     }
     $ticketId = (int)($ticket['id'] ?? $ticket['number']);
-    $result = syncro_production_move_asset($customerId, $assetId, $ticketId, false, true, $asset);
+    // Completion is documented on the ready-move ticket, but the ticket remains
+    // open for Keith's final review and manual close.
+    $result = syncro_production_move_asset($customerId, $assetId, $ticketId, false, false, $asset);
     if (!empty($result['ok'])) {
         syncro_onboarding_alert_keith('MMIT asset moved to Production', 'Asset moved to Production.', ['asset_id' => $assetId, 'ticket_id' => $ticketId, 'asset_name' => $assetName]);
         return $result;

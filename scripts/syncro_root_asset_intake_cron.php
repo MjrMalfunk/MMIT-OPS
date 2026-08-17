@@ -318,6 +318,11 @@ function syncro_root_asset_intake_cron_main(array $argv = []): int
     require_once __DIR__ . '/../inc/bootstrap.php';
     require_once __DIR__ . '/../inc/syncro.php';
 
+    if (!syncro_is_enabled()) {
+        echo syncro_disabled_message(), PHP_EOL;
+        return 0;
+    }
+
     $lock = syncro_root_asset_intake_cron_acquire_lock();
     if (empty($lock['ok'])) {
         fwrite(STDERR, (string)($lock['message'] ?? 'Unable to acquire cron lock.') . "\n");

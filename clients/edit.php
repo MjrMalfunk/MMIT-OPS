@@ -5,6 +5,7 @@
  require_once __DIR__ . '/../inc/syncro.php';
  require_once __DIR__ . '/../inc/layout.php';
  require_login();
+ $syncroEnabled = syncro_is_enabled();
  $clientId = (int)($_GET['client_id'] ?? $_POST['client_id'] ?? 0);
  $client = $clientId > 0 ? client_get_by_id($clientId) : null;
  if (!$client) { http_response_code(404); exit('Client not found.'); }
@@ -31,12 +32,12 @@
      'website' => trim($_POST['website'] ?? ''),
      'tax_exempt' => isset($_POST['tax_exempt']) ? 1 : 0,
      'notes' => trim($_POST['notes'] ?? ''),
-     'syncro_now' => isset($_POST['syncro_now']) ? 1 : 0,
+     'syncro_now' => $syncroEnabled && isset($_POST['syncro_now']) ? 1 : 0,
    ];
    try {
      client_update($clientId, $form);
      $messages = ['Client updated.'];
-     if (!empty($form['syncro_now']) && syncro_is_configured()) {
+     if ($syncroEnabled && !empty($form['syncro_now']) && syncro_is_configured()) {
        $syncResult = syncro_sync_client($clientId);
        if (!empty($syncResult['ok'])) {
          $messages[] = syncro_action_success_message((string)($syncResult['action'] ?? ''));
@@ -57,7 +58,7 @@
    <?= csrf_field() ?>
    <input type="hidden" name="client_id" value="<?= $clientId ?>">
    <div class="card" style="padding:18px;display:grid;gap:14px;">
-     <div><h2 style="margin:0 0 4px;font-size:20px;">Company</h2><div style="opacity:.74;font-size:13px;">Edit the core company record used by contracts, invoicing, and Syncro.</div></div>
+     <div><h2 style="margin:0 0 4px;font-size:20px;">Company</h2><div style="opacity:.74;font-size:13px;">Edit the core company record used by contracts and invoicing<?= $syncroEnabled ? ', plus Syncro' : '' ?>.</div></div>
      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
        <div><label>Legal Name *</label><br><input type="text" name="legal_name" required value="<?= htmlspecialchars($form['legal_name']) ?>" style="width:100%;"></div>
        <div><label>DBA Name</label><br><input type="text" name="dba_name" value="<?= htmlspecialchars($form['dba_name']) ?>" style="width:100%;"></div>
@@ -74,7 +75,11 @@
      <div><label>Notes</label><br><textarea name="notes" rows="4" style="width:100%;"><?= htmlspecialchars($form['notes']) ?></textarea></div>
    </div>
    <div class="card" style="padding:18px;display:grid;gap:12px;">
+     <?php if ($syncroEnabled): ?>
      <label style="display:flex;align-items:center;gap:10px;"><input type="checkbox" name="syncro_now" value="1" <?= !empty($form['syncro_now']) ? 'checked' : '' ?>> Update Syncro after save</label>
+     <?php else: ?>
+     <div style="opacity:.78;font-size:13px;">Syncro is archived/disabled. This update will remain in OPS only.</div>
+     <?php endif; ?>
      <div style="display:flex;gap:12px;align-items:center;"><button type="submit">Save Client</button><a href="<?= htmlspecialchars(BASE_URL) ?>/clients/view.php?client_id=<?= $clientId ?>">Cancel</a></div>
    </div>
  </form>
