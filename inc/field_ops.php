@@ -6366,7 +6366,10 @@ function field_ops_unwatch_opportunity(int $opportunityId): array
     return ['ok' => true];
 }
 
-function field_ops_promote_opportunity_to_work_order(int $opportunityId): array
+function field_ops_promote_opportunity_to_work_order(
+    int $opportunityId,
+    bool $allowExpiredRecovery = false
+): array
 {
     field_ops_ensure_opportunity_schema();
 
@@ -6376,12 +6379,23 @@ function field_ops_promote_opportunity_to_work_order(int $opportunityId): array
         return ['ok' => false, 'errors' => ['Opportunity not found.']];
     }
 
+    $opportunityStatus = strtoupper(
+        (string)($op['status'] ?? '')
+    );
+
     if (!empty($op['promoted_work_order_id'])) {
         return ['ok' => true, 'work_order_id' => (int)$op['promoted_work_order_id'], 'message' => 'Already promoted.'];
     }
 
-    if (strtoupper((string)($op['status'] ?? '')) === 'EXPIRED') {
+    if ($opportunityStatus === 'EXPIRED' && !$allowExpiredRecovery) {
         return ['ok' => false, 'errors' => ['Expired opportunities cannot be promoted.']];
+    }
+
+    if ($allowExpiredRecovery && $opportunityStatus !== 'EXPIRED') {
+        return [
+            'ok' => false,
+            'errors' => ['Only expired opportunities can use manual recovery.'],
+        ];
     }
 
     $table = 'field_work_orders';
@@ -6424,6 +6438,11 @@ function field_ops_promote_opportunity_to_work_order(int $opportunityId): array
         'platform_fee' => $fnFees['platform_fee'],
         'insurance_fee' => $fnFees['insurance_fee'],
         'notes' => "Promoted from Field Ops opportunity #{$opportunityId}."
+            . (
+                $allowExpiredRecovery
+                    ? "\nManually recovered after automatic expiration."
+                    : ''
+            )
             . "\nRecommendation: {$op['recommendation']}."
             . "\nScore: {$op['score']}."
             . "\nPay model: " . ($op['pay_model'] ?? 'UNKNOWN') . "."

@@ -27,6 +27,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $result = field_ops_apply_email_event_to_opportunity((int)($_POST['email_event_id'] ?? 0));
     } elseif ($action === 'promote_opportunity') {
         $result = field_ops_promote_opportunity_to_work_order((int)($_POST['opportunity_id'] ?? 0));
+    } elseif ($action === 'recover_expired_opportunity') {
+        $result = field_ops_promote_opportunity_to_work_order(
+            (int)($_POST['opportunity_id'] ?? 0),
+            true
+        );
     } elseif ($action === 'apply_assigned_email_event') {
         $result = field_ops_apply_assigned_email_event_to_work_order((int)($_POST['email_event_id'] ?? 0));
     } elseif ($action === 'apply_declined_email_event') {
@@ -56,6 +61,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'save_email_event' => 'FN email parsed and queued.',
             'apply_email_event' => 'FN email applied to opportunity board.',
             'promote_opportunity' => 'Opportunity promoted to REQUESTED W/O.',
+            'recover_expired_opportunity' => 'Expired opportunity recovered as a REQUESTED W/O.',
             'apply_assigned_email_event' => 'Assigned FN email applied to W/O.',
             'apply_declined_email_event' => 'Declined FN email processed.',
             'ignore_opportunity' => 'Opportunity ignored.',
@@ -742,7 +748,13 @@ OLD,
                   <span class="badge badge-requested">REQUESTED W/O</span>
                 <?php elseif ($status === 'EXPIRED'): ?>
                   <span class="badge red">AUTO-EXPIRED</span>
-                  <div class="muted action-note">Read-only history. A later FieldNation lifecycle email can still reconcile this W/O.</div>
+                  <form method="post" style="margin:0;" onsubmit="return confirm(&quot;Recover this expired opportunity as a REQUESTED W/O? Use this only when the work was actually assigned or completed outside OPS. This does not accept anything on FieldNation.&quot;);">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="action" value="recover_expired_opportunity">
+                    <input type="hidden" name="opportunity_id" value="<?= (int)$op['opportunity_id'] ?>">
+                    <button class="btn btn-primary btn-table" type="submit">Recover as REQUESTED W/O</button>
+                  </form>
+                  <div class="muted action-note">Manual recovery preserves the original expiration timestamp. It does not accept, assign, or alter anything on FieldNation.</div>
                 <?php else: ?>
                   <form method="post" style="margin:0;" onsubmit="return confirm(&quot;Create a REQUESTED W/O only? This will not accept, assign, schedule, or block your calendar.&quot;);">
                     <?= csrf_field() ?>
