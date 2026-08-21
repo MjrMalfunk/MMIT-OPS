@@ -185,6 +185,25 @@ function field_ops_ensure_schema(): void
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     ");
 
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS field_work_order_tracking_corrections (
+            correction_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            work_order_id INT UNSIGNED NOT NULL,
+            old_values LONGTEXT NOT NULL,
+            new_values LONGTEXT NOT NULL,
+            reason TEXT NOT NULL,
+            corrected_by INT UNSIGNED NULL,
+            corrected_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_field_tracking_corrections_work_order (
+                work_order_id
+            ),
+            INDEX idx_field_tracking_corrections_date (
+                corrected_at
+            )
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+          COLLATE=utf8mb4_unicode_ci
+    ");
+
     foreach ([
         'approved_oai_fee' => "DECIMAL(12,2) NULL",
     ] as $column => $definition) {
@@ -2373,7 +2392,10 @@ function field_ops_remove_time_entry(
 
     return ['ok' => true];
 }
-function field_ops_update_work_order_state(array $input): array
+function field_ops_update_work_order_state(
+    array $input,
+    int $userId = 0
+): array
 {
     field_ops_ensure_schema();
 
@@ -2388,26 +2410,22 @@ function field_ops_update_work_order_state(array $input): array
             'errors' => ['Valid work order is required.'],
         ];
     }
+    $trackingChanges = [];
+
     /*
-     * Once revenue is posted, source financial values become historical.
-     * Corrections must use an explicit Accounting adjustment.
+     * Posting freezes only values represented in the General Ledger.
+     * Mileage and time remain operational/tax tracking and may be
+     * corrected with an explicit audit reason.
      */
     if (!empty($existing['accounting_journal_id'])) {
-        $financialFields = [
+        foreach ([
             'gross_pay',
             'platform_fee',
             'insurance_fee',
             'oai_fee',
             'bonus_pay',
             'reimbursement_amount',
-            'mileage',
-            'mileage_rate',
-            'drive_minutes',
-            'onsite_minutes',
-            'admin_minutes',
-        ];
-
-        foreach ($financialFields as $field) {
+        ] as $field) {
             if (!array_key_exists($field, $input)) {
                 continue;
             }
@@ -2424,13 +2442,53 @@ function field_ops_update_work_order_state(array $input): array
                     'ok' => false,
                     'errors' => [
                         'This work order is already posted to Accounting. '
-                        . 'Financial values cannot be rewritten.',
+                        . 'Posted monetary values cannot be rewritten.',
                     ],
                 ];
             }
         }
-    }
 
+        foreach ([
+            'mileage',
+            'mileage_rate',
+            'drive_minutes',
+            'onsite_minutes',
+            'admin_minutes',
+        ] as $field) {
+            if (!array_key_exists($field, $input)) {
+                continue;
+            }
+
+            $incoming = (float)str_replace(
+                [',', '$'],
+                '',
+                trim((string)$input[$field])
+            );
+            $stored = (float)($existing[$field] ?? 0);
+
+            if (abs($incoming - $stored) > 0.004) {
+                $trackingChanges[$field] = [
+                    'old' => $stored,
+                    'new' => $incoming,
+                ];
+            }
+        }
+
+        if (
+            $trackingChanges !== []
+            && trim(
+                (string)($input['tracking_correction_reason'] ?? '')
+            ) === ''
+        ) {
+            return [
+                'ok' => false,
+                'errors' => [
+                    'Explain why posted mileage or time tracking '
+                    . 'is being corrected.',
+                ],
+            ];
+        }
+    }
     $status = field_ops_clean_status(
         (string)($input['status'] ?? $existing['status']),
         field_ops_work_statuses(),
@@ -2767,6 +2825,47 @@ function field_ops_update_work_order_state(array $input): array
         $paidAt,
         $workOrderId,
     ]);
+
+    if ($trackingChanges !== []) {
+        $oldValues = [];
+        $newValues = [];
+
+        foreach ($trackingChanges as $field => $change) {
+            $oldValues[$field] = $change['old'];
+            $newValues[$field] = $change['new'];
+        }
+
+        $oldJson = json_encode($oldValues);
+        $newJson = json_encode($newValues);
+
+        if (!is_string($oldJson) || !is_string($newJson)) {
+            return [
+                'ok' => false,
+                'errors' => [
+                    'Unable to encode the tracking correction audit.',
+                ],
+            ];
+        }
+
+        db()->prepare("
+            INSERT INTO field_work_order_tracking_corrections (
+                work_order_id,
+                old_values,
+                new_values,
+                reason,
+                corrected_by,
+                corrected_at
+            ) VALUES (?, ?, ?, ?, ?, NOW())
+        ")->execute([
+            $workOrderId,
+            $oldJson,
+            $newJson,
+            trim(
+                (string)($input['tracking_correction_reason'] ?? '')
+            ),
+            $userId > 0 ? $userId : null,
+        ]);
+    }
 
     return ['ok' => true];
 }

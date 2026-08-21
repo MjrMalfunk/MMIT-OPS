@@ -126,7 +126,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             (int)(current_user()['user_id'] ?? 0)
         );
     } elseif ($action === 'update_state') {
-        $result = field_ops_update_work_order_state($_POST);
+        $result = field_ops_update_work_order_state(
+            $_POST,
+            (int)(current_user()['user_id'] ?? 0)
+        );
     } elseif ($action === 'post_accounting') {
         $result = field_ops_post_work_order_to_accounting(
             (int)($_POST['work_order_id'] ?? 0),
@@ -1351,6 +1354,20 @@ $receivableStateClass = match ($receivableState) {
         <label>Drive minutes <input name="drive_minutes" value="<?= (int)$wo['drive_minutes'] ?>"></label>
         <label>Onsite minutes <input name="onsite_minutes" value="<?= (int)$wo['onsite_minutes'] ?>"></label>
         <label>Admin minutes <input name="admin_minutes" value="<?= (int)$wo['admin_minutes'] ?>"></label>
+
+        <?php if (!empty($wo['accounting_journal_id'])): ?>
+          <label class="full">
+            Tracking correction reason
+            <textarea
+              name="tracking_correction_reason"
+              placeholder="Original mileage recorded one way; corrected to the complete business route."
+            ></textarea>
+            <span class="field-hint">
+              Required only when correcting posted mileage or time.
+              The Accounting journal remains unchanged.
+            </span>
+          </label>
+        <?php endif; ?>
 
         <div class="full actions">
           <button class="btn btn-primary" type="submit">Update job</button>
