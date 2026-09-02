@@ -34,6 +34,14 @@ function current_user(): ?array {
     return $_SESSION['user'] ?? null;
 }
 
+function current_user_is_internal(): bool {
+    $user = current_user();
+
+    return is_array($user)
+        && strtoupper(trim((string)($user['user_type'] ?? ''))) === 'INTERNAL'
+        && (int)($user['user_id'] ?? 0) > 0;
+}
+
 function require_login(): void {
     if (!current_user()) {
         $next = $_SERVER['REQUEST_URI'] ?? '/dashboard/index.php';
@@ -44,6 +52,14 @@ function require_login(): void {
             $next = '/dashboard/index.php';
         }
         header('Location: ' . BASE_URL . '/login.php?next=' . rawurlencode($next));
+        exit;
+    }
+
+    if (!current_user_is_internal()) {
+        http_response_code(403);
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        header('Content-Type: text/plain; charset=UTF-8');
+        echo 'This account is not authorized to access MMIT OPS.';
         exit;
     }
 }
@@ -282,7 +298,7 @@ function auth_login_attempt(string $email, string $password): array {
 
     $stmt = db()->prepare(
         'SELECT user_id, email, display_name, password_hash, user_type, is_active
-         FROM portal_user WHERE email = ? LIMIT 1'
+         FROM portal_user WHERE email = ? AND user_type = \'INTERNAL\' LIMIT 1'
     );
     $stmt->execute([$email]);
     $u = $stmt->fetch();

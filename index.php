@@ -46,7 +46,13 @@ if (!function_exists('ops_same_origin_login_post')) {
 
 $next = ops_safe_next_path((string)($_GET['next'] ?? $_POST['next'] ?? ''), '/dashboard/index.php');
 
-if (current_user()) {
+if (current_user() && !current_user_is_internal()) {
+    auth_logout();
+    header('Location: ' . BASE_URL . '/login.php?account=unauthorized');
+    exit;
+}
+
+if (current_user_is_internal()) {
     header('Location: ' . BASE_URL . $next);
     exit;
 }
