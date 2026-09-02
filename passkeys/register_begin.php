@@ -39,6 +39,15 @@ if (!is_string($tok) || empty($_SESSION['csrf_token']) || !hash_equals((string)$
 $cu = current_user();
 $userId = (int)$cu['user_id'];
 
+if (!security_user_has_totp($userId)) {
+    http_response_code(409);
+    echo json_encode([
+        'ok' => false,
+        'error' => 'Configure your authenticator and recovery codes before registering a passkey.',
+    ]);
+    exit;
+}
+
 $rpEntity = PublicKeyCredentialRpEntity::create(
     APP_NAME,
     webauthn_rp_id(),

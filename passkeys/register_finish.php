@@ -27,6 +27,15 @@ if ((int)($cu['user_id'] ?? 0) !== (int)$session['user_id']) {
     echo json_encode(['ok' => false, 'error' => 'User mismatch.']);
     exit;
 }
+if (!security_user_has_totp((int)$cu['user_id'])) {
+    unset($_SESSION['webauthn_registration']);
+    http_response_code(409);
+    echo json_encode([
+        'ok' => false,
+        'error' => 'Configure your authenticator and recovery codes before registering a passkey.',
+    ]);
+    exit;
+}
 
 /**
  * Return the first non-empty array payload we can use as a credential object.

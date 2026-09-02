@@ -337,8 +337,11 @@ page_header('Security', 'admin');
       </div>
 
       <div class="security-action-row">
-        <button type="button" id="registerPasskeyBtn" class="btn btn-secondary btn-inline">Register a passkey</button>
+        <button type="button" id="registerPasskeyBtn" class="btn btn-secondary btn-inline"<?= (int)$mfa['totp_enabled'] === 1 ? '' : ' disabled' ?>>Register a passkey</button>
       </div>
+      <?php if ((int)$mfa['totp_enabled'] !== 1): ?>
+        <p class="security-inline-status">Complete authenticator setup and save your recovery codes before registering a passkey.</p>
+      <?php endif; ?>
     </section>
   </div>
 

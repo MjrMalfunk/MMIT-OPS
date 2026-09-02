@@ -77,6 +77,37 @@ function ops_mail_sandbox_to(): string
     return ops_mail_config_string('MAIL_SANDBOX_TO', '');
 }
 
+function ops_mail_sandbox_allowed_recipients(): array
+{
+    $raw = ops_mail_config_string('MAIL_SANDBOX_ALLOWED_RECIPIENTS', '');
+    if ($raw === '') {
+        return [];
+    }
+
+    $parts = preg_split('/[\s,;]+/', strtolower($raw), -1, PREG_SPLIT_NO_EMPTY);
+    if (!is_array($parts)) {
+        return [];
+    }
+
+    $allowed = [];
+    foreach ($parts as $email) {
+        $email = strtolower(trim((string) $email));
+        if ($email !== '' && filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            $allowed[$email] = true;
+        }
+    }
+
+    return array_keys($allowed);
+}
+
+function ops_mail_sandbox_allows_recipient(string $email): bool
+{
+    $email = strtolower(trim($email));
+
+    return $email !== ''
+        && in_array($email, ops_mail_sandbox_allowed_recipients(), true);
+}
+
 function ops_mail_primary_transport(): string
 {
     return strtolower(ops_mail_config_string('MAIL_TRANSPORT_PRIMARY', 'graph'));
@@ -228,7 +259,11 @@ function ops_mail_apply_sandbox(array $prepared): array
     $prepared['effective_to'] = $prepared['to'];
     $prepared['sandbox_note'] = '';
 
-    if (ops_mail_sandbox_enabled()) {
+    $recipientAllowed = ops_mail_sandbox_allows_recipient(
+        (string) $prepared['original_to']
+    );
+
+    if (ops_mail_sandbox_enabled() && !$recipientAllowed) {
         $sandboxTo = ops_mail_sandbox_to();
         if ($sandboxTo === '' || !filter_var($sandboxTo, FILTER_VALIDATE_EMAIL)) {
             $prepared['sandbox_error'] = 'MAIL_SANDBOX_ENABLED is true but MAIL_SANDBOX_TO is missing or invalid. Email was not sent.';

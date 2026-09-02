@@ -33,6 +33,15 @@ page_header('Admin', 'admin');
     </section>
 
     <section class="card admin-card">
+      <div style="opacity:.72;text-transform:uppercase;letter-spacing:.08em;font-size:12px;">Internal access</div>
+      <h2 style="margin:10px 0 10px;">OPS users</h2>
+      <p class="admin-card-copy">Invite trusted operators, review their security enrollment, and enable or disable access.</p>
+      <div class="admin-card-actions">
+        <a class="btn btn-secondary btn-inline" style="text-decoration:none;" href="<?= htmlspecialchars(BASE_URL) ?>/admin/ops_users.php">Manage OPS users</a>
+      </div>
+    </section>
+
+    <section class="card admin-card">
       <div style="opacity:.72;text-transform:uppercase;letter-spacing:.08em;font-size:12px;">Portal access</div>
       <h2 style="margin:10px 0 10px;">Invites + secure links</h2>
       <p class="admin-card-copy">Invite the client contacts who should have portal access and choose exactly what each login can see.</p>

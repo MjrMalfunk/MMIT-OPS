@@ -153,6 +153,10 @@ define('MAIL_SENDER_DEFAULT_REPLY_TO_EMAIL', 'billing@midwestmanagedit.com');
 // Sandbox redirect. Leave OFF in production unless you intentionally want all mail redirected.
 define('MAIL_SANDBOX_ENABLED', false);
 define('MAIL_SANDBOX_TO', ''); // Required valid email when MAIL_SANDBOX_ENABLED=true, otherwise mail send will fail safe.
+// Optional comma/semicolon/space-separated exact recipients allowed to receive
+// real staging mail. Every other recipient remains redirected to MAIL_SANDBOX_TO.
+// Leave empty unless a staging tester explicitly needs a real message.
+define('MAIL_SANDBOX_ALLOWED_RECIPIENTS', '');
 
 // Microsoft Graph app-only mail. Reuse the same app registration used by the portal mailer.
 define('MAIL_GRAPH_TENANT_ID', ONEDRIVE_TENANT_ID);
