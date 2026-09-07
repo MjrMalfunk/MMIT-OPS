@@ -6,9 +6,52 @@ require_once __DIR__ . '/field_vehicles.php';
 /**
  * Lyft/rideshare profitability tracking.
  *
- * Accounting journals are intentionally excluded until the real Lyft
- * earnings statement and Lyft Direct transaction formats are validated.
+ * Supports Lyft, Uber and Amazon Flex. Posting uses explicit payout mappings.
  */
+
+/** Supported services; category is derived so it cannot disagree with platform. */
+function field_gig_services(): array {
+    return ['LYFT' => 'Lyft', 'UBER' => 'Uber', 'AMAZON_FLEX' => 'Amazon Flex'];
+}
+function field_gig_filter_platforms(string $filter): array {
+    return match ($filter) {
+        'ALL' => [], 'RIDESHARE' => ['LYFT', 'UBER'],
+        'DELIVERY', 'AMAZON_FLEX' => ['AMAZON_FLEX'],
+        'LYFT' => ['LYFT'], 'UBER' => ['UBER'],
+        default => throw new InvalidArgumentException('Invalid Gig Work filter.'),
+    };
+}
+function field_gig_block_end(string $start, mixed $hours): array {
+    if (!is_numeric($hours) || !is_finite((float)$hours)
+        || (float)$hours <= 0 || (float)$hours > 24) {
+        throw new InvalidArgumentException('Block hours must be greater than zero and at most 24.');
+    }
+    $rawMinutes = (float)$hours * 60;
+    if (abs($rawMinutes - round($rawMinutes)) > 0.00001) {
+        throw new InvalidArgumentException('Block length must resolve to whole minutes.');
+    }
+    $minutes = (int)round($rawMinutes);
+    $end = (new DateTimeImmutable($start))->modify('+' . $minutes . ' minutes');
+    return ['minutes' => $minutes, 'end' => $end->format('Y-m-d H:i:s')];
+}
+/** Account codes are deployment configuration, never guessed from account names. */
+function field_gig_account_codes(array $shift): array {
+    $destination = (string)($shift['payout_destination'] ?? '');
+    $platform = (string)($shift['platform'] ?? 'LYFT');
+    $payouts = ['LYFT_DIRECT' => '1020', 'PERSONAL_BANK' => '3100'];
+    $income = ['LYFT' => '4110', 'UBER' => '4110', 'AMAZON_FLEX' => '4120'];
+    if (defined('OPS_GIG_PAYOUT_ACCOUNT_CODES') && is_array(OPS_GIG_PAYOUT_ACCOUNT_CODES)) {
+        $payouts = array_replace($payouts, OPS_GIG_PAYOUT_ACCOUNT_CODES);
+    }
+    if (defined('OPS_GIG_INCOME_ACCOUNT_CODES') && is_array(OPS_GIG_INCOME_ACCOUNT_CODES)) {
+        $income = array_replace($income, OPS_GIG_INCOME_ACCOUNT_CODES);
+    }
+    if (empty($payouts[$destination]) || empty($income[$platform])) {
+        throw new RuntimeException('Shift saved, but Accounting mapping is not configured for this service/payout destination.');
+    }
+    return [(string)$payouts[$destination], (string)$income[$platform]];
+}
+
 function field_rideshare_ensure_schema(): void
 {
     static $schemaReady = false;
@@ -69,6 +112,13 @@ function field_rideshare_ensure_schema(): void
     );
 
     foreach ([
+        'scheduled_minutes' => 'INT UNSIGNED NULL',
+        'flex_finish_estimated' => 'TINYINT(1) NOT NULL DEFAULT 0',
+        'flex_station' => 'VARCHAR(100) NULL',
+        'packages_assigned' => 'INT UNSIGNED NULL',
+        'packages_delivered' => 'INT UNSIGNED NULL',
+        'packages_returned' => 'INT UNSIGNED NULL',
+        'stops_completed' => 'INT UNSIGNED NULL',
         'deadhead_miles' =>
             'DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER business_miles',
         'deadhead_minutes' =>
@@ -522,6 +572,14 @@ function field_rideshare_save_shift(
         );
     }
 
+    $platform = strtoupper(trim((string)($input['platform'] ?? 'LYFT')));
+    if (!isset(field_gig_services()[$platform])) {
+        throw new InvalidArgumentException('Select a supported Gig Work service.');
+    }
+    $isFlex = $platform === 'AMAZON_FLEX';
+    $scheduledMinutes = null;
+    $finishEstimated = 0;
+    $flexDetails = [];
     $startedAt = field_rideshare_normalize_datetime(
         $input['started_at'] ?? null,
         'Shift start'
@@ -532,6 +590,31 @@ function field_rideshare_save_shift(
         'Shift end'
     );
 
+    if ($isFlex) {
+        if ($startedAt === null) {
+            throw new InvalidArgumentException('Enter the Flex block start.');
+        }
+        $block = field_gig_block_end($startedAt, $input['block_hours'] ?? null);
+        $scheduledMinutes = $block['minutes'];
+        if ($endedAt === null) {
+            $endedAt = $block['end'];
+            $finishEstimated = 1;
+        }
+        if (strtotime($endedAt) <= strtotime($startedAt)) {
+            throw new InvalidArgumentException('Actual finish must be after block start.');
+        }
+    }
+    foreach (['packages_assigned', 'packages_delivered', 'packages_returned', 'stops_completed'] as $field) {
+        $raw = trim((string)($input[$field] ?? ''));
+        if ($isFlex && $raw !== '' && (!ctype_digit($raw) || (float)$raw > 100000)) {
+            throw new InvalidArgumentException('Package and stop counts must be nonnegative whole numbers.');
+        }
+        $flexDetails[$field] = $isFlex && $raw !== '' ? (int)$raw : null;
+    }
+    if ($isFlex && $flexDetails['packages_assigned'] !== null
+        && ($flexDetails['packages_delivered'] ?? 0) + ($flexDetails['packages_returned'] ?? 0) > $flexDetails['packages_assigned']) {
+        throw new InvalidArgumentException('Delivered plus returned packages cannot exceed assigned packages.');
+    }
     if (($startedAt === null) !== ($endedAt === null)) {
         throw new InvalidArgumentException(
             'Enter both shift start and shift end.'
@@ -584,6 +667,12 @@ function field_rideshare_save_shift(
         (int)($input['passenger_minutes'] ?? 0)
     );
 
+    if ($isFlex) {
+        // Rideshare utilization is not applicable to delivery blocks.
+        $bookedMinutes = $passengerMinutes = 0;
+        $input['booked_miles'] = $input['passenger_miles'] = 0;
+    }
+
     if (
         $onlineMinutes > 0
         && $bookedMinutes > $onlineMinutes
@@ -632,7 +721,7 @@ function field_rideshare_save_shift(
         trim(
             (string)(
                 $input['payout_destination']
-                ?? 'LYFT_DIRECT'
+                ?? ($isFlex ? 'PERSONAL_BANK' : ($platform === 'LYFT' ? 'LYFT_DIRECT' : 'OTHER'))
             )
         )
     );
@@ -640,7 +729,7 @@ function field_rideshare_save_shift(
     if (
         !in_array(
             $payoutDestination,
-            ['LYFT_DIRECT', 'PNC', 'OTHER'],
+            ['LYFT_DIRECT', 'PERSONAL_BANK', 'PNC', 'OTHER'],
             true
         )
     ) {
@@ -651,7 +740,11 @@ function field_rideshare_save_shift(
 
     $values = [
         'vehicle_id' => $vehicleId,
-        'platform' => substr($platform, 0, 40),
+        'platform' => $platform,
+        'scheduled_minutes' => $scheduledMinutes,
+        'flex_finish_estimated' => $finishEstimated,
+        'flex_station' => $isFlex ? substr(trim((string)($input['flex_station'] ?? '')), 0, 100) : null,
+        ...$flexDetails,
         'shift_date' => $shiftDate,
         'started_at' => $startedAt,
         'ended_at' => $endedAt,
@@ -765,6 +858,13 @@ function field_rideshare_save_shift(
                 UPDATE field_rideshare_shifts
                 SET vehicle_id = :vehicle_id,
                     platform = :platform,
+                    scheduled_minutes = :scheduled_minutes,
+                    flex_finish_estimated = :flex_finish_estimated,
+                    flex_station = :flex_station,
+                    packages_assigned = :packages_assigned,
+                    packages_delivered = :packages_delivered,
+                    packages_returned = :packages_returned,
+                    stops_completed = :stops_completed,
                     shift_date = :shift_date,
                     started_at = :started_at,
                     ended_at = :ended_at,
@@ -862,7 +962,8 @@ function field_rideshare_save_shift(
 
 function field_rideshare_shifts(
     ?string $dateFrom = null,
-    ?string $dateTo = null
+    ?string $dateTo = null,
+    string $serviceFilter = 'ALL'
 ): array {
     field_rideshare_ensure_schema();
 
@@ -879,6 +980,11 @@ function field_rideshare_shifts(
         $params[] = $dateTo;
     }
 
+    $platforms = field_gig_filter_platforms($serviceFilter);
+    if ($platforms) {
+        $where[] = 's.platform IN (' . implode(',', array_fill(0, count($platforms), '?')) . ')';
+        array_push($params, ...$platforms);
+    }
     $whereSql = $where
         ? 'WHERE ' . implode(' AND ', $where)
         : '';
@@ -901,12 +1007,15 @@ function field_rideshare_shifts(
 
 function field_rideshare_summary(
     ?string $dateFrom = null,
-    ?string $dateTo = null
+    ?string $dateTo = null,
+    string $serviceFilter = 'ALL'
 ): array {
-    $shifts = field_rideshare_shifts($dateFrom, $dateTo);
+    $shifts = field_rideshare_shifts($dateFrom, $dateTo, $serviceFilter);
 
     $summary = [
         'shift_count' => count($shifts),
+        'rideshare_online_minutes' => 0,
+        'estimated_shift_count' => 0,
         'business_miles' => 0.0,
         'deadhead_miles' => 0.0,
         'total_business_miles' => 0.0,
@@ -922,6 +1031,10 @@ function field_rideshare_summary(
     ];
 
     foreach ($shifts as $shift) {
+        if (in_array($shift['platform'], ['LYFT', 'UBER'], true)) {
+            $summary['rideshare_online_minutes'] += (int)$shift['online_minutes'];
+        }
+        $summary['estimated_shift_count'] += !empty($shift['flex_finish_estimated']) ? 1 : 0;
         $summary['business_miles'] +=
             (float)$shift['business_miles'];
 
@@ -1127,10 +1240,14 @@ function field_rideshare_post_shift_to_accounting(
              LIMIT 1'
         );
 
-        $accountStatement->execute(['1020']);
+        if (!empty($shift['flex_finish_estimated'])) {
+            throw new RuntimeException('Enter the actual Flex finish time before posting to Accounting.');
+        }
+        [$payoutCode, $incomeCode] = field_gig_account_codes($shift);
+        $accountStatement->execute([$payoutCode]);
         $lyftDirectAccountId = (int)$accountStatement->fetchColumn();
 
-        $accountStatement->execute(['4110']);
+        $accountStatement->execute([$incomeCode]);
         $incomeAccountId = (int)$accountStatement->fetchColumn();
 
         if ($lyftDirectAccountId <= 0 || $incomeAccountId <= 0) {
@@ -1152,6 +1269,7 @@ function field_rideshare_post_shift_to_accounting(
             [
                 'journal_date' => (string)$shift['shift_date'],
                 'source_type' => 'RIDESHARE_SHIFT',
+                'business_line_code' => strtoupper($platform),
                 'source_id' => $shiftId,
                 'reference_number' => strtoupper($platform)
                     . '-SHIFT-'
@@ -1167,13 +1285,13 @@ function field_rideshare_post_shift_to_accounting(
                     'account_id' => $lyftDirectAccountId,
                     'debit_amount' => $amount,
                     'credit_amount' => '0.00',
-                    'line_memo' => 'Rideshare earnings deposited.',
+                    'line_memo' => 'Gig work earnings: ' . (string)$shift['payout_destination'],
                 ],
                 [
                     'account_id' => $incomeAccountId,
                     'debit_amount' => '0.00',
                     'credit_amount' => $amount,
-                    'line_memo' => 'Rideshare income.',
+                    'line_memo' => 'Gig work income: ' . $platform,
                 ],
             ]
         );

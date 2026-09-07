@@ -69,8 +69,13 @@ function accounting_post_source_journal(
 
     $businessLineCode = match ($sourceType) {
         'FIELD_WORK_ORDER' => 'FIELD_NATION',
-        'RIDESHARE_SHIFT' => 'LYFT',
+        'RIDESHARE_SHIFT' => strtoupper(trim((string)($journal['business_line_code'] ?? 'LYFT'))),
     };
+
+    if ($sourceType === 'RIDESHARE_SHIFT'
+        && !in_array($businessLineCode, ['LYFT', 'UBER', 'AMAZON_FLEX'], true)) {
+        throw new InvalidArgumentException('Unsupported gig work business line.');
+    }
 
     $businessLineStatement = $pdo->prepare(
         'SELECT business_line_id

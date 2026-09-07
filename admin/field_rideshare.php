@@ -94,7 +94,13 @@ if (
     [$dateFrom, $dateTo] = [$dateTo, $dateFrom];
 }
 
+$serviceFilter = strtoupper(trim((string)($_GET['service'] ?? 'ALL')));
+try { field_gig_filter_platforms($serviceFilter); }
+catch (InvalidArgumentException $e) { $serviceFilter = 'ALL'; }
+$serviceOptions = ['ALL' => 'All gig work', 'RIDESHARE' => 'Rideshare — all',
+    'LYFT' => 'Lyft', 'UBER' => 'Uber', 'DELIVERY' => 'Delivery — all', 'AMAZON_FLEX' => 'Amazon Flex'];
 $rangeQuery = [
+    'service' => $serviceFilter,
     'range' => $range,
 ];
 
@@ -138,7 +144,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             header(
                 'Location: '
                 . BASE_URL
-                . '/admin/field_rideshare.php'
+                . '/admin/field_rideshare.php?' . http_build_query($rangeQuery)
             );
             exit;
         }
@@ -148,10 +154,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         );
 
         $_SESSION['flash_msg'] = !empty($_POST['shift_id'])
-            ? 'Lyft shift updated.'
-            : 'Lyft shift saved.';
+            ? 'Gig work shift updated.'
+            : 'Gig work shift saved.';
 
         $returnQuery = [
+            'service' => $serviceFilter,
             'range' => trim((string)($_POST['return_range'] ?? 'week')),
         ];
 
@@ -208,7 +215,7 @@ $form = $_SERVER['REQUEST_METHOD'] === 'POST'
 $form += [
     'shift_id' => 0,
     'vehicle_id' => (int)($primaryVehicle['vehicle_id'] ?? 0),
-    'platform' => 'LYFT',
+    'platform' => isset(field_gig_services()[$serviceFilter]) ? $serviceFilter : 'LYFT',
     'shift_date' => $today->format('Y-m-d'),
     'started_at' => '',
     'ended_at' => '',
@@ -230,8 +237,22 @@ $form += [
     'direct_trip_costs' => '',
     'payout_destination' => 'LYFT_DIRECT',
     'notes' => '',
+    'block_hours' => '',
+    'flex_station' => '',
+    'packages_assigned' => '',
+    'packages_delivered' => '',
+    'packages_returned' => '',
+    'stops_completed' => '',
 ];
 
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    if ($editShift) {
+        $form['block_hours'] = !empty($editShift['scheduled_minutes']) ? (float)$editShift['scheduled_minutes'] / 60 : '';
+        if (!empty($editShift['flex_finish_estimated'])) { $form['ended_at'] = ''; }
+    } elseif ($form['platform'] === 'AMAZON_FLEX') {
+        $form['payout_destination'] = 'PERSONAL_BANK';
+    }
+}
 $breakRows = [];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -267,13 +288,13 @@ if ($breakRows === []) {
 $from = $dateFrom?->format('Y-m-d');
 $to = $dateTo?->format('Y-m-d');
 
-$summary = field_rideshare_summary($from, $to);
-$shifts = field_rideshare_shifts($from, $to);
+$summary = field_rideshare_summary($from, $to, $serviceFilter);
+$shifts = field_rideshare_shifts($from, $to, $serviceFilter);
 
-$utilization = (int)$summary['online_minutes'] > 0
+$utilization = (int)$summary['rideshare_online_minutes'] > 0
     ? round(
         ((int)$summary['booked_minutes']
-        / (int)$summary['online_minutes']) * 100,
+        / (int)$summary['rideshare_online_minutes']) * 100,
         1
     )
     : null;
@@ -289,9 +310,10 @@ $rangeLabel = match ($range) {
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Lyft Performance · <?= $h(APP_NAME) ?></title>
+  <title>Gig Work Performance · <?= $h(APP_NAME) ?></title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
+[hidden] { display: none !important; }
     :root {
       color-scheme: dark;
       --bg: #081426;
@@ -743,7 +765,7 @@ $rangeLabel = match ($range) {
   <header class="topbar">
     <div>
       <div class="eyebrow">OPS income intelligence</div>
-      <h1>Lyft Performance</h1>
+      <h1>Gig Work Performance</h1>
       <p style="margin:0;">
         Measure cash earned against the Tucson’s real operating cost.
       </p>
@@ -792,7 +814,7 @@ $rangeLabel = match ($range) {
         ] as $key => $label): ?>
           <a
             class="btn <?= $range === $key ? 'active' : '' ?>"
-            href="<?= $h(BASE_URL) ?>/admin/field_rideshare.php?range=<?= $h($key) ?>"
+            href="<?= $h(BASE_URL) ?>/admin/field_rideshare.php?<?= $h(http_build_query(['range' => $key, 'service' => $serviceFilter])) ?>"
             <?= $range === $key ? 'aria-current="page"' : '' ?>
           >
             <?= $h($label) ?>
@@ -801,9 +823,26 @@ $rangeLabel = match ($range) {
       </nav>
     </div>
 
+    <form method="get" class="custom-range">
+      <?php foreach ($rangeQuery as $key => $value): if ($key === 'service') continue; ?>
+        <input type="hidden" name="<?= $h($key) ?>" value="<?= $h($value) ?>">
+      <?php endforeach; ?>
+      <label>Category / service
+        <select name="service">
+          <?php foreach ($serviceOptions as $value => $label): ?>
+            <option value="<?= $h($value) ?>" <?= $serviceFilter === $value ? 'selected' : '' ?>><?= $h($label) ?></option>
+          <?php endforeach; ?>
+        </select>
+      </label>
+      <button type="submit">Apply service</button>
+    </form>
+    <?php if ($summary['estimated_shift_count'] > 0): ?>
+      <p role="status"><?= (int)$summary['estimated_shift_count'] ?> Flex shift(s) use scheduled finish estimates. Hourly figures are provisional until actual finish is entered.</p>
+    <?php endif; ?>
     <?php if ($range === 'custom'): ?>
       <form class="custom-range" method="get">
         <input type="hidden" name="range" value="custom">
+        <input type="hidden" name="service" value="<?= $h($serviceFilter) ?>">
 
         <label>
           From
@@ -830,7 +869,7 @@ $rangeLabel = match ($range) {
     <?php endif; ?>
   </section>
 
-  <section class="stats" aria-label="Lyft performance summary">
+  <section class="stats" aria-label="Gig work performance summary">
     <article class="card stat">
       <div class="stat-label">Recognized revenue</div>
       <div class="stat-value">
@@ -887,11 +926,11 @@ $rangeLabel = match ($range) {
     </article>
 
     <article class="card stat">
-      <div class="stat-label">Booked utilization</div>
+      <div class="stat-label">Rideshare booked utilization</div>
       <div class="stat-value">
         <?= $utilization !== null ? $h(number_format($utilization, 1)) . '%' : '—' ?>
       </div>
-      <div class="stat-detail">Booked time divided by online time</div>
+      <div class="stat-detail">Lyft/Uber booked time divided by their online time</div>
     </article>
 
     <article class="card stat rate">
@@ -922,9 +961,9 @@ $rangeLabel = match ($range) {
     <article class="card">
       <div class="section-heading">
         <div>
-          <h2><?= $editShift ? 'Edit Lyft shift' : 'Record Lyft shift' ?></h2>
+          <h2><?= $editShift ? 'Edit Gig work shift' : 'Record Gig work shift' ?></h2>
           <p style="margin:5px 0 16px;">
-            Enter the figures from Lyft and your beginning/ending odometer.
+            Enter the figures from your service and your beginning/ending odometer.
           </p>
         </div>
       </div>
@@ -956,6 +995,33 @@ $rangeLabel = match ($range) {
         <input type="hidden" name="return_to" value="<?= $h($to) ?>">
 
         <div class="form-grid">
+          <label>Service
+            <select name="platform" id="platform" required>
+              <optgroup label="Rideshare">
+                <?php foreach (['LYFT' => 'Lyft', 'UBER' => 'Uber'] as $value => $label): ?>
+                  <option value="<?= $h($value) ?>" <?= $form['platform'] === $value ? 'selected' : '' ?>><?= $h($label) ?></option>
+                <?php endforeach; ?>
+              </optgroup>
+              <optgroup label="Delivery">
+                <option value="AMAZON_FLEX" <?= $form['platform'] === 'AMAZON_FLEX' ? 'selected' : '' ?>>Amazon Flex</option>
+              </optgroup>
+            </select>
+          </label>
+          <fieldset id="flex-fields">
+            <legend>Flex block</legend>
+            <label>Block hours
+              <input name="block_hours" id="block_hours" type="number" min="0.25" max="24" step="0.25" value="<?= $h($form['block_hours']) ?>">
+            </label>
+            <label>Scheduled finish (calculated)
+              <input type="datetime-local" id="scheduled_end" readonly>
+            </label>
+            <p id="flex-timing" aria-live="polite"></p>
+            <p>Actual finish can be earlier or later. If blank, scheduled finish is used as an estimate. Include required station returns before actual finish; record home travel separately.</p>
+            <label>Station <input name="flex_station" maxlength="100" value="<?= $h($form['flex_station']) ?>"></label>
+            <?php foreach (['packages_assigned' => 'Packages assigned', 'packages_delivered' => 'Packages delivered', 'packages_returned' => 'Packages returned', 'stops_completed' => 'Stops completed'] as $key => $label): ?>
+              <label><?= $h($label) ?><input type="number" name="<?= $h($key) ?>" min="0" max="100000" step="1" value="<?= $h($form[$key]) ?>"></label>
+            <?php endforeach; ?>
+          </fieldset>
           <label>
             Vehicle
             <select name="vehicle_id" id="vehicle_id" required>
@@ -987,7 +1053,7 @@ $rangeLabel = match ($range) {
           </label>
 
           <label>
-            Went online
+            <span id="start-label">Went online</span>
             <input
               type="datetime-local"
               name="started_at"
@@ -997,7 +1063,7 @@ $rangeLabel = match ($range) {
           </label>
 
           <label>
-            Went offline
+            <span id="end-label">Went offline</span>
             <input
               type="datetime-local"
               name="ended_at"
@@ -1158,8 +1224,7 @@ $rangeLabel = match ($range) {
             </label>
 
             <p class="full" style="margin:0;">
-              Include return-home or repositioning travel directly tied
-              to this outing after you went offline.
+              Enter only work travel miles outside the starting/ending odometer span above. Miles already included there must not be added again. Enter travel minutes outside the work start/finish interval.
             </p>
           </fieldset>
 
@@ -1167,7 +1232,7 @@ $rangeLabel = match ($range) {
             <legend>Time and utilization</legend>
 
             <label>
-              Online minutes
+              <span id="work-minutes-label">Online minutes</span>
               <input
                 type="number"
                 name="online_minutes"
@@ -1178,7 +1243,7 @@ $rangeLabel = match ($range) {
               >
             </label>
 
-            <label>
+            <label data-rideshare-only>
               Booked minutes
               <input
                 type="number"
@@ -1189,7 +1254,7 @@ $rangeLabel = match ($range) {
               >
             </label>
 
-            <label>
+            <label data-rideshare-only>
               Passenger minutes
               <input
                 type="number"
@@ -1200,7 +1265,7 @@ $rangeLabel = match ($range) {
               >
             </label>
 
-            <label>
+            <label data-rideshare-only>
               Booked miles
               <input
                 type="number"
@@ -1212,7 +1277,7 @@ $rangeLabel = match ($range) {
               >
             </label>
 
-            <label>
+            <label data-rideshare-only>
               Passenger miles
               <input
                 type="number"
@@ -1229,12 +1294,12 @@ $rangeLabel = match ($range) {
             <legend>Earnings and costs</legend>
 
             <?php foreach ([
-                'base_ride_earnings' => 'Base ride earnings',
+                'base_ride_earnings' => 'Base earnings / block payment',
                 'tips' => 'Tips',
                 'bonuses' => 'Bonuses',
                 'adjustments' => 'Adjustments',
                 'toll_reimbursements' => 'Toll reimbursements',
-                'platform_fees' => 'Lyft platform fees',
+                'platform_fees' => 'Platform fees',
                 'direct_trip_costs' => 'Direct trip costs',
             ] as $name => $label): ?>
               <label>
@@ -1260,6 +1325,7 @@ $rangeLabel = match ($range) {
             <select name="payout_destination">
               <?php foreach ([
                   'LYFT_DIRECT' => 'Lyft Direct',
+                  'PERSONAL_BANK' => 'Personal bank',
                   'PNC' => 'PNC',
                   'OTHER' => 'Other',
               ] as $value => $label): ?>
@@ -1377,7 +1443,7 @@ $rangeLabel = match ($range) {
       <div class="formula">
         True profit = recognized revenue − vehicle cost across online
         and deadhead miles − direct trip costs. Door-to-door hourly adds
-        off-app business time. Lyft platform fees remain informational
+        off-app business time. Platform fees remain informational
         because base earnings already represent your driver earnings.
       </div>
     </aside>
@@ -1393,7 +1459,7 @@ $rangeLabel = match ($range) {
 
     <?php if (!$shifts): ?>
       <div class="empty">
-        No Lyft shifts are recorded for this period.
+        No Gig work shifts are recorded for this period.
       </div>
     <?php else: ?>
       <div class="shift-list">
@@ -1423,6 +1489,12 @@ $rangeLabel = match ($range) {
                 )) ?>
               </div>
               <div class="shift-meta">
+                <?= $h(field_gig_services()[$shift['platform']] ?? $shift['platform']) ?> ·
+                <?= $h($shift['payout_destination']) ?> ·
+                <?php if ($shift['platform'] === 'AMAZON_FLEX'): ?>
+                  <?= $h($hours((int)$shift['scheduled_minutes'])) ?> scheduled ·
+                  <?= !empty($shift['flex_finish_estimated']) ? 'Estimated finish ·' : 'Actual finish recorded ·' ?>
+                <?php endif; ?>
                 <?= $h($hours($totalWorkMinutes)) ?> door-to-door ·
                 <?= $h(number_format(
                     $totalMiles,
@@ -1541,7 +1613,53 @@ $rangeLabel = match ($range) {
     return minutes;
   };
 
+  const platform = document.getElementById('platform');
+  const flexFields = document.getElementById('flex-fields');
+  const blockHours = document.getElementById('block_hours');
+  const scheduledEnd = document.getElementById('scheduled_end');
+  const localDateTime = (d) => {
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+  const updateFlex = () => {
+    const flex = platform.value === 'AMAZON_FLEX';
+    flexFields.hidden = !flex;
+    flexFields.querySelectorAll('input').forEach(el => el.disabled = !flex);
+    blockHours.required = flex;
+    document.getElementById('started_at').required = flex;
+    document.querySelectorAll('[data-rideshare-only]').forEach(el => {
+      el.hidden = flex;
+      el.querySelectorAll('input').forEach(input => input.disabled = flex);
+    });
+    document.getElementById('start-label').textContent = flex ? 'Block start time' : 'Went online';
+    document.getElementById('end-label').textContent = flex ? 'Actual finish (optional)' : 'Went offline';
+    document.getElementById('work-minutes-label').textContent = flex ? 'Actual / estimated work minutes' : 'Online minutes';
+    const start = new Date(document.getElementById('started_at').value);
+    const hours = Number(blockHours.value);
+    scheduledEnd.value = '';
+    const info = document.getElementById('flex-timing');
+    info.textContent = '';
+    if (flex && Number.isFinite(start.getTime()) && hours > 0 && hours <= 24) {
+      const end = new Date(start.getTime() + Math.round(hours * 60) * 60000);
+      scheduledEnd.value = localDateTime(end);
+      const actual = new Date(document.getElementById('ended_at').value);
+      const base = numberValue('base_ride_earnings');
+      info.textContent = `Offer rate: ${money(base / hours)}/hr. `;
+      if (Number.isFinite(actual.getTime()) && actual > start) {
+        const delta = Math.round((actual - end) / 60000);
+        info.textContent += `${Math.abs(delta)} minutes ${delta > 0 ? 'over schedule' : 'early'}. Actual block rate: ${money(base / ((actual - start) / 3600000))}/hr before travel and costs.`;
+      } else {
+        info.textContent += 'Finish and hourly figures are estimated from the schedule.';
+      }
+    }
+  };
+  platform.addEventListener('change', () => {
+    if (!form.elements.shift_id.value || form.elements.shift_id.value === '0') {
+      form.elements.payout_destination.value = platform.value === 'LYFT' ? 'LYFT_DIRECT' : platform.value === 'AMAZON_FLEX' ? 'PERSONAL_BANK' : 'OTHER';
+    }
+  });
   const updateOnlineMinutes = () => {
+    updateFlex();
     const start = document.getElementById('started_at');
     const end = document.getElementById('ended_at');
     const online = document.getElementById('online_minutes');
@@ -1553,12 +1671,13 @@ $rangeLabel = match ($range) {
         : 'No break time excluded';
     }
 
-    if (!start?.value || !end?.value || !online) {
+    const effectiveEnd = end?.value || (platform.value === 'AMAZON_FLEX' ? scheduledEnd.value : '');
+    if (!start?.value || !effectiveEnd || !online) {
       return;
     }
 
     const startTime = new Date(start.value).getTime();
-    const endTime = new Date(end.value).getTime();
+    const endTime = new Date(effectiveEnd).getTime();
 
     if (
       Number.isFinite(startTime)
@@ -1615,6 +1734,7 @@ $rangeLabel = match ($range) {
   });
 
   const updatePreview = () => {
+    updateFlex();
     const vehicle = document.getElementById('vehicle_id');
     const selected = vehicle?.options[vehicle.selectedIndex];
     const cpm = Number.parseFloat(selected?.dataset.cpm ?? '0') || 0;
@@ -1671,7 +1791,9 @@ $rangeLabel = match ($range) {
   };
 
   const affectsWorkingTime = (target) =>
-    target.id === 'started_at'
+    target.id === 'platform'
+    || target.id === 'block_hours'
+    || target.id === 'started_at'
     || target.id === 'ended_at'
     || target.matches('[data-break-start], [data-break-end]');
 
