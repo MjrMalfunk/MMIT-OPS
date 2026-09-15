@@ -290,6 +290,32 @@ $to = $dateTo?->format('Y-m-d');
 
 $summary = field_rideshare_summary($from, $to, $serviceFilter);
 $shifts = field_rideshare_shifts($from, $to, $serviceFilter);
+$trackerClosingNotes = [];
+
+// Keep imported dictated notes separate from the editable OPS Notes field.
+if ((string)db()->query('SELECT DATABASE()')->fetchColumn() === 'mjrmstlj_mittops_test') {
+    $shiftIds = array_map(static fn(array $shift): int => (int)$shift['shift_id'], $shifts);
+    if ($editShift !== null) $shiftIds[] = (int)$editShift['shift_id'];
+    $shiftIds = array_values(array_unique(array_filter($shiftIds)));
+    if ($shiftIds !== []) {
+        $query = 'SELECT shift_id, raw_json FROM field_gig_tracker_imports WHERE shift_id IN ('
+            . implode(',', array_fill(0, count($shiftIds), '?')) . ')';
+        try {
+            $statement = db()->prepare($query);
+            $statement->execute($shiftIds);
+            foreach ($statement->fetchAll(PDO::FETCH_ASSOC) as $import) {
+                $root = json_decode((string)$import['raw_json'], true, 32);
+                $candidate = is_array($root) && is_array($root['shift'] ?? null)
+                    ? ($root['shift']['closingNote'] ?? null) : null;
+                if (is_string($candidate) && trim($candidate) !== '') {
+                    $trackerClosingNotes[(int)$import['shift_id']] = trim($candidate);
+                }
+            }
+        } catch (Throwable) {
+            // Existing Gig Work remains available if tracker tables are absent.
+        }
+    }
+}
 
 $utilization = (int)$summary['rideshare_online_minutes'] > 0
     ? round(
@@ -772,6 +798,9 @@ $rangeLabel = match ($range) {
     </div>
 
     <nav class="actions" aria-label="Field operations navigation">
+      <?php if ((string)db()->query('SELECT DATABASE()')->fetchColumn() === 'mjrmstlj_mittops_test'): ?>
+      <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_gig_tracker.php">Import tracker data</a>
+      <?php endif; ?>
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_ops.php">
         Field Ops
       </a>
@@ -1347,6 +1376,13 @@ $rangeLabel = match ($range) {
             ><?= $h($form['notes']) ?></textarea>
           </label>
 
+          <?php if ($editShift && isset($trackerClosingNotes[(int)$editShift['shift_id']])): ?>
+            <label class="full">
+              Tracker closing note
+              <textarea readonly><?= $h($trackerClosingNotes[(int)$editShift['shift_id']]) ?></textarea>
+            </label>
+          <?php endif; ?>
+
           <div class="form-actions full">
             <button class="btn-primary" type="submit">
               <?= $editShift ? 'Update shift' : 'Save shift' ?>
@@ -1505,6 +1541,12 @@ $rangeLabel = match ($range) {
                   <?= $h($hours($deadheadMinutes)) ?> deadhead
                 <?php endif; ?>
               </div>
+              <?php if (isset($trackerClosingNotes[(int)$shift['shift_id']])): ?>
+                <div class="shift-meta" style="margin-top:7px;white-space:pre-wrap;">
+                  <strong>Tracker closing note:</strong>
+                  <?= $h($trackerClosingNotes[(int)$shift['shift_id']]) ?>
+                </div>
+              <?php endif; ?>
             </div>
 
             <div class="shift-metric">

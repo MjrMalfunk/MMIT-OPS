@@ -10,6 +10,7 @@ function gig_parse(string $raw,string $timezone):array {
  if(!is_array($r)||!in_array($r['schema']??'', ['mmit.ride-tracker.v1','mmit.work-tracker.v2'],true))throw new InvalidArgumentException('Unsupported export version.');
  $s=$r['shift']??[];$zone=new DateTimeZone($timezone);
  if(!in_array($s['platform']??'', ['LYFT','UBER'],true))throw new InvalidArgumentException('Choose Lyft or Uber. FieldNation uses its own importer.');
+ $closingNote=field_tracker_closing_note($s['closingNote']??null);
  $id=field_tracker_uuid($s['id']??null);$start=field_tracker_epoch($s['startedAtEpochMs']??null);$off=field_tracker_epoch($s['wentOfflineAtEpochMs']??null);$home=field_tracker_epoch($s['homeArrivedAtEpochMs']??null);
  if($off<=$start||$home<$off||$home-$start>172800000||field_tracker_epoch($r['exportedAtEpochMs']??null)<$home)throw new InvalidArgumentException('Complete the shift and home arrival (maximum 48 hours).');
  if($r['schema']==='mmit.work-tracker.v2'&&field_tracker_epoch($s['completedAtEpochMs']??null)!==$home)throw new InvalidArgumentException('Completion and home arrival disagree.');
@@ -87,7 +88,7 @@ function gig_parse(string $raw,string $timezone):array {
  $warnings=['Booked time includes active travel to pickup plus passenger time. Pending queue time is excluded.','GPS segments may be incomplete. Gaps, poor fixes and phase boundaries are excluded; review mileage rather than treating unavailable as zero.','Enter reviewed return-home miles. The offline odometer will be derived from the home odometer so return miles are counted once.'];
  if($home-$start<300000||$a===$b)$warnings[]='Short or zero-mile outing: confirm an intentional test.';
  foreach($segments as $v)if($v['end']-$v['pickup']<30000){$warnings[]='A passenger ride is under 30 seconds. Check for missed pickup/drop-off taps.';break;}
- return ['id'=>$id,'platform'=>$s['platform'],'timezone'=>$timezone,'start'=>$start,'offline'=>$off,'home'=>$home,'start_odometer'=>$a,'home_odometer'=>$b,'total_miles'=>round($b-$a,1),'online_minutes'=>$online,'deadhead_minutes'=>(int)round((intdiv($home,1000)-intdiv($off,1000))/60),'booked_minutes'=>$booked,'passenger_minutes'=>$pass,'break_minutes'=>$breakMinutes,'break_input'=>$breakInput,'completed_rides'=>$completed,'lost_rides'=>$lost,'acquisition'=>$modes,'queue_changes'=>$queueChanges,'gps'=>$measured,'coverage_seconds'=>$coverage,'claims'=>$claims,'warnings'=>$warnings];
+ return ['id'=>$id,'platform'=>$s['platform'],'timezone'=>$timezone,'start'=>$start,'offline'=>$off,'home'=>$home,'start_odometer'=>$a,'home_odometer'=>$b,'total_miles'=>round($b-$a,1),'online_minutes'=>$online,'deadhead_minutes'=>(int)round((intdiv($home,1000)-intdiv($off,1000))/60),'booked_minutes'=>$booked,'passenger_minutes'=>$pass,'break_minutes'=>$breakMinutes,'break_input'=>$breakInput,'completed_rides'=>$completed,'lost_rides'=>$lost,'acquisition'=>$modes,'queue_changes'=>$queueChanges,'gps'=>$measured,'coverage_seconds'=>$coverage,'claims'=>$claims,'warnings'=>$warnings,'closing_note'=>$closingNote];
 }
 
 function gig_number(array $input,string $key,int $decimals=2,float $min=0,float $max=100000):float{
