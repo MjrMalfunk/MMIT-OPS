@@ -19,6 +19,7 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
 $workOrderId = (int)($_GET['id'] ?? $_POST['work_order_id'] ?? 0);
 $wo = $workOrderId > 0 ? field_ops_find_work_order($workOrderId) : null;
 $fnPacket = null;
+$trackerClosingNote = null;
 
 if (
     $wo
@@ -39,6 +40,21 @@ if (!$wo) {
     http_response_code(404);
     echo 'Work order not found.';
     exit;
+}
+
+// Read the immutable tracker export rather than changing normal W/O notes.
+if (strcasecmp((string)($wo['platform'] ?? ''), 'FieldNation') === 0) {
+    try {
+        $statement = db()->prepare('SELECT raw_json FROM field_tracker_imports WHERE work_order_id = ? ORDER BY import_id DESC LIMIT 1');
+        $statement->execute([$workOrderId]);
+        $rawTrackerExport = $statement->fetchColumn();
+        $trackerRoot = is_string($rawTrackerExport) ? json_decode($rawTrackerExport, true, 32, JSON_THROW_ON_ERROR) : null;
+        $candidate = is_array($trackerRoot) && is_array($trackerRoot['shift'] ?? null)
+            ? ($trackerRoot['shift']['closingNote'] ?? null) : null;
+        if (is_string($candidate) && trim($candidate) !== '') $trackerClosingNote = trim($candidate);
+    } catch (Throwable) {
+        // The W/O stays usable until the one-time tracker migration is run.
+    }
 }
 
 $fnCaptureBookmarklet = null;
@@ -536,6 +552,9 @@ $receivableStateClass = match ($receivableState) {
       <?php endif; ?>
     </div>
     <div class="actions">
+      <?php if (strcasecmp((string)$wo['platform'], 'FieldNation') === 0): ?>
+      <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_tracker_import.php?work_order_id=<?= (int)$workOrderId ?>">Import tracker data</a>
+      <?php endif; ?>
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_projects.php">Projects</a>
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_ops.php">Back to Field Ops</a>
     </div>
@@ -543,6 +562,14 @@ $receivableStateClass = match ($receivableState) {
 
   <?php if ($flashSuccess !== ''): ?><div class="flash-success"><?= $h($flashSuccess) ?></div><?php endif; ?>
   <?php if ($flashError !== ''): ?><div class="flash-error"><?= $h($flashError) ?></div><?php endif; ?>
+
+  <?php if ($trackerClosingNote !== null): ?>
+    <section class="card" style="margin-bottom:18px;border-top:3px solid rgba(74,222,128,.86);">
+      <div class="eyebrow">Imported from MMIT Work Tracker</div>
+      <h2 style="margin:.4rem 0 .7rem;">Closing note</h2>
+      <div style="white-space:pre-wrap;line-height:1.55;"><?= $h($trackerClosingNote) ?></div>
+    </section>
+  <?php endif; ?>
 
   <?php if ($fnPacket && $fnCaptureBookmarklet !== null): ?>
     <?php
