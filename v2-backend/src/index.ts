@@ -102,6 +102,7 @@ type WorkOrderWithClient = Prisma.WorkOrderGetPayload<{ include: { client: true 
 type ClientWithCount = Prisma.ClientGetPayload<{
   include: { _count: { select: { workOrders: true } } };
 }>;
+type OpsAuditEventWithActor = Prisma.OpsAuditEventGetPayload<{ include: { actor: true } }>;
 
 function serializeWorkOrder(workOrder: WorkOrderWithClient) {
   return {
@@ -120,6 +121,20 @@ function serializeClient(client: ClientWithCount) {
     id: client.id.toString(),
     workOrderCount: client._count.workOrders,
     _count: undefined,
+  };
+}
+
+function serializeAuditEvent(event: OpsAuditEventWithActor) {
+  return {
+    ...event,
+    id: event.id.toString(),
+    actorUserId: event.actorUserId.toString(),
+    actor: {
+      id: event.actor.id.toString(),
+      email: event.actor.email,
+      displayName: event.actor.displayName,
+      role: event.actor.role,
+    },
   };
 }
 
@@ -163,6 +178,60 @@ function validDisplayName(value: unknown): string | null {
 function validNewPassword(value: unknown): string | null {
   if (typeof value !== 'string' || value.length < 14 || value.length > 128) return null;
   return value;
+}
+
+function auditClientSnapshot(client: {
+  id: bigint;
+  name: string;
+  status: ClientStatus;
+  serviceTier: ServiceTier | null;
+  syncroCustomerId: string | null;
+  email: string | null;
+  phone: string | null;
+  notes: string | null;
+}) {
+  return {
+    id: client.id.toString(),
+    name: client.name,
+    status: client.status,
+    serviceTier: client.serviceTier,
+    syncroCustomerId: client.syncroCustomerId,
+    email: client.email,
+    phone: client.phone,
+    hasNotes: Boolean(client.notes),
+  };
+}
+
+function auditWorkOrderSnapshot(workOrder: {
+  id: bigint;
+  source: WorkOrderSource;
+  sourceReference: string;
+  status: WorkOrderStatus;
+  title: string;
+  clientId: bigint | null;
+  scheduledAt: Date | null;
+  grossPay: Prisma.Decimal | null;
+  mileage: Prisma.Decimal | null;
+  driveMinutes: number;
+  onsiteMinutes: number;
+  adminMinutes: number;
+  notes: string | null;
+}) {
+  return {
+    id: workOrder.id.toString(),
+    source: workOrder.source,
+    sourceReference: workOrder.sourceReference,
+    status: workOrder.status,
+    title: workOrder.title,
+    clientId: workOrder.clientId?.toString() ?? null,
+    scheduledAt: workOrder.scheduledAt?.toISOString() ?? null,
+    grossPay: workOrder.grossPay?.toString() ?? null,
+    mileage: workOrder.mileage?.toString() ?? null,
+    driveMinutes: workOrder.driveMinutes,
+    onsiteMinutes: workOrder.onsiteMinutes,
+    adminMinutes: workOrder.adminMinutes,
+    hasNotes: Boolean(workOrder.notes),
+  };
 }
 
 function authorizationToken(req: Request): string | null {
@@ -209,6 +278,25 @@ function requireRoles(...roles: OpsUserRole[]): RequestHandler {
     }
     next();
   };
+}
+
+async function writeAuditEvent(
+  tx: Prisma.TransactionClient,
+  actor: AuthenticatedUser,
+  action: string,
+  subjectType: string,
+  subjectId: string,
+  details: Prisma.InputJsonValue,
+): Promise<void> {
+  await tx.opsAuditEvent.create({
+    data: {
+      actorUserId: actor.userId,
+      action,
+      subjectType,
+      subjectId,
+      details,
+    },
+  });
 }
 
 function mfaSetup(email: string, secret: string) {
@@ -405,13 +493,55 @@ app.post('/api/v1/auth/invitations', requireAuth, requireRoles(OpsUserRole.OWNER
     }
     const token = createOpaqueToken();
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-    const invite = await prisma.opsInvite.create({
-      data: { email, role, tokenHash: hashOpaqueToken(token), expiresAt, invitedById: req.auth!.userId },
+    const invite = await prisma.$transaction(async (tx) => {
+      const created = await tx.opsInvite.create({
+        data: { email, role, tokenHash: hashOpaqueToken(token), expiresAt, invitedById: req.auth!.userId },
+      });
+      await writeAuditEvent(tx, req.auth!, 'ops_user.invited', 'ops_invite', created.id, {
+        email: created.email,
+        role: created.role,
+        expiresAt: created.expiresAt.toISOString(),
+      });
+      return created;
     });
     res.status(201).json({ data: { id: invite.id, email: invite.email, role: invite.role, expiresAt: invite.expiresAt, inviteToken: token } });
   } catch (error: unknown) {
     nextAuthError(error, res);
   }
+});
+
+app.get('/api/v1/audit-events', requireAuth, requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN), async (req: Request, res: Response) => {
+  const rawLimit = req.query.limit;
+  const subjectType = req.query.subjectType;
+  const subjectId = req.query.subjectId;
+  if (
+    (rawLimit !== undefined && typeof rawLimit !== 'string')
+    || (subjectType !== undefined && typeof subjectType !== 'string')
+    || (subjectId !== undefined && typeof subjectId !== 'string')
+  ) {
+    res.status(400).json({ error: 'limit, subjectType, and subjectId must be single text values.' });
+    return;
+  }
+  const limit = rawLimit === undefined ? 50 : Number(rawLimit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    res.status(400).json({ error: 'limit must be a whole number from 1 through 100.' });
+    return;
+  }
+  if ((subjectType !== undefined && (subjectType.length < 1 || subjectType.length > 64))
+    || (subjectId !== undefined && (subjectId.length < 1 || subjectId.length > 191))) {
+    res.status(400).json({ error: 'subjectType or subjectId is outside its allowed length.' });
+    return;
+  }
+  const events = await prisma.opsAuditEvent.findMany({
+    where: {
+      ...(subjectType ? { subjectType } : {}),
+      ...(subjectId ? { subjectId } : {}),
+    },
+    include: { actor: true },
+    orderBy: { id: 'desc' },
+    take: limit,
+  });
+  res.json({ data: events.map(serializeAuditEvent) });
 });
 
 function nextAuthError(error: unknown, res: Response): void {
@@ -480,9 +610,16 @@ app.post('/api/v1/clients', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, O
   }
 
   try {
-    const client = await prisma.client.create({
-      data: { name, email, phone, syncroCustomerId, notes, status, serviceTier },
-      include: { _count: { select: { workOrders: true } } },
+    const client = await prisma.$transaction(async (tx) => {
+      const created = await tx.client.create({
+        data: { name, email, phone, syncroCustomerId, notes, status, serviceTier },
+        include: { _count: { select: { workOrders: true } } },
+      });
+      await writeAuditEvent(tx, req.auth!, 'client.created', 'client', created.id.toString(), {
+        after: auditClientSnapshot(created),
+        changedFields: ['name', 'email', 'phone', 'syncroCustomerId', 'notes', 'status', 'serviceTier'],
+      });
+      return created;
     });
     res.status(201).json({ data: serializeClient(client) });
   } catch (error: unknown) {
@@ -578,18 +715,28 @@ app.patch('/api/v1/clients/:id', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADM
   }
 
   try {
-    const client = await prisma.client.update({
-      where: { id },
-      data,
-      include: { _count: { select: { workOrders: true } } },
+    const client = await prisma.$transaction(async (tx) => {
+      const before = await tx.client.findUnique({ where: { id } });
+      if (!before) return null;
+      const updated = await tx.client.update({
+        where: { id },
+        data,
+        include: { _count: { select: { workOrders: true } } },
+      });
+      await writeAuditEvent(tx, req.auth!, 'client.updated', 'client', updated.id.toString(), {
+        before: auditClientSnapshot(before),
+        after: auditClientSnapshot(updated),
+        changedFields: Object.keys(data),
+      });
+      return updated;
     });
+    if (!client) {
+      res.status(404).json({ error: 'Client not found.' });
+      return;
+    }
     res.json({ data: serializeClient(client) });
   } catch (error: unknown) {
     if (typeof error === 'object' && error !== null && 'code' in error) {
-      if (error.code === 'P2025') {
-        res.status(404).json({ error: 'Client not found.' });
-        return;
-      }
       if (error.code === 'P2002') {
         res.status(409).json({ error: 'A client already uses that name or Syncro customer ID.' });
         return;
@@ -648,17 +795,24 @@ app.post('/api/v1/work-orders', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMI
   }
 
   try {
-    const workOrder = await prisma.workOrder.create({
-      data: {
-        source,
-        sourceReference: sourceReference.trim(),
-        title: title.trim(),
-        clientId: parsedClientId,
-        scheduledAt: parsedScheduledAt,
-        grossPay: parsedPay,
-        notes: typeof notes === 'string' ? notes.trim() || null : null,
-      },
-      include: { client: true },
+    const workOrder = await prisma.$transaction(async (tx) => {
+      const created = await tx.workOrder.create({
+        data: {
+          source,
+          sourceReference: sourceReference.trim(),
+          title: title.trim(),
+          clientId: parsedClientId,
+          scheduledAt: parsedScheduledAt,
+          grossPay: parsedPay,
+          notes: typeof notes === 'string' ? notes.trim() || null : null,
+        },
+        include: { client: true },
+      });
+      await writeAuditEvent(tx, req.auth!, 'work_order.created', 'work_order', created.id.toString(), {
+        after: auditWorkOrderSnapshot(created),
+        changedFields: ['source', 'sourceReference', 'title', 'clientId', 'scheduledAt', 'grossPay', 'notes'],
+      });
+      return created;
     });
     res.status(201).json({ data: serializeWorkOrder(workOrder) });
   } catch (error: unknown) {
@@ -708,11 +862,25 @@ app.patch('/api/v1/work-orders/:id/client', requireRoles(OpsUserRole.OWNER, OpsU
     }
   }
   try {
-    const workOrder = await prisma.workOrder.update({
-      where: { id },
-      data: { clientId },
-      include: { client: true },
+    const workOrder = await prisma.$transaction(async (tx) => {
+      const before = await tx.workOrder.findUnique({ where: { id } });
+      if (!before) return null;
+      const updated = await tx.workOrder.update({
+        where: { id },
+        data: { clientId },
+        include: { client: true },
+      });
+      await writeAuditEvent(tx, req.auth!, 'work_order.client_changed', 'work_order', updated.id.toString(), {
+        before: auditWorkOrderSnapshot(before),
+        after: auditWorkOrderSnapshot(updated),
+        changedFields: ['clientId'],
+      });
+      return updated;
     });
+    if (!workOrder) {
+      res.status(404).json({ error: 'Work order not found.' });
+      return;
+    }
     res.json({ data: serializeWorkOrder(workOrder) });
   } catch (error: unknown) {
     if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2025') {
@@ -730,21 +898,33 @@ app.patch('/api/v1/work-orders/:id/status', requireRoles(OpsUserRole.OWNER, OpsU
     res.status(400).json({ error: 'A valid work-order id and status are required.' });
     return;
   }
-  const workOrder = await prisma.workOrder.findUnique({ where: { id }, include: { client: true } });
-  if (!workOrder) {
+  const outcome = await prisma.$transaction(async (tx) => {
+    const before = await tx.workOrder.findUnique({ where: { id } });
+    if (!before) return { kind: 'not_found' as const };
+    if (!lifecycle[before.status].includes(nextStatus)) {
+      return { kind: 'invalid_transition' as const, from: before.status };
+    }
+    const updated = await tx.workOrder.update({
+      where: { id },
+      data: { status: nextStatus },
+      include: { client: true },
+    });
+    await writeAuditEvent(tx, req.auth!, 'work_order.status_changed', 'work_order', updated.id.toString(), {
+      before: auditWorkOrderSnapshot(before),
+      after: auditWorkOrderSnapshot(updated),
+      changedFields: ['status'],
+    });
+    return { kind: 'updated' as const, workOrder: updated };
+  });
+  if (outcome.kind === 'not_found') {
     res.status(404).json({ error: 'Work order not found.' });
     return;
   }
-  if (!lifecycle[workOrder.status].includes(nextStatus)) {
-    res.status(409).json({ error: `Cannot move ${workOrder.status} directly to ${nextStatus}.` });
+  if (outcome.kind === 'invalid_transition') {
+    res.status(409).json({ error: `Cannot move ${outcome.from} directly to ${nextStatus}.` });
     return;
   }
-  const updated = await prisma.workOrder.update({
-    where: { id },
-    data: { status: nextStatus },
-    include: { client: true },
-  });
-  res.json({ data: serializeWorkOrder(updated) });
+  res.json({ data: serializeWorkOrder(outcome.workOrder) });
 });
 
 app.use((error: unknown, _req: Request, res: Response, _next: express.NextFunction) => {

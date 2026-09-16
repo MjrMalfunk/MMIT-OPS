@@ -31,9 +31,18 @@ the API before exposing it beyond the server.
 - `GET /api/v1/work-orders/:id` returns one work order.
 - `PATCH /api/v1/work-orders/:id/client` explicitly links or unlinks a client.
 - `PATCH /api/v1/work-orders/:id/status` applies a valid lifecycle transition.
+- `GET /api/v1/audit-events` is OWNER/ADMIN-only and returns the newest 50
+  audit events (up to 100). Optional filters: `subjectType`, `subjectId`.
 
 Client and work-order endpoints require an authenticated V2 OPS session before
 they can be read or changed.
+
+Every authenticated client create/update, work-order create/client-link/status
+change, and OPS invitation is appended to the V2 audit ledger in the same
+database transaction as the change. Audit records are read-only through this
+API. They retain the acting OPS identity and safe before/after operational
+snapshots; free-form notes are represented only as present/absent, never copied
+into the audit payload.
 
 ## OPS identity and access
 

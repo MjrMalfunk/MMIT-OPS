@@ -104,6 +104,7 @@ model OpsUser {
   sessions             OpsSession[]
   recoveryCodes        OpsRecoveryCode[]
   invitationsCreated   OpsInvite[]   @relation("OpsInviteCreator")
+  auditEvents          OpsAuditEvent[]
 }
 
 model OpsInvite {
@@ -144,4 +145,19 @@ model OpsRecoveryCode {
   user      OpsUser   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, usedAt])
+}
+
+model OpsAuditEvent {
+  id          BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  action      String   @db.VarChar(100)
+  subjectType String   @db.VarChar(64)
+  subjectId   String   @db.VarChar(191)
+  details     Json?
+  createdAt   DateTime @default(now()) @db.DateTime(3)
+  actorUserId BigInt   @db.UnsignedBigInt
+  actor       OpsUser  @relation(fields: [actorUserId], references: [id], onDelete: Restrict)
+
+  @@index([subjectType, subjectId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@index([createdAt])
 }
