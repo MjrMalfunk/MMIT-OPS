@@ -1,14 +1,30 @@
-import express, { Request, Response } from 'express';
+import express, { NextFunction, Request, RequestHandler, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import {
   ClientStatus,
+  OpsUserRole,
+  OpsUserStatus,
   Prisma,
   PrismaClient,
   ServiceTier,
   WorkOrderSource,
   WorkOrderStatus,
 } from '@prisma/client';
+import {
+  bootstrapTokenMatches,
+  createOpaqueToken,
+  createRecoveryCodes,
+  createTotpSecret,
+  decryptSecret,
+  encryptSecret,
+  hashOpaqueToken,
+  hashPassword,
+  normalizeEmail,
+  totpUri,
+  verifyPassword,
+  verifyTotp,
+} from './auth.js';
 
 // Load environment variables (db passwords, ports, secrets) securely
 dotenv.config();
@@ -107,6 +123,305 @@ function serializeClient(client: ClientWithCount) {
   };
 }
 
+type AuthenticatedUser = {
+  userId: bigint;
+  sessionId: string;
+  email: string;
+  displayName: string;
+  role: OpsUserRole;
+};
+
+declare global {
+  namespace Express {
+    interface Request {
+      auth?: AuthenticatedUser;
+    }
+  }
+}
+
+function apiUser(user: { id: bigint; email: string; displayName: string; role: OpsUserRole; status: OpsUserStatus }) {
+  return {
+    id: user.id.toString(),
+    email: user.email,
+    displayName: user.displayName,
+    role: user.role,
+    status: user.status,
+  };
+}
+
+function requestBody(req: Request): Record<string, unknown> | null {
+  return req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+    ? req.body as Record<string, unknown>
+    : null;
+}
+
+function validDisplayName(value: unknown): string | null {
+  const name = parseNullableText(value, 191);
+  return name && name.length >= 2 ? name : null;
+}
+
+function validNewPassword(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length < 14 || value.length > 128) return null;
+  return value;
+}
+
+function authorizationToken(req: Request): string | null {
+  const header = req.header('authorization');
+  if (!header) return null;
+  const match = /^Bearer ([A-Za-z0-9_-]{32,})$/.exec(header);
+  return match?.[1] ?? null;
+}
+
+const requireAuth: RequestHandler = async (req, res, next) => {
+  const rawToken = authorizationToken(req);
+  if (!rawToken) {
+    res.status(401).json({ error: 'A valid bearer session token is required.' });
+    return;
+  }
+  try {
+    const session = await prisma.opsSession.findUnique({
+      where: { tokenHash: hashOpaqueToken(rawToken) },
+      include: { user: true },
+    });
+    if (!session || session.revokedAt || session.expiresAt <= new Date() || session.user.status !== OpsUserStatus.ACTIVE) {
+      res.status(401).json({ error: 'Session is invalid, expired, or no longer active.' });
+      return;
+    }
+    req.auth = {
+      userId: session.user.id,
+      sessionId: session.id,
+      email: session.user.email,
+      displayName: session.user.displayName,
+      role: session.user.role,
+    };
+    await prisma.opsSession.update({ where: { id: session.id }, data: { lastSeenAt: new Date() } });
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
+function requireRoles(...roles: OpsUserRole[]): RequestHandler {
+  return (req, res, next) => {
+    if (!req.auth || !roles.includes(req.auth.role)) {
+      res.status(403).json({ error: 'Your OPS role does not permit this action.' });
+      return;
+    }
+    next();
+  };
+}
+
+function mfaSetup(email: string, secret: string) {
+  return {
+    secret,
+    otpauthUri: totpUri(email, secret),
+    message: 'Add this TOTP secret to an authenticator app, then sign in with its six-digit code.',
+  };
+}
+
+async function issueSession(userId: bigint): Promise<{ token: string; expiresAt: Date }> {
+  const token = createOpaqueToken();
+  const expiresAt = new Date(Date.now() + 12 * 60 * 60 * 1000);
+  await prisma.opsSession.create({
+    data: { userId, tokenHash: hashOpaqueToken(token), expiresAt },
+  });
+  return { token, expiresAt };
+}
+
+app.post('/api/v1/auth/bootstrap', async (req: Request, res: Response) => {
+  const body = requestBody(req);
+  if (!body) {
+    res.status(400).json({ error: 'A JSON bootstrap object is required.' });
+    return;
+  }
+  const email = normalizeEmail(body.email);
+  const displayName = validDisplayName(body.displayName);
+  const password = validNewPassword(body.password);
+  if (!email || !displayName || !password) {
+    res.status(400).json({ error: 'email, displayName, and a 14+ character password are required.' });
+    return;
+  }
+  try {
+    if (!bootstrapTokenMatches(body.bootstrapToken)) {
+      res.status(401).json({ error: 'Bootstrap token is invalid.' });
+      return;
+    }
+    if (await prisma.opsUser.count() !== 0) {
+      res.status(409).json({ error: 'V2 already has an OPS user; bootstrap is permanently closed.' });
+      return;
+    }
+    const secret = createTotpSecret();
+    const user = await prisma.opsUser.create({
+      data: {
+        email,
+        displayName,
+        role: OpsUserRole.OWNER,
+        passwordHash: await hashPassword(password),
+        totpSecretCiphertext: encryptSecret(secret),
+      },
+    });
+    res.status(201).json({ data: { user: apiUser(user), mfaSetup: mfaSetup(email, secret) } });
+  } catch (error) {
+    nextAuthError(error, res);
+  }
+});
+
+app.post('/api/v1/auth/login', async (req: Request, res: Response) => {
+  const body = requestBody(req);
+  const email = body ? normalizeEmail(body.email) : null;
+  const password = body?.password;
+  if (!body || !email || typeof password !== 'string') {
+    res.status(400).json({ error: 'email, password, and a TOTP or recovery code are required.' });
+    return;
+  }
+  try {
+    const user = await prisma.opsUser.findUnique({ where: { email } });
+    if (!user || user.status === OpsUserStatus.DISABLED || !await verifyPassword(password, user.passwordHash)) {
+      res.status(401).json({ error: 'Invalid sign-in details.' });
+      return;
+    }
+
+    const totpValid = verifyTotp(decryptSecret(user.totpSecretCiphertext), body.totpCode);
+    let recoveryCodeUsed = false;
+    if (!totpValid && typeof body.recoveryCode === 'string') {
+      const recovery = await prisma.opsRecoveryCode.findFirst({
+        where: { userId: user.id, codeHash: hashOpaqueToken(body.recoveryCode.toUpperCase()), usedAt: null },
+      });
+      if (recovery) {
+        await prisma.opsRecoveryCode.update({ where: { id: recovery.id }, data: { usedAt: new Date() } });
+        recoveryCodeUsed = true;
+      }
+    }
+    if (!totpValid && !recoveryCodeUsed) {
+      res.status(401).json({ error: 'TOTP or an unused recovery code is required.' });
+      return;
+    }
+
+    let recoveryCodes: string[] | undefined;
+    let activeUser = user;
+    if (user.status === OpsUserStatus.PENDING_MFA) {
+      const newRecoveryCodes = createRecoveryCodes();
+      activeUser = await prisma.$transaction(async (tx) => {
+        const activated = await tx.opsUser.update({
+          where: { id: user.id },
+          data: { status: OpsUserStatus.ACTIVE, mfaVerifiedAt: new Date() },
+        });
+        await tx.opsRecoveryCode.createMany({
+          data: newRecoveryCodes.map((code) => ({ userId: user.id, codeHash: hashOpaqueToken(code) })),
+        });
+        return activated;
+      });
+      recoveryCodes = newRecoveryCodes;
+    }
+    const session = await issueSession(activeUser.id);
+    res.json({
+      data: {
+        token: session.token,
+        expiresAt: session.expiresAt,
+        user: apiUser(activeUser),
+        recoveryCodes,
+      },
+    });
+  } catch (error) {
+    nextAuthError(error, res);
+  }
+});
+
+app.post('/api/v1/auth/invitations/accept', async (req: Request, res: Response) => {
+  const body = requestBody(req);
+  const token = body?.token;
+  const displayName = body ? validDisplayName(body.displayName) : null;
+  const password = body ? validNewPassword(body.password) : null;
+  if (typeof token !== 'string' || !displayName || !password) {
+    res.status(400).json({ error: 'token, displayName, and a 14+ character password are required.' });
+    return;
+  }
+  try {
+    const invite = await prisma.opsInvite.findUnique({ where: { tokenHash: hashOpaqueToken(token) } });
+    if (!invite || invite.acceptedAt || invite.revokedAt || invite.expiresAt <= new Date()) {
+      res.status(401).json({ error: 'Invitation is invalid, expired, or already used.' });
+      return;
+    }
+    const secret = createTotpSecret();
+    const user = await prisma.$transaction(async (tx) => {
+      const created = await tx.opsUser.create({
+        data: {
+          email: invite.email,
+          displayName,
+          role: invite.role,
+          passwordHash: await hashPassword(password),
+          totpSecretCiphertext: encryptSecret(secret),
+        },
+      });
+      await tx.opsInvite.update({ where: { id: invite.id }, data: { acceptedAt: new Date() } });
+      return created;
+    });
+    res.status(201).json({ data: { user: apiUser(user), mfaSetup: mfaSetup(user.email, secret) } });
+  } catch (error: unknown) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002') {
+      res.status(409).json({ error: 'An OPS user already exists for this invitation email.' });
+      return;
+    }
+    nextAuthError(error, res);
+  }
+});
+
+app.get('/api/v1/auth/me', requireAuth, (req: Request, res: Response) => {
+  res.json({ data: { id: req.auth!.userId.toString(), email: req.auth!.email, displayName: req.auth!.displayName, role: req.auth!.role } });
+});
+
+app.post('/api/v1/auth/logout', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await prisma.opsSession.update({ where: { id: req.auth!.sessionId }, data: { revokedAt: new Date() } });
+    res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/v1/auth/invitations', requireAuth, requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN), async (req: Request, res: Response) => {
+  const body = requestBody(req);
+  const email = body ? normalizeEmail(body.email) : null;
+  const role = body?.role ?? OpsUserRole.OPERATOR;
+  if (!email || !isEnumValue(OpsUserRole, role)) {
+    res.status(400).json({ error: 'A valid email and OPS role are required.' });
+    return;
+  }
+  if (role === OpsUserRole.OWNER && req.auth!.role !== OpsUserRole.OWNER) {
+    res.status(403).json({ error: 'Only an owner can invite another owner.' });
+    return;
+  }
+  try {
+    if (await prisma.opsUser.findUnique({ where: { email }, select: { id: true } })) {
+      res.status(409).json({ error: 'An OPS user already exists for this email.' });
+      return;
+    }
+    if (await prisma.opsInvite.findFirst({
+      where: { email, acceptedAt: null, revokedAt: null, expiresAt: { gt: new Date() } },
+      select: { id: true },
+    })) {
+      res.status(409).json({ error: 'An active invitation already exists for this email.' });
+      return;
+    }
+    const token = createOpaqueToken();
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const invite = await prisma.opsInvite.create({
+      data: { email, role, tokenHash: hashOpaqueToken(token), expiresAt, invitedById: req.auth!.userId },
+    });
+    res.status(201).json({ data: { id: invite.id, email: invite.email, role: invite.role, expiresAt: invite.expiresAt, inviteToken: token } });
+  } catch (error: unknown) {
+    nextAuthError(error, res);
+  }
+});
+
+function nextAuthError(error: unknown, res: Response): void {
+  console.error(error);
+  res.status(500).json({ error: 'Authentication is not configured correctly.' });
+}
+
+app.use('/api/v1/clients', requireAuth);
+app.use('/api/v1/work-orders', requireAuth);
+
 app.get('/api/v1/clients', async (req: Request, res: Response) => {
   const search = req.query.search;
   if (search !== undefined && typeof search !== 'string') {
@@ -131,7 +446,7 @@ app.get('/api/v1/clients', async (req: Request, res: Response) => {
   res.json({ data: clients.map(serializeClient) });
 });
 
-app.post('/api/v1/clients', async (req: Request, res: Response) => {
+app.post('/api/v1/clients', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
   const body = req.body as Record<string, unknown> | null;
   if (!body || Array.isArray(body)) {
     res.status(400).json({ error: 'A JSON client object is required.' });
@@ -208,7 +523,7 @@ app.get('/api/v1/clients/:id', async (req: Request, res: Response) => {
   });
 });
 
-app.patch('/api/v1/clients/:id', async (req: Request, res: Response) => {
+app.patch('/api/v1/clients/:id', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
   const id = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
   const body = req.body as Record<string, unknown> | null;
   if (id === null || !body || Array.isArray(body)) {
@@ -300,7 +615,7 @@ app.get('/api/v1/work-orders', async (req: Request, res: Response) => {
   res.json({ data: workOrders.map(serializeWorkOrder) });
 });
 
-app.post('/api/v1/work-orders', async (req: Request, res: Response) => {
+app.post('/api/v1/work-orders', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
   const { source, sourceReference, title, clientId, scheduledAt, grossPay, notes } = req.body ?? {};
   if (!isEnumValue(WorkOrderSource, source)) {
     res.status(400).json({ error: 'source must be FIELD_NATION, MANUAL, SYNCRO, or OTHER.' });
@@ -373,7 +688,7 @@ app.get('/api/v1/work-orders/:id', async (req: Request, res: Response) => {
   res.json({ data: serializeWorkOrder(workOrder) });
 });
 
-app.patch('/api/v1/work-orders/:id/client', async (req: Request, res: Response) => {
+app.patch('/api/v1/work-orders/:id/client', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
   const id = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
   const body = req.body as Record<string, unknown> | null;
   if (id === null || !body || Array.isArray(body) || !hasOwn(body, 'clientId')) {
@@ -408,7 +723,7 @@ app.patch('/api/v1/work-orders/:id/client', async (req: Request, res: Response) 
   }
 });
 
-app.patch('/api/v1/work-orders/:id/status', async (req: Request, res: Response) => {
+app.patch('/api/v1/work-orders/:id/status', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
   const id = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
   const nextStatus = req.body?.status;
   if (id === null || !isEnumValue(WorkOrderStatus, nextStatus)) {

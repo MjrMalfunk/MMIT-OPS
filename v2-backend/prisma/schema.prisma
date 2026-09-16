@@ -38,6 +38,19 @@ enum ServiceTier {
   GOVERN
 }
 
+enum OpsUserRole {
+  OWNER
+  ADMIN
+  OPERATOR
+  VIEWER
+}
+
+enum OpsUserStatus {
+  PENDING_MFA
+  ACTIVE
+  DISABLED
+}
+
 model Client {
   id               BigInt       @id @default(autoincrement()) @db.UnsignedBigInt
   name             String       @unique @db.VarChar(191)
@@ -75,4 +88,60 @@ model WorkOrder {
   @@unique([source, sourceReference])
   @@index([status, scheduledAt])
   @@index([clientId])
+}
+
+model OpsUser {
+  id                   BigInt        @id @default(autoincrement()) @db.UnsignedBigInt
+  email                String        @unique @db.VarChar(191)
+  displayName          String        @db.VarChar(191)
+  role                 OpsUserRole   @default(OPERATOR)
+  status               OpsUserStatus @default(PENDING_MFA)
+  passwordHash         String        @db.VarChar(255)
+  totpSecretCiphertext String        @db.Text
+  mfaVerifiedAt        DateTime?     @db.DateTime(3)
+  createdAt            DateTime      @default(now()) @db.DateTime(3)
+  updatedAt            DateTime      @updatedAt @db.DateTime(3)
+  sessions             OpsSession[]
+  recoveryCodes        OpsRecoveryCode[]
+  invitationsCreated   OpsInvite[]   @relation("OpsInviteCreator")
+}
+
+model OpsInvite {
+  id          String    @id @default(uuid()) @db.Char(36)
+  email       String    @db.VarChar(191)
+  role        OpsUserRole @default(OPERATOR)
+  tokenHash   String    @unique @db.Char(64)
+  expiresAt   DateTime  @db.DateTime(3)
+  acceptedAt  DateTime? @db.DateTime(3)
+  revokedAt   DateTime? @db.DateTime(3)
+  createdAt   DateTime  @default(now()) @db.DateTime(3)
+  invitedById BigInt    @db.UnsignedBigInt
+  invitedBy   OpsUser   @relation("OpsInviteCreator", fields: [invitedById], references: [id], onDelete: Restrict)
+
+  @@index([expiresAt])
+  @@index([email])
+}
+
+model OpsSession {
+  id        String    @id @default(uuid()) @db.Char(36)
+  tokenHash String    @unique @db.Char(64)
+  expiresAt DateTime  @db.DateTime(3)
+  revokedAt DateTime? @db.DateTime(3)
+  lastSeenAt DateTime @default(now()) @db.DateTime(3)
+  createdAt DateTime  @default(now()) @db.DateTime(3)
+  userId    BigInt    @db.UnsignedBigInt
+  user      OpsUser   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model OpsRecoveryCode {
+  id        BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
+  codeHash  String    @unique @db.Char(64)
+  usedAt    DateTime? @db.DateTime(3)
+  createdAt DateTime  @default(now()) @db.DateTime(3)
+  userId    BigInt    @db.UnsignedBigInt
+  user      OpsUser   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, usedAt])
 }

@@ -32,8 +32,33 @@ the API before exposing it beyond the server.
 - `PATCH /api/v1/work-orders/:id/client` explicitly links or unlinks a client.
 - `PATCH /api/v1/work-orders/:id/status` applies a valid lifecycle transition.
 
-The endpoint layer deliberately has no public authentication yet. That is the
-next safety layer, before this API is connected to a browser UI or an importer.
+Client and work-order endpoints require an authenticated V2 OPS session before
+they can be read or changed.
+
+## OPS identity and access
+
+V2 uses password sign-in plus mandatory TOTP and one-time recovery codes. It
+does not use Portal-style email PIN or passwordless sign-in. Passkeys are a
+later enhancement, available only after MFA is established.
+
+Before the first identity deployment, generate three different secrets and put
+them only in the local `.env` file. Never commit them:
+
+```bash
+openssl rand -base64 32
+```
+
+- `POST /api/v1/auth/bootstrap` creates the one initial OWNER only while no
+  V2 OPS users exist. It requires `V2_BOOTSTRAP_TOKEN` and returns a TOTP setup
+  secret/URI.
+- `POST /api/v1/auth/login` requires email, password, and a TOTP code (or an
+  unused recovery code). It returns a 12-hour bearer token.
+- `POST /api/v1/auth/invitations` is OWNER/ADMIN-only. Invitations are
+  single-use and expire after 24 hours.
+- `POST /api/v1/auth/invitations/accept` creates the invited user in pending
+  MFA state and returns their TOTP setup information.
+- `GET /api/v1/auth/me` and all client/work-order routes require the bearer
+  token. Viewer users may read; OWNER, ADMIN, and OPERATOR may write.
 
 ## Local commands
 
