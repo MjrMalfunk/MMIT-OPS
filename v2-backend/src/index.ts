@@ -12,6 +12,8 @@ import {
   PrismaClient,
   ServiceTier,
   WorkOrderAttachmentKind,
+  WorkOrderExpenseCategory,
+  WorkOrderMaterialSource,
   WorkOrderSource,
   WorkOrderStatus,
 } from '@prisma/client';
@@ -85,6 +87,14 @@ function parseOptionalMoney(value: unknown): string | null | undefined {
   if (typeof value !== 'number' && typeof value !== 'string') return undefined;
   const normalized = String(value).trim();
   return /^\d+(\.\d{1,2})?$/.test(normalized) ? normalized : undefined;
+}
+
+function parsePositiveQuantity(value: unknown): string | undefined {
+  if (typeof value !== 'number' && typeof value !== 'string') return undefined;
+  const normalized = String(value).trim();
+  if (!/^\d+(\.\d{1,3})?$/.test(normalized)) return undefined;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) && parsed > 0 && parsed <= 1_000_000 ? normalized : undefined;
 }
 
 function parseOptionalTimestamp(value: unknown): Date | null | undefined {
@@ -178,6 +188,12 @@ type OpsAuditEventWithActor = Prisma.OpsAuditEventGetPayload<{ include: { actor:
 type WorkOrderAttachmentWithUsers = Prisma.WorkOrderAttachmentGetPayload<{
   include: { uploadedBy: true; deletedBy: true };
 }>;
+type WorkOrderExpenseWithUsers = Prisma.WorkOrderExpenseGetPayload<{
+  include: { createdBy: true; voidedBy: true };
+}>;
+type WorkOrderMaterialWithUsers = Prisma.WorkOrderMaterialGetPayload<{
+  include: { createdBy: true; voidedBy: true };
+}>;
 
 function serializeWorkOrder(workOrder: WorkOrderWithClient) {
   return {
@@ -236,6 +252,65 @@ function serializeAttachment(attachment: WorkOrderAttachmentWithUsers) {
         }
       : null,
   };
+}
+
+function serializeExpense(expense: WorkOrderExpenseWithUsers) {
+  return {
+    ...expense,
+    id: expense.id.toString(),
+    workOrderId: expense.workOrderId.toString(),
+    createdById: expense.createdById.toString(),
+    voidedById: expense.voidedById?.toString() ?? null,
+    costAmount: expense.costAmount.toString(),
+    billAmount: expense.billAmount?.toString() ?? null,
+    createdBy: { id: expense.createdBy.id.toString(), email: expense.createdBy.email, displayName: expense.createdBy.displayName },
+    voidedBy: expense.voidedBy
+      ? { id: expense.voidedBy.id.toString(), email: expense.voidedBy.email, displayName: expense.voidedBy.displayName }
+      : null,
+  };
+}
+
+function serializeMaterial(material: WorkOrderMaterialWithUsers) {
+  return {
+    ...material,
+    id: material.id.toString(),
+    workOrderId: material.workOrderId.toString(),
+    createdById: material.createdById.toString(),
+    voidedById: material.voidedById?.toString() ?? null,
+    quantity: material.quantity.toString(),
+    unitCost: material.unitCost.toString(),
+    unitPrice: material.unitPrice?.toString() ?? null,
+    createdBy: { id: material.createdBy.id.toString(), email: material.createdBy.email, displayName: material.createdBy.displayName },
+    voidedBy: material.voidedBy
+      ? { id: material.voidedBy.id.toString(), email: material.voidedBy.email, displayName: material.voidedBy.displayName }
+      : null,
+  };
+}
+
+function auditExpenseSnapshot(expense: {
+  id: bigint; category: WorkOrderExpenseCategory; description: string; costAmount: Prisma.Decimal; billAmount: Prisma.Decimal | null;
+  occurredAt: Date | null; notes: string | null; voidedAt: Date | null;
+}) {
+  return {
+    id: expense.id.toString(), category: expense.category, description: expense.description,
+    costAmount: expense.costAmount.toString(), billAmount: expense.billAmount?.toString() ?? null,
+    occurredAt: expense.occurredAt?.toISOString() ?? null, hasNotes: Boolean(expense.notes), voidedAt: expense.voidedAt?.toISOString() ?? null,
+  };
+}
+
+function auditMaterialSnapshot(material: {
+  id: bigint; source: WorkOrderMaterialSource; description: string; sku: string | null; quantity: Prisma.Decimal;
+  unitCost: Prisma.Decimal; unitPrice: Prisma.Decimal | null; notes: string | null; voidedAt: Date | null;
+}) {
+  return {
+    id: material.id.toString(), source: material.source, description: material.description, sku: material.sku,
+    quantity: material.quantity.toString(), unitCost: material.unitCost.toString(), unitPrice: material.unitPrice?.toString() ?? null,
+    hasNotes: Boolean(material.notes), voidedAt: material.voidedAt?.toISOString() ?? null,
+  };
+}
+
+function workOrderFinanciallyLocked(status: WorkOrderStatus): boolean {
+  return status === WorkOrderStatus.INVOICED || status === WorkOrderStatus.PAID;
 }
 
 type AuthenticatedUser = {
@@ -940,6 +1015,135 @@ app.get('/api/v1/work-orders/:id', async (req: Request, res: Response) => {
     return;
   }
   res.json({ data: serializeWorkOrder(workOrder) });
+});
+
+app.get('/api/v1/work-orders/:id/costs', async (req: Request, res: Response) => {
+  const workOrderId = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  if (workOrderId === null) {
+    res.status(400).json({ error: 'id must be a positive integer.' });
+    return;
+  }
+  const workOrder = await prisma.workOrder.findUnique({ where: { id: workOrderId }, select: { id: true } });
+  if (!workOrder) {
+    res.status(404).json({ error: 'Work order not found.' });
+    return;
+  }
+  const [expenses, materials] = await Promise.all([
+    prisma.workOrderExpense.findMany({
+      where: { workOrderId, voidedAt: null }, include: { createdBy: true, voidedBy: true }, orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+    }),
+    prisma.workOrderMaterial.findMany({
+      where: { workOrderId, voidedAt: null }, include: { createdBy: true, voidedBy: true }, orderBy: { id: 'desc' },
+    }),
+  ]);
+  const expenseCost = expenses.reduce((total, item) => total.plus(item.costAmount), new Prisma.Decimal(0));
+  const expenseBill = expenses.reduce((total, item) => total.plus(item.billAmount ?? 0), new Prisma.Decimal(0));
+  const materialCost = materials.reduce((total, item) => total.plus(item.quantity.mul(item.unitCost)), new Prisma.Decimal(0));
+  const materialBill = materials.reduce((total, item) => total.plus(item.quantity.mul(item.unitPrice ?? 0)), new Prisma.Decimal(0));
+  res.json({
+    data: {
+      expenses: expenses.map(serializeExpense),
+      materials: materials.map(serializeMaterial),
+      totals: {
+        expenseCost: expenseCost.toFixed(2), expenseBill: expenseBill.toFixed(2),
+        materialCost: materialCost.toFixed(2), materialBill: materialBill.toFixed(2),
+        totalCost: expenseCost.plus(materialCost).toFixed(2), totalBill: expenseBill.plus(materialBill).toFixed(2),
+      },
+    },
+  });
+});
+
+app.post('/api/v1/work-orders/:id/expenses', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
+  const workOrderId = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  const body = requestBody(req);
+  const description = body ? parseNullableText(body.description, 255) : undefined;
+  const category = body?.category ?? WorkOrderExpenseCategory.OTHER;
+  const costAmount = body ? parseOptionalMoney(body.costAmount) : undefined;
+  const billAmount = body && hasOwn(body, 'billAmount') ? parseOptionalMoney(body.billAmount) : null;
+  const occurredAt = body && hasOwn(body, 'occurredAt') ? parseOptionalTimestamp(body.occurredAt) : null;
+  const notes = body && hasOwn(body, 'notes') ? parseNullableText(body.notes, 10_000) : null;
+  if (workOrderId === null || !body || !description || !isEnumValue(WorkOrderExpenseCategory, category) || costAmount === undefined || costAmount === null || billAmount === undefined || occurredAt === undefined || notes === undefined) {
+    res.status(400).json({ error: 'Provide description, category, non-negative costAmount, optional billAmount, optional occurredAt, and optional notes.' });
+    return;
+  }
+  const outcome = await prisma.$transaction(async (tx) => {
+    const workOrder = await tx.workOrder.findUnique({ where: { id: workOrderId }, select: { status: true } });
+    if (!workOrder) return { kind: 'not_found' as const };
+    if (workOrderFinanciallyLocked(workOrder.status)) return { kind: 'locked' as const };
+    const created = await tx.workOrderExpense.create({
+      data: { workOrderId, category, description, costAmount, billAmount, occurredAt, notes, createdById: req.auth!.userId },
+      include: { createdBy: true, voidedBy: true },
+    });
+    await writeAuditEvent(tx, req.auth!, 'work_order.expense_created', 'work_order', workOrderId.toString(), { expense: auditExpenseSnapshot(created) });
+    return { kind: 'created' as const, expense: created };
+  });
+  if (outcome.kind === 'not_found') return void res.status(404).json({ error: 'Work order not found.' });
+  if (outcome.kind === 'locked') return void res.status(409).json({ error: 'Invoiced or paid work orders require a later accounting adjustment workflow.' });
+  res.status(201).json({ data: serializeExpense(outcome.expense) });
+});
+
+app.post('/api/v1/work-orders/:id/materials', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
+  const workOrderId = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  const body = requestBody(req);
+  const description = body ? parseNullableText(body.description, 255) : undefined;
+  const source = body?.source ?? WorkOrderMaterialSource.PURCHASE;
+  const sku = body && hasOwn(body, 'sku') ? parseNullableText(body.sku, 100) : null;
+  const quantity = body ? parsePositiveQuantity(body.quantity) : undefined;
+  const unitCost = body ? parseOptionalMoney(body.unitCost) : undefined;
+  const unitPrice = body && hasOwn(body, 'unitPrice') ? parseOptionalMoney(body.unitPrice) : null;
+  const notes = body && hasOwn(body, 'notes') ? parseNullableText(body.notes, 10_000) : null;
+  if (workOrderId === null || !body || !description || !isEnumValue(WorkOrderMaterialSource, source) || sku === undefined || !quantity || unitCost === undefined || unitCost === null || unitPrice === undefined || notes === undefined) {
+    res.status(400).json({ error: 'Provide description, source, positive quantity, non-negative unitCost, optional unitPrice, optional sku, and optional notes.' });
+    return;
+  }
+  const outcome = await prisma.$transaction(async (tx) => {
+    const workOrder = await tx.workOrder.findUnique({ where: { id: workOrderId }, select: { status: true } });
+    if (!workOrder) return { kind: 'not_found' as const };
+    if (workOrderFinanciallyLocked(workOrder.status)) return { kind: 'locked' as const };
+    const created = await tx.workOrderMaterial.create({
+      data: { workOrderId, source, description, sku, quantity, unitCost, unitPrice, notes, createdById: req.auth!.userId },
+      include: { createdBy: true, voidedBy: true },
+    });
+    await writeAuditEvent(tx, req.auth!, 'work_order.material_created', 'work_order', workOrderId.toString(), { material: auditMaterialSnapshot(created) });
+    return { kind: 'created' as const, material: created };
+  });
+  if (outcome.kind === 'not_found') return void res.status(404).json({ error: 'Work order not found.' });
+  if (outcome.kind === 'locked') return void res.status(409).json({ error: 'Invoiced or paid work orders require a later accounting adjustment workflow.' });
+  res.status(201).json({ data: serializeMaterial(outcome.material) });
+});
+
+app.delete('/api/v1/work-orders/:id/expenses/:expenseId', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN), async (req: Request, res: Response) => {
+  const workOrderId = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  const expenseId = typeof req.params.expenseId === 'string' ? parseId(req.params.expenseId) : null;
+  if (workOrderId === null || expenseId === null) return void res.status(400).json({ error: 'Valid work-order and expense ids are required.' });
+  const outcome = await prisma.$transaction(async (tx) => {
+    const existing = await tx.workOrderExpense.findFirst({ where: { id: expenseId, workOrderId, voidedAt: null }, include: { createdBy: true, voidedBy: true, workOrder: { select: { status: true } } } });
+    if (!existing) return { kind: 'not_found' as const };
+    if (workOrderFinanciallyLocked(existing.workOrder.status)) return { kind: 'locked' as const };
+    const voided = await tx.workOrderExpense.update({ where: { id: expenseId }, data: { voidedAt: new Date(), voidedById: req.auth!.userId }, include: { createdBy: true, voidedBy: true } });
+    await writeAuditEvent(tx, req.auth!, 'work_order.expense_voided', 'work_order', workOrderId.toString(), { expense: auditExpenseSnapshot(existing) });
+    return { kind: 'voided' as const, expense: voided };
+  });
+  if (outcome.kind === 'not_found') return void res.status(404).json({ error: 'Expense not found.' });
+  if (outcome.kind === 'locked') return void res.status(409).json({ error: 'Invoiced or paid work orders require a later accounting adjustment workflow.' });
+  res.json({ data: serializeExpense(outcome.expense) });
+});
+
+app.delete('/api/v1/work-orders/:id/materials/:materialId', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN), async (req: Request, res: Response) => {
+  const workOrderId = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  const materialId = typeof req.params.materialId === 'string' ? parseId(req.params.materialId) : null;
+  if (workOrderId === null || materialId === null) return void res.status(400).json({ error: 'Valid work-order and material ids are required.' });
+  const outcome = await prisma.$transaction(async (tx) => {
+    const existing = await tx.workOrderMaterial.findFirst({ where: { id: materialId, workOrderId, voidedAt: null }, include: { createdBy: true, voidedBy: true, workOrder: { select: { status: true } } } });
+    if (!existing) return { kind: 'not_found' as const };
+    if (workOrderFinanciallyLocked(existing.workOrder.status)) return { kind: 'locked' as const };
+    const voided = await tx.workOrderMaterial.update({ where: { id: materialId }, data: { voidedAt: new Date(), voidedById: req.auth!.userId }, include: { createdBy: true, voidedBy: true } });
+    await writeAuditEvent(tx, req.auth!, 'work_order.material_voided', 'work_order', workOrderId.toString(), { material: auditMaterialSnapshot(existing) });
+    return { kind: 'voided' as const, material: voided };
+  });
+  if (outcome.kind === 'not_found') return void res.status(404).json({ error: 'Material not found.' });
+  if (outcome.kind === 'locked') return void res.status(409).json({ error: 'Invoiced or paid work orders require a later accounting adjustment workflow.' });
+  res.json({ data: serializeMaterial(outcome.material) });
 });
 
 app.get('/api/v1/work-orders/:id/attachments', async (req: Request, res: Response) => {

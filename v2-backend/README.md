@@ -35,6 +35,17 @@ the API before exposing it beyond the server.
   allow notes only until a dedicated adjustment workflow is added.
 - `PATCH /api/v1/work-orders/:id/client` explicitly links or unlinks a client.
 - `PATCH /api/v1/work-orders/:id/status` applies a valid lifecycle transition.
+- `GET /api/v1/work-orders/:id/costs` returns active materials, expenses, and
+  separate cost/bill totals for the work order.
+- `POST /api/v1/work-orders/:id/expenses` records an operating expense with an
+  actual cost and optional client bill amount. Categories are material, travel,
+  parking/toll, equipment rental, and other.
+- `POST /api/v1/work-orders/:id/materials` records a purchased item or an
+  inventory pull with quantity, unit cost, and optional unit price.
+- `DELETE /api/v1/work-orders/:id/expenses/:expenseId` and
+  `DELETE /api/v1/work-orders/:id/materials/:materialId` are OWNER/ADMIN-only
+  soft-void actions. They retain the entry and its audit trail rather than
+  deleting financial history.
 - `GET /api/v1/work-orders/:id/attachments` lists active private attachments.
 - `POST /api/v1/work-orders/:id/attachments` accepts one binary file (up to
   25 MiB) from OWNER, ADMIN, or OPERATOR. The client sends an
@@ -60,6 +71,13 @@ into the audit payload.
 Attachment binaries live in the Docker-managed `attachment_data` volume, not
 inside a public document root. Every upload and soft-delete is appended to the
 same V2 audit ledger. There is intentionally no direct public attachment URL.
+
+Materials and expenses are captured independently from attachments so a
+receipt can be uploaded privately without exposing it or mixing binary data
+into a financial record. Their cost and optional bill totals remain editable
+only before the work order is invoiced or paid. V2 does not post accounting
+journals in this slice; the next accounting layer will consume these audited
+source records without duplicating V1 accounting data.
 
 ## OPS identity and access
 

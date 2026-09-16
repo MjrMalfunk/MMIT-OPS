@@ -59,6 +59,20 @@ enum WorkOrderAttachmentKind {
   OTHER
 }
 
+enum WorkOrderExpenseCategory {
+  MATERIAL
+  TRAVEL
+  PARKING_TOLL
+  EQUIPMENT_RENTAL
+  OTHER
+}
+
+enum WorkOrderMaterialSource {
+  PURCHASE
+  INVENTORY_PULL
+  OTHER
+}
+
 model Client {
   id               BigInt       @id @default(autoincrement()) @db.UnsignedBigInt
   name             String       @unique @db.VarChar(191)
@@ -93,6 +107,8 @@ model WorkOrder {
   updatedAt           DateTime        @updatedAt @db.DateTime(3)
   client              Client?         @relation(fields: [clientId], references: [id], onDelete: SetNull)
   attachments         WorkOrderAttachment[]
+  expenses            WorkOrderExpense[]
+  materials           WorkOrderMaterial[]
 
   @@unique([source, sourceReference])
   @@index([status, scheduledAt])
@@ -116,6 +132,10 @@ model OpsUser {
   auditEvents          OpsAuditEvent[]
   attachmentsUploaded  WorkOrderAttachment[] @relation("WorkOrderAttachmentUploader")
   attachmentsDeleted   WorkOrderAttachment[] @relation("WorkOrderAttachmentDeleter")
+  expensesCreated      WorkOrderExpense[]    @relation("WorkOrderExpenseCreator")
+  expensesVoided       WorkOrderExpense[]    @relation("WorkOrderExpenseVoider")
+  materialsCreated     WorkOrderMaterial[]   @relation("WorkOrderMaterialCreator")
+  materialsVoided      WorkOrderMaterial[]   @relation("WorkOrderMaterialVoider")
 }
 
 model OpsInvite {
@@ -193,4 +213,49 @@ model WorkOrderAttachment {
   @@unique([workOrderId, sha256])
   @@index([workOrderId, deletedAt, createdAt])
   @@index([uploadedById, createdAt])
+}
+
+model WorkOrderExpense {
+  id            BigInt                   @id @default(autoincrement()) @db.UnsignedBigInt
+  category      WorkOrderExpenseCategory @default(OTHER)
+  description   String                   @db.VarChar(255)
+  costAmount    Decimal                  @db.Decimal(10, 2)
+  billAmount    Decimal?                 @db.Decimal(10, 2)
+  occurredAt    DateTime?                @db.DateTime(3)
+  notes         String?                  @db.Text
+  createdAt     DateTime                 @default(now()) @db.DateTime(3)
+  updatedAt     DateTime                 @updatedAt @db.DateTime(3)
+  voidedAt      DateTime?                @db.DateTime(3)
+  workOrderId   BigInt                   @db.UnsignedBigInt
+  createdById   BigInt                   @db.UnsignedBigInt
+  voidedById    BigInt?                  @db.UnsignedBigInt
+  workOrder     WorkOrder                @relation(fields: [workOrderId], references: [id], onDelete: Restrict)
+  createdBy     OpsUser                  @relation("WorkOrderExpenseCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  voidedBy      OpsUser?                 @relation("WorkOrderExpenseVoider", fields: [voidedById], references: [id], onDelete: Restrict)
+
+  @@index([workOrderId, voidedAt, occurredAt])
+  @@index([createdById, createdAt])
+}
+
+model WorkOrderMaterial {
+  id            BigInt                   @id @default(autoincrement()) @db.UnsignedBigInt
+  source        WorkOrderMaterialSource  @default(PURCHASE)
+  description   String                   @db.VarChar(255)
+  sku           String?                  @db.VarChar(100)
+  quantity      Decimal                  @db.Decimal(10, 3)
+  unitCost      Decimal                  @db.Decimal(10, 2)
+  unitPrice     Decimal?                 @db.Decimal(10, 2)
+  notes         String?                  @db.Text
+  createdAt     DateTime                 @default(now()) @db.DateTime(3)
+  updatedAt     DateTime                 @updatedAt @db.DateTime(3)
+  voidedAt      DateTime?                @db.DateTime(3)
+  workOrderId   BigInt                   @db.UnsignedBigInt
+  createdById   BigInt                   @db.UnsignedBigInt
+  voidedById    BigInt?                  @db.UnsignedBigInt
+  workOrder     WorkOrder                @relation(fields: [workOrderId], references: [id], onDelete: Restrict)
+  createdBy     OpsUser                  @relation("WorkOrderMaterialCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  voidedBy      OpsUser?                 @relation("WorkOrderMaterialVoider", fields: [voidedById], references: [id], onDelete: Restrict)
+
+  @@index([workOrderId, voidedAt, createdAt])
+  @@index([createdById, createdAt])
 }
