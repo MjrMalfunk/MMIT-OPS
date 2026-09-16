@@ -25,15 +25,31 @@ enum WorkOrderStatus {
   CANCELLED
 }
 
+enum ClientStatus {
+  PROSPECT
+  ACTIVE
+  PAUSED
+  FORMER
+}
+
+enum ServiceTier {
+  MANAGE
+  PROTECT
+  GOVERN
+}
+
 model Client {
-  id        BigInt      @id @default(autoincrement()) @db.UnsignedBigInt
-  name      String      @unique @db.VarChar(191)
-  email     String?     @db.VarChar(191)
-  phone     String?     @db.VarChar(64)
-  notes     String?     @db.Text
-  createdAt DateTime    @default(now()) @db.DateTime(3)
-  updatedAt DateTime    @updatedAt @db.DateTime(3)
-  workOrders WorkOrder[]
+  id               BigInt       @id @default(autoincrement()) @db.UnsignedBigInt
+  name             String       @unique @db.VarChar(191)
+  status           ClientStatus @default(PROSPECT)
+  serviceTier      ServiceTier?
+  syncroCustomerId String?      @unique @db.VarChar(64)
+  email            String?      @db.VarChar(191)
+  phone            String?      @db.VarChar(64)
+  notes            String?      @db.Text
+  createdAt        DateTime     @default(now()) @db.DateTime(3)
+  updatedAt        DateTime     @updatedAt @db.DateTime(3)
+  workOrders       WorkOrder[]
 }
 
 model WorkOrder {

@@ -1,7 +1,14 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { Prisma, PrismaClient, WorkOrderSource, WorkOrderStatus } from '@prisma/client';
+import {
+  ClientStatus,
+  Prisma,
+  PrismaClient,
+  ServiceTier,
+  WorkOrderSource,
+  WorkOrderStatus,
+} from '@prisma/client';
 
 // Load environment variables (db passwords, ports, secrets) securely
 dotenv.config();
@@ -60,7 +67,25 @@ function parseOptionalMoney(value: unknown): string | null | undefined {
   return /^\d+(\.\d{1,2})?$/.test(normalized) ? normalized : undefined;
 }
 
+function parseNullableText(value: unknown, maxLength: number): string | null | undefined {
+  if (value === null) return null;
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim();
+  return normalized.length <= maxLength ? normalized || null : undefined;
+}
+
+function hasOwn(body: Record<string, unknown>, field: string): boolean {
+  return Object.prototype.hasOwnProperty.call(body, field);
+}
+
+function isValidEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
 type WorkOrderWithClient = Prisma.WorkOrderGetPayload<{ include: { client: true } }>;
+type ClientWithCount = Prisma.ClientGetPayload<{
+  include: { _count: { select: { workOrders: true } } };
+}>;
 
 function serializeWorkOrder(workOrder: WorkOrderWithClient) {
   return {
@@ -72,6 +97,192 @@ function serializeWorkOrder(workOrder: WorkOrderWithClient) {
     client: workOrder.client ? { ...workOrder.client, id: workOrder.client.id.toString() } : null,
   };
 }
+
+function serializeClient(client: ClientWithCount) {
+  return {
+    ...client,
+    id: client.id.toString(),
+    workOrderCount: client._count.workOrders,
+    _count: undefined,
+  };
+}
+
+app.get('/api/v1/clients', async (req: Request, res: Response) => {
+  const search = req.query.search;
+  if (search !== undefined && typeof search !== 'string') {
+    res.status(400).json({ error: 'search must be a single text value.' });
+    return;
+  }
+  const normalizedSearch = search?.trim();
+  const clients = await prisma.client.findMany({
+    where: normalizedSearch
+      ? {
+          OR: [
+            { name: { contains: normalizedSearch } },
+            { email: { contains: normalizedSearch } },
+            { syncroCustomerId: { contains: normalizedSearch } },
+          ],
+        }
+      : undefined,
+    include: { _count: { select: { workOrders: true } } },
+    orderBy: [{ status: 'asc' }, { name: 'asc' }],
+    take: 100,
+  });
+  res.json({ data: clients.map(serializeClient) });
+});
+
+app.post('/api/v1/clients', async (req: Request, res: Response) => {
+  const body = req.body as Record<string, unknown> | null;
+  if (!body || Array.isArray(body)) {
+    res.status(400).json({ error: 'A JSON client object is required.' });
+    return;
+  }
+  const name = parseNullableText(body.name, 191);
+  if (!name) {
+    res.status(400).json({ error: 'name is required and must be 191 characters or fewer.' });
+    return;
+  }
+  const email = hasOwn(body, 'email') ? parseNullableText(body.email, 191) : null;
+  const phone = hasOwn(body, 'phone') ? parseNullableText(body.phone, 64) : null;
+  const syncroCustomerId = hasOwn(body, 'syncroCustomerId')
+    ? parseNullableText(body.syncroCustomerId, 64)
+    : null;
+  const notes = hasOwn(body, 'notes') ? parseNullableText(body.notes, 10_000) : null;
+  const status = body.status ?? ClientStatus.PROSPECT;
+  const serviceTier = body.serviceTier ?? null;
+
+  if (email === undefined || (email !== null && !isValidEmail(email))) {
+    res.status(400).json({ error: 'email must be a valid address or null.' });
+    return;
+  }
+  if (phone === undefined || syncroCustomerId === undefined || notes === undefined) {
+    res.status(400).json({ error: 'phone, syncroCustomerId, and notes must be text or null within their allowed lengths.' });
+    return;
+  }
+  if (!isEnumValue(ClientStatus, status) || !isEnumValue(ServiceTier, serviceTier) && serviceTier !== null) {
+    res.status(400).json({ error: 'status or serviceTier is invalid.' });
+    return;
+  }
+
+  try {
+    const client = await prisma.client.create({
+      data: { name, email, phone, syncroCustomerId, notes, status, serviceTier },
+      include: { _count: { select: { workOrders: true } } },
+    });
+    res.status(201).json({ data: serializeClient(client) });
+  } catch (error: unknown) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002') {
+      res.status(409).json({ error: 'A client already uses that name or Syncro customer ID.' });
+      return;
+    }
+    throw error;
+  }
+});
+
+app.get('/api/v1/clients/:id', async (req: Request, res: Response) => {
+  const id = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  if (id === null) {
+    res.status(400).json({ error: 'id must be a positive integer.' });
+    return;
+  }
+  const client = await prisma.client.findUnique({
+    where: { id },
+    include: {
+      _count: { select: { workOrders: true } },
+      workOrders: {
+        include: { client: true },
+        orderBy: { createdAt: 'desc' },
+        take: 25,
+      },
+    },
+  });
+  if (!client) {
+    res.status(404).json({ error: 'Client not found.' });
+    return;
+  }
+  res.json({
+    data: {
+      ...serializeClient(client),
+      recentWorkOrders: client.workOrders.map(serializeWorkOrder),
+    },
+  });
+});
+
+app.patch('/api/v1/clients/:id', async (req: Request, res: Response) => {
+  const id = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  const body = req.body as Record<string, unknown> | null;
+  if (id === null || !body || Array.isArray(body)) {
+    res.status(400).json({ error: 'A valid client id and JSON update object are required.' });
+    return;
+  }
+
+  const data: Prisma.ClientUpdateInput = {};
+  if (hasOwn(body, 'name')) {
+    const name = parseNullableText(body.name, 191);
+    if (!name) {
+      res.status(400).json({ error: 'name must be non-empty and 191 characters or fewer.' });
+      return;
+    }
+    data.name = name;
+  }
+  if (hasOwn(body, 'email')) {
+    const email = parseNullableText(body.email, 191);
+    if (email === undefined || (email !== null && !isValidEmail(email))) {
+      res.status(400).json({ error: 'email must be a valid address or null.' });
+      return;
+    }
+    data.email = email;
+  }
+  for (const [field, maxLength] of [['phone', 64], ['syncroCustomerId', 64], ['notes', 10_000]] as const) {
+    if (hasOwn(body, field)) {
+      const value = parseNullableText(body[field], maxLength);
+      if (value === undefined) {
+        res.status(400).json({ error: `${field} must be text or null within its allowed length.` });
+        return;
+      }
+      data[field] = value;
+    }
+  }
+  if (hasOwn(body, 'status')) {
+    if (!isEnumValue(ClientStatus, body.status)) {
+      res.status(400).json({ error: 'status is invalid.' });
+      return;
+    }
+    data.status = body.status;
+  }
+  if (hasOwn(body, 'serviceTier')) {
+    if (body.serviceTier !== null && !isEnumValue(ServiceTier, body.serviceTier)) {
+      res.status(400).json({ error: 'serviceTier must be MANAGE, PROTECT, GOVERN, or null.' });
+      return;
+    }
+    data.serviceTier = body.serviceTier;
+  }
+  if (Object.keys(data).length === 0) {
+    res.status(400).json({ error: 'Provide at least one editable client field.' });
+    return;
+  }
+
+  try {
+    const client = await prisma.client.update({
+      where: { id },
+      data,
+      include: { _count: { select: { workOrders: true } } },
+    });
+    res.json({ data: serializeClient(client) });
+  } catch (error: unknown) {
+    if (typeof error === 'object' && error !== null && 'code' in error) {
+      if (error.code === 'P2025') {
+        res.status(404).json({ error: 'Client not found.' });
+        return;
+      }
+      if (error.code === 'P2002') {
+        res.status(409).json({ error: 'A client already uses that name or Syncro customer ID.' });
+        return;
+      }
+    }
+    throw error;
+  }
+});
 
 app.get('/api/v1/work-orders', async (req: Request, res: Response) => {
   const { status } = req.query;
@@ -160,6 +371,41 @@ app.get('/api/v1/work-orders/:id', async (req: Request, res: Response) => {
     return;
   }
   res.json({ data: serializeWorkOrder(workOrder) });
+});
+
+app.patch('/api/v1/work-orders/:id/client', async (req: Request, res: Response) => {
+  const id = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  const body = req.body as Record<string, unknown> | null;
+  if (id === null || !body || Array.isArray(body) || !hasOwn(body, 'clientId')) {
+    res.status(400).json({ error: 'A valid work-order id and explicit clientId are required.' });
+    return;
+  }
+  const clientId = body.clientId === null ? null : parseId(String(body.clientId));
+  if (clientId === null && body.clientId !== null) {
+    res.status(400).json({ error: 'clientId must be a positive integer or null to unlink.' });
+    return;
+  }
+  if (clientId !== null) {
+    const client = await prisma.client.findUnique({ where: { id: clientId }, select: { id: true } });
+    if (!client) {
+      res.status(400).json({ error: 'clientId does not refer to an existing client.' });
+      return;
+    }
+  }
+  try {
+    const workOrder = await prisma.workOrder.update({
+      where: { id },
+      data: { clientId },
+      include: { client: true },
+    });
+    res.json({ data: serializeWorkOrder(workOrder) });
+  } catch (error: unknown) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2025') {
+      res.status(404).json({ error: 'Work order not found.' });
+      return;
+    }
+    throw error;
+  }
 });
 
 app.patch('/api/v1/work-orders/:id/status', async (req: Request, res: Response) => {
