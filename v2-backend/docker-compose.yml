@@ -6,12 +6,16 @@ services:
       - "127.0.0.1:${API_PORT:-3000}:3000"
     env_file:
       - .env
+    environment:
+      V2_ATTACHMENT_STORAGE_ROOT: /var/lib/mmit-ops/private/work-order-attachments
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
     command: sh -c "pnpm prisma migrate deploy && node dist/index.js"
+    volumes:
+      - attachment_data:/var/lib/mmit-ops/private
 
   db:
     image: mysql:8
@@ -45,3 +49,4 @@ services:
 
 volumes:
   db_data:
+  attachment_data:

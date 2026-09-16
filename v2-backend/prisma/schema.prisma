@@ -51,6 +51,14 @@ enum OpsUserStatus {
   DISABLED
 }
 
+enum WorkOrderAttachmentKind {
+  RECEIPT
+  PHOTO
+  TRACKER_EXPORT
+  SIGNED_DOCUMENT
+  OTHER
+}
+
 model Client {
   id               BigInt       @id @default(autoincrement()) @db.UnsignedBigInt
   name             String       @unique @db.VarChar(191)
@@ -84,6 +92,7 @@ model WorkOrder {
   createdAt           DateTime        @default(now()) @db.DateTime(3)
   updatedAt           DateTime        @updatedAt @db.DateTime(3)
   client              Client?         @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  attachments         WorkOrderAttachment[]
 
   @@unique([source, sourceReference])
   @@index([status, scheduledAt])
@@ -105,6 +114,8 @@ model OpsUser {
   recoveryCodes        OpsRecoveryCode[]
   invitationsCreated   OpsInvite[]   @relation("OpsInviteCreator")
   auditEvents          OpsAuditEvent[]
+  attachmentsUploaded  WorkOrderAttachment[] @relation("WorkOrderAttachmentUploader")
+  attachmentsDeleted   WorkOrderAttachment[] @relation("WorkOrderAttachmentDeleter")
 }
 
 model OpsInvite {
@@ -160,4 +171,26 @@ model OpsAuditEvent {
   @@index([subjectType, subjectId, createdAt])
   @@index([actorUserId, createdAt])
   @@index([createdAt])
+}
+
+model WorkOrderAttachment {
+  id           String                  @id @default(uuid()) @db.Char(36)
+  kind         WorkOrderAttachmentKind @default(OTHER)
+  originalName String                  @db.VarChar(191)
+  mediaType    String                  @db.VarChar(127)
+  byteSize     Int                     @db.UnsignedInt
+  sha256       String                  @db.Char(64)
+  storageKey   String                  @unique @db.VarChar(255)
+  createdAt    DateTime                @default(now()) @db.DateTime(3)
+  deletedAt    DateTime?               @db.DateTime(3)
+  workOrderId  BigInt                  @db.UnsignedBigInt
+  uploadedById BigInt                  @db.UnsignedBigInt
+  deletedById  BigInt?                 @db.UnsignedBigInt
+  workOrder    WorkOrder               @relation(fields: [workOrderId], references: [id], onDelete: Restrict)
+  uploadedBy   OpsUser                 @relation("WorkOrderAttachmentUploader", fields: [uploadedById], references: [id], onDelete: Restrict)
+  deletedBy    OpsUser?                @relation("WorkOrderAttachmentDeleter", fields: [deletedById], references: [id], onDelete: Restrict)
+
+  @@unique([workOrderId, sha256])
+  @@index([workOrderId, deletedAt, createdAt])
+  @@index([uploadedById, createdAt])
 }

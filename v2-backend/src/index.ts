@@ -1,6 +1,9 @@
 import express, { NextFunction, Request, RequestHandler, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { dirname, resolve, sep } from 'node:path';
 import {
   ClientStatus,
   OpsUserRole,
@@ -8,6 +11,7 @@ import {
   Prisma,
   PrismaClient,
   ServiceTier,
+  WorkOrderAttachmentKind,
   WorkOrderSource,
   WorkOrderStatus,
 } from '@prisma/client';
@@ -106,6 +110,51 @@ function parseOptionalMinutes(value: unknown): number | undefined {
   return undefined;
 }
 
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+function attachmentOriginalName(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const name = value.trim();
+  return /^[A-Za-z0-9][A-Za-z0-9._ -]{0,190}$/.test(name) && !name.includes('..') ? name : null;
+}
+
+function attachmentMediaType(value: unknown): string | null {
+  if (value === undefined || value === null || value === '') return 'application/octet-stream';
+  if (typeof value !== 'string') return null;
+  const mediaType = value.trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(mediaType) ? mediaType : null;
+}
+
+function attachmentStoragePath(storageKey: string): string {
+  const match = /^(\d+)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(storageKey);
+  const configuredRoot = process.env.V2_ATTACHMENT_STORAGE_ROOT;
+  if (!match || !configuredRoot) throw new Error('Attachment storage is not configured correctly.');
+  const root = resolve(configuredRoot);
+  const target = resolve(root, match[1], match[2]);
+  if (!target.startsWith(`${root}${sep}`)) throw new Error('Attachment storage path is invalid.');
+  return target;
+}
+
+function auditAttachmentSnapshot(attachment: {
+  id: string;
+  kind: WorkOrderAttachmentKind;
+  originalName: string;
+  mediaType: string;
+  byteSize: number;
+  sha256: string;
+  createdAt: Date;
+}) {
+  return {
+    id: attachment.id,
+    kind: attachment.kind,
+    originalName: attachment.originalName,
+    mediaType: attachment.mediaType,
+    byteSize: attachment.byteSize,
+    sha256: attachment.sha256,
+    createdAt: attachment.createdAt.toISOString(),
+  };
+}
+
 function parseNullableText(value: unknown, maxLength: number): string | null | undefined {
   if (value === null) return null;
   if (typeof value !== 'string') return undefined;
@@ -126,6 +175,9 @@ type ClientWithCount = Prisma.ClientGetPayload<{
   include: { _count: { select: { workOrders: true } } };
 }>;
 type OpsAuditEventWithActor = Prisma.OpsAuditEventGetPayload<{ include: { actor: true } }>;
+type WorkOrderAttachmentWithUsers = Prisma.WorkOrderAttachmentGetPayload<{
+  include: { uploadedBy: true; deletedBy: true };
+}>;
 
 function serializeWorkOrder(workOrder: WorkOrderWithClient) {
   return {
@@ -158,6 +210,31 @@ function serializeAuditEvent(event: OpsAuditEventWithActor) {
       displayName: event.actor.displayName,
       role: event.actor.role,
     },
+  };
+}
+
+function serializeAttachment(attachment: WorkOrderAttachmentWithUsers) {
+  return {
+    id: attachment.id,
+    kind: attachment.kind,
+    originalName: attachment.originalName,
+    mediaType: attachment.mediaType,
+    byteSize: attachment.byteSize,
+    sha256: attachment.sha256,
+    createdAt: attachment.createdAt,
+    deletedAt: attachment.deletedAt,
+    uploadedBy: {
+      id: attachment.uploadedBy.id.toString(),
+      email: attachment.uploadedBy.email,
+      displayName: attachment.uploadedBy.displayName,
+    },
+    deletedBy: attachment.deletedBy
+      ? {
+          id: attachment.deletedBy.id.toString(),
+          email: attachment.deletedBy.email,
+          displayName: attachment.deletedBy.displayName,
+        }
+      : null,
   };
 }
 
@@ -863,6 +940,149 @@ app.get('/api/v1/work-orders/:id', async (req: Request, res: Response) => {
     return;
   }
   res.json({ data: serializeWorkOrder(workOrder) });
+});
+
+app.get('/api/v1/work-orders/:id/attachments', async (req: Request, res: Response) => {
+  const workOrderId = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  if (workOrderId === null) {
+    res.status(400).json({ error: 'id must be a positive integer.' });
+    return;
+  }
+  const attachments = await prisma.workOrderAttachment.findMany({
+    where: { workOrderId, deletedAt: null },
+    include: { uploadedBy: true, deletedBy: true },
+    orderBy: { createdAt: 'desc' },
+  });
+  res.json({ data: attachments.map(serializeAttachment) });
+});
+
+app.post(
+  '/api/v1/work-orders/:id/attachments',
+  requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR),
+  express.raw({ type: 'application/octet-stream', limit: MAX_ATTACHMENT_BYTES }),
+  async (req: Request, res: Response) => {
+    const workOrderId = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+    const originalName = attachmentOriginalName(req.header('x-file-name'));
+    const kindHeader = req.header('x-attachment-kind') ?? WorkOrderAttachmentKind.OTHER;
+    const mediaType = attachmentMediaType(req.header('x-original-content-type'));
+    if (workOrderId === null || !originalName || !isEnumValue(WorkOrderAttachmentKind, kindHeader) || !mediaType) {
+      res.status(400).json({ error: 'Provide a valid work-order id, X-File-Name, X-Attachment-Kind, and optional X-Original-Content-Type.' });
+      return;
+    }
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      res.status(400).json({ error: 'An application/octet-stream attachment body is required.' });
+      return;
+    }
+    if (req.body.length > MAX_ATTACHMENT_BYTES) {
+      res.status(413).json({ error: 'Attachments may not exceed 25 MiB.' });
+      return;
+    }
+
+    const workOrder = await prisma.workOrder.findUnique({ where: { id: workOrderId }, select: { id: true } });
+    if (!workOrder) {
+      res.status(404).json({ error: 'Work order not found.' });
+      return;
+    }
+
+    const storageKey = `${workOrderId.toString()}/${randomUUID()}`;
+    let storagePath: string;
+    try {
+      storagePath = attachmentStoragePath(storageKey);
+      await mkdir(dirname(storagePath), { recursive: true, mode: 0o700 });
+      await writeFile(storagePath, req.body, { flag: 'wx', mode: 0o600 });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: 'Private attachment storage is unavailable.' });
+      return;
+    }
+
+    const sha256 = createHash('sha256').update(req.body).digest('hex');
+    try {
+      const attachment = await prisma.$transaction(async (tx) => {
+        const created = await tx.workOrderAttachment.create({
+          data: {
+            kind: kindHeader,
+            originalName,
+            mediaType,
+            byteSize: req.body.length,
+            sha256,
+            storageKey,
+            workOrderId,
+            uploadedById: req.auth!.userId,
+          },
+          include: { uploadedBy: true, deletedBy: true },
+        });
+        await writeAuditEvent(tx, req.auth!, 'work_order.attachment_uploaded', 'work_order', workOrderId.toString(), {
+          attachment: auditAttachmentSnapshot(created),
+        });
+        return created;
+      });
+      res.status(201).json({ data: serializeAttachment(attachment) });
+    } catch (error: unknown) {
+      await rm(storagePath, { force: true });
+      if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002') {
+        res.status(409).json({ error: 'This exact attachment already exists on the work order.' });
+        return;
+      }
+      throw error;
+    }
+  },
+);
+
+app.get('/api/v1/work-orders/:id/attachments/:attachmentId/download', async (req: Request, res: Response) => {
+  const workOrderId = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  const attachmentId = typeof req.params.attachmentId === 'string' ? req.params.attachmentId : '';
+  if (workOrderId === null || !/^[0-9a-f-]{36}$/i.test(attachmentId)) {
+    res.status(400).json({ error: 'A valid work-order id and attachment id are required.' });
+    return;
+  }
+  const attachment = await prisma.workOrderAttachment.findFirst({
+    where: { id: attachmentId, workOrderId, deletedAt: null },
+    include: { uploadedBy: true, deletedBy: true },
+  });
+  if (!attachment) {
+    res.status(404).json({ error: 'Attachment not found.' });
+    return;
+  }
+  try {
+    const bytes = await readFile(attachmentStoragePath(attachment.storageKey));
+    res.setHeader('Content-Disposition', `attachment; filename="${attachment.originalName}"`);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.type(attachment.mediaType).send(bytes);
+  } catch (error) {
+    console.error(error);
+    res.status(404).json({ error: 'Attachment file is unavailable.' });
+  }
+});
+
+app.delete('/api/v1/work-orders/:id/attachments/:attachmentId', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN), async (req: Request, res: Response) => {
+  const workOrderId = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  const attachmentId = typeof req.params.attachmentId === 'string' ? req.params.attachmentId : '';
+  if (workOrderId === null || !/^[0-9a-f-]{36}$/i.test(attachmentId)) {
+    res.status(400).json({ error: 'A valid work-order id and attachment id are required.' });
+    return;
+  }
+  const attachment = await prisma.$transaction(async (tx) => {
+    const existing = await tx.workOrderAttachment.findFirst({
+      where: { id: attachmentId, workOrderId, deletedAt: null },
+      include: { uploadedBy: true, deletedBy: true },
+    });
+    if (!existing) return null;
+    const deleted = await tx.workOrderAttachment.update({
+      where: { id: existing.id },
+      data: { deletedAt: new Date(), deletedById: req.auth!.userId },
+      include: { uploadedBy: true, deletedBy: true },
+    });
+    await writeAuditEvent(tx, req.auth!, 'work_order.attachment_deleted', 'work_order', workOrderId.toString(), {
+      attachment: auditAttachmentSnapshot(existing),
+    });
+    return deleted;
+  });
+  if (!attachment) {
+    res.status(404).json({ error: 'Attachment not found.' });
+    return;
+  }
+  res.json({ data: serializeAttachment(attachment) });
 });
 
 app.patch('/api/v1/work-orders/:id', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {

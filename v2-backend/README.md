@@ -35,6 +35,15 @@ the API before exposing it beyond the server.
   allow notes only until a dedicated adjustment workflow is added.
 - `PATCH /api/v1/work-orders/:id/client` explicitly links or unlinks a client.
 - `PATCH /api/v1/work-orders/:id/status` applies a valid lifecycle transition.
+- `GET /api/v1/work-orders/:id/attachments` lists active private attachments.
+- `POST /api/v1/work-orders/:id/attachments` accepts one binary file (up to
+  25 MiB) from OWNER, ADMIN, or OPERATOR. The client sends an
+  `application/octet-stream` body plus `X-File-Name`, `X-Attachment-Kind`, and
+  optional `X-Original-Content-Type` headers.
+- `GET /api/v1/work-orders/:id/attachments/:attachmentId/download` streams an
+  attachment only to an authenticated OPS user.
+- `DELETE /api/v1/work-orders/:id/attachments/:attachmentId` is OWNER/ADMIN
+  only and soft-deletes the record; the private file is retained for audit.
 - `GET /api/v1/audit-events` is OWNER/ADMIN-only and returns the newest 50
   audit events (up to 100). Optional filters: `subjectType`, `subjectId`.
 
@@ -47,6 +56,10 @@ database transaction as the change. Audit records are read-only through this
 API. They retain the acting OPS identity and safe before/after operational
 snapshots; free-form notes are represented only as present/absent, never copied
 into the audit payload.
+
+Attachment binaries live in the Docker-managed `attachment_data` volume, not
+inside a public document root. Every upload and soft-delete is appended to the
+same V2 audit ledger. There is intentionally no direct public attachment URL.
 
 ## OPS identity and access
 
