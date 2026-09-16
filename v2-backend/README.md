@@ -29,6 +29,10 @@ the API before exposing it beyond the server.
   source reference. The source/reference pair is unique, so an importer cannot
   silently duplicate a job.
 - `GET /api/v1/work-orders/:id` returns one work order.
+- `PATCH /api/v1/work-orders/:id` updates selected operational values: title,
+  schedule, actual check-in/out, gross pay, mileage, drive/onsite/admin minutes,
+  and notes. Check-out cannot precede check-in. Invoiced and paid work orders
+  allow notes only until a dedicated adjustment workflow is added.
 - `PATCH /api/v1/work-orders/:id/client` explicitly links or unlinks a client.
 - `PATCH /api/v1/work-orders/:id/status` applies a valid lifecycle transition.
 - `GET /api/v1/audit-events` is OWNER/ADMIN-only and returns the newest 50

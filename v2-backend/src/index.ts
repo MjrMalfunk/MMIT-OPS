@@ -83,6 +83,29 @@ function parseOptionalMoney(value: unknown): string | null | undefined {
   return /^\d+(\.\d{1,2})?$/.test(normalized) ? normalized : undefined;
 }
 
+function parseOptionalTimestamp(value: unknown): Date | null | undefined {
+  if (value === null || value === '') return null;
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim();
+  if (!normalized) return null;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(normalized)) {
+    return undefined;
+  }
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+}
+
+function parseOptionalMinutes(value: unknown): number | undefined {
+  if (typeof value === 'number') {
+    return Number.isInteger(value) && value >= 0 && value <= 10_080 ? value : undefined;
+  }
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
+    const parsed = Number(value.trim());
+    return Number.isSafeInteger(parsed) && parsed <= 10_080 ? parsed : undefined;
+  }
+  return undefined;
+}
+
 function parseNullableText(value: unknown, maxLength: number): string | null | undefined {
   if (value === null) return null;
   if (typeof value !== 'string') return undefined;
@@ -840,6 +863,117 @@ app.get('/api/v1/work-orders/:id', async (req: Request, res: Response) => {
     return;
   }
   res.json({ data: serializeWorkOrder(workOrder) });
+});
+
+app.patch('/api/v1/work-orders/:id', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
+  const id = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  const body = requestBody(req);
+  if (id === null || !body) {
+    res.status(400).json({ error: 'A valid work-order id and JSON update object are required.' });
+    return;
+  }
+
+  const data: Prisma.WorkOrderUpdateInput = {};
+  const changedFields: string[] = [];
+  let checkInAt: Date | null | undefined;
+  let checkOutAt: Date | null | undefined;
+
+  if (hasOwn(body, 'title')) {
+    const title = parseNullableText(body.title, 255);
+    if (!title) {
+      res.status(400).json({ error: 'title must be non-empty and 255 characters or fewer.' });
+      return;
+    }
+    data.title = title;
+    changedFields.push('title');
+  }
+  for (const field of ['scheduledAt', 'checkInAt', 'checkOutAt'] as const) {
+    if (!hasOwn(body, field)) continue;
+    const value = parseOptionalTimestamp(body[field]);
+    if (value === undefined) {
+      res.status(400).json({ error: `${field} must be an ISO timestamp with a timezone or null.` });
+      return;
+    }
+    data[field] = value;
+    if (field === 'checkInAt') checkInAt = value;
+    if (field === 'checkOutAt') checkOutAt = value;
+    changedFields.push(field);
+  }
+  for (const field of ['grossPay', 'mileage'] as const) {
+    if (!hasOwn(body, field)) continue;
+    const value = parseOptionalMoney(body[field]);
+    if (value === undefined) {
+      res.status(400).json({ error: `${field} must be a non-negative amount with at most two decimals or null.` });
+      return;
+    }
+    data[field] = value;
+    changedFields.push(field);
+  }
+  for (const field of ['driveMinutes', 'onsiteMinutes', 'adminMinutes'] as const) {
+    if (!hasOwn(body, field)) continue;
+    const value = parseOptionalMinutes(body[field]);
+    if (value === undefined) {
+      res.status(400).json({ error: `${field} must be a whole number from 0 through 10080.` });
+      return;
+    }
+    data[field] = value;
+    changedFields.push(field);
+  }
+  if (hasOwn(body, 'notes')) {
+    const notes = parseNullableText(body.notes, 10_000);
+    if (notes === undefined) {
+      res.status(400).json({ error: 'notes must be text or null and 10,000 characters or fewer.' });
+      return;
+    }
+    data.notes = notes;
+    changedFields.push('notes');
+  }
+  if (changedFields.length === 0) {
+    res.status(400).json({ error: 'Provide at least one editable work-order field.' });
+    return;
+  }
+
+  const outcome = await prisma.$transaction(async (tx) => {
+    const before = await tx.workOrder.findUnique({ where: { id } });
+    if (!before) return { kind: 'not_found' as const };
+
+    const effectiveCheckIn = checkInAt === undefined ? before.checkInAt : checkInAt;
+    const effectiveCheckOut = checkOutAt === undefined ? before.checkOutAt : checkOutAt;
+    if (effectiveCheckIn && effectiveCheckOut && effectiveCheckOut < effectiveCheckIn) {
+      return { kind: 'invalid_times' as const };
+    }
+
+    const operationalFields = changedFields.filter((field) => field !== 'notes');
+    if ((before.status === WorkOrderStatus.INVOICED || before.status === WorkOrderStatus.PAID) && operationalFields.length > 0) {
+      return { kind: 'locked' as const };
+    }
+
+    const updated = await tx.workOrder.update({
+      where: { id },
+      data,
+      include: { client: true },
+    });
+    await writeAuditEvent(tx, req.auth!, 'work_order.updated', 'work_order', updated.id.toString(), {
+      before: auditWorkOrderSnapshot(before),
+      after: auditWorkOrderSnapshot(updated),
+      changedFields,
+    });
+    return { kind: 'updated' as const, workOrder: updated };
+  });
+
+  if (outcome.kind === 'not_found') {
+    res.status(404).json({ error: 'Work order not found.' });
+    return;
+  }
+  if (outcome.kind === 'invalid_times') {
+    res.status(400).json({ error: 'checkOutAt cannot be earlier than checkInAt.' });
+    return;
+  }
+  if (outcome.kind === 'locked') {
+    res.status(409).json({ error: 'Invoiced or paid work orders allow notes only. Use a later adjustment workflow for operational or financial corrections.' });
+    return;
+  }
+  res.json({ data: serializeWorkOrder(outcome.workOrder) });
 });
 
 app.patch('/api/v1/work-orders/:id/client', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
