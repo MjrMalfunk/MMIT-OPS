@@ -10,9 +10,23 @@ and Redis available through Docker Compose.
 2. Build and start the stack with `docker compose up --build -d`.
 3. Confirm the API with `curl http://127.0.0.1:3000/api/health`.
 
-The API is intentionally small at this stage. Prisma has a valid MySQL schema
-and generated client, but no business models or migrations have been created.
-Those come next with the OPS v2 domain design.
+The first V2 vertical slice is Field Work Orders. Compose applies Prisma
+migrations after MySQL is healthy, then starts the API. The database and API
+are bound to localhost only; put a reverse proxy and authentication in front of
+the API before exposing it beyond the server.
+
+## Field Work Order API
+
+- `GET /api/health` checks the API and MySQL connection.
+- `GET /api/v1/work-orders` lists work orders. Optional: `?status=SCHEDULED`.
+- `POST /api/v1/work-orders` creates a work order with an explicit source and
+  source reference. The source/reference pair is unique, so an importer cannot
+  silently duplicate a job.
+- `GET /api/v1/work-orders/:id` returns one work order.
+- `PATCH /api/v1/work-orders/:id/status` applies a valid lifecycle transition.
+
+The endpoint layer deliberately has no public authentication yet. That is the
+next safety layer, before this API is connected to a browser UI or an importer.
 
 ## Local commands
 
@@ -20,6 +34,7 @@ Those come next with the OPS v2 domain design.
 - `pnpm typecheck` - check TypeScript without emitting files.
 - `pnpm build` - compile to `dist/`.
 - `pnpm prisma:generate` - regenerate the Prisma client.
+- `pnpm prisma:migrate:deploy` - apply checked-in migrations.
 
 `pnpm-workspace.yaml` records the reviewed dependency build scripts required
 by this project. Keep that allow-list explicit; do not switch to an allow-all

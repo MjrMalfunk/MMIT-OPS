@@ -6,3 +6,57 @@ datasource db {
   provider = "mysql"
   url      = env("DATABASE_URL")
 }
+
+enum WorkOrderSource {
+  FIELD_NATION
+  MANUAL
+  SYNCRO
+  OTHER
+}
+
+enum WorkOrderStatus {
+  REQUESTED
+  ASSIGNED
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  INVOICED
+  PAID
+  CANCELLED
+}
+
+model Client {
+  id        BigInt      @id @default(autoincrement()) @db.UnsignedBigInt
+  name      String      @unique @db.VarChar(191)
+  email     String?     @db.VarChar(191)
+  phone     String?     @db.VarChar(64)
+  notes     String?     @db.Text
+  createdAt DateTime    @default(now()) @db.DateTime(3)
+  updatedAt DateTime    @updatedAt @db.DateTime(3)
+  workOrders WorkOrder[]
+}
+
+model WorkOrder {
+  id                  BigInt          @id @default(autoincrement()) @db.UnsignedBigInt
+  source              WorkOrderSource
+  sourceReference     String          @db.VarChar(191)
+  status              WorkOrderStatus @default(REQUESTED)
+  title               String          @db.VarChar(255)
+  clientId            BigInt?         @db.UnsignedBigInt
+  scheduledAt         DateTime?       @db.DateTime(3)
+  checkInAt           DateTime?       @db.DateTime(3)
+  checkOutAt          DateTime?       @db.DateTime(3)
+  grossPay            Decimal?        @db.Decimal(10, 2)
+  mileage             Decimal?        @db.Decimal(10, 2)
+  driveMinutes        Int             @default(0) @db.UnsignedInt
+  onsiteMinutes       Int             @default(0) @db.UnsignedInt
+  adminMinutes        Int             @default(0) @db.UnsignedInt
+  notes               String?         @db.Text
+  createdAt           DateTime        @default(now()) @db.DateTime(3)
+  updatedAt           DateTime        @updatedAt @db.DateTime(3)
+  client              Client?         @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
+  @@unique([source, sourceReference])
+  @@index([status, scheduledAt])
+  @@index([clientId])
+}
