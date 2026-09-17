@@ -13,6 +13,8 @@ import {
   ServiceTier,
   WorkOrderAttachmentKind,
   WorkOrderExpenseCategory,
+  WorkOrderInvoiceLineType,
+  WorkOrderInvoiceStatus,
   WorkOrderMaterialSource,
   WorkOrderSource,
   WorkOrderStatus,
@@ -194,6 +196,9 @@ type WorkOrderExpenseWithUsers = Prisma.WorkOrderExpenseGetPayload<{
 type WorkOrderMaterialWithUsers = Prisma.WorkOrderMaterialGetPayload<{
   include: { createdBy: true; voidedBy: true };
 }>;
+type WorkOrderInvoiceWithPeople = Prisma.WorkOrderInvoiceGetPayload<{
+  include: { lines: true; createdBy: true; issuedBy: true; voidedBy: true };
+}>;
 
 function serializeWorkOrder(workOrder: WorkOrderWithClient) {
   return {
@@ -287,6 +292,26 @@ function serializeMaterial(material: WorkOrderMaterialWithUsers) {
   };
 }
 
+function serializeInvoice(invoice: WorkOrderInvoiceWithPeople) {
+  return {
+    ...invoice,
+    id: invoice.id.toString(),
+    workOrderId: invoice.workOrderId.toString(),
+    createdById: invoice.createdById.toString(),
+    issuedById: invoice.issuedById?.toString() ?? null,
+    voidedById: invoice.voidedById?.toString() ?? null,
+    totalAmount: invoice.totalAmount.toString(),
+    lines: invoice.lines.map((line) => ({
+      ...line,
+      id: line.id.toString(), invoiceId: line.invoiceId.toString(),
+      quantity: line.quantity.toString(), unitAmount: line.unitAmount.toString(), totalAmount: line.totalAmount.toString(),
+    })),
+    createdBy: { id: invoice.createdBy.id.toString(), email: invoice.createdBy.email, displayName: invoice.createdBy.displayName },
+    issuedBy: invoice.issuedBy ? { id: invoice.issuedBy.id.toString(), email: invoice.issuedBy.email, displayName: invoice.issuedBy.displayName } : null,
+    voidedBy: invoice.voidedBy ? { id: invoice.voidedBy.id.toString(), email: invoice.voidedBy.email, displayName: invoice.voidedBy.displayName } : null,
+  };
+}
+
 function auditExpenseSnapshot(expense: {
   id: bigint; category: WorkOrderExpenseCategory; description: string; costAmount: Prisma.Decimal; billAmount: Prisma.Decimal | null;
   occurredAt: Date | null; notes: string | null; voidedAt: Date | null;
@@ -311,6 +336,13 @@ function auditMaterialSnapshot(material: {
 
 function workOrderFinanciallyLocked(status: WorkOrderStatus): boolean {
   return status === WorkOrderStatus.INVOICED || status === WorkOrderStatus.PAID;
+}
+
+function auditInvoiceSnapshot(invoice: { id: bigint; status: WorkOrderInvoiceStatus; clientName: string; clientEmail: string | null; totalAmount: Prisma.Decimal; issuedAt: Date | null; voidedAt: Date | null; }) {
+  return {
+    id: invoice.id.toString(), status: invoice.status, clientName: invoice.clientName, clientEmail: invoice.clientEmail,
+    totalAmount: invoice.totalAmount.toString(), issuedAt: invoice.issuedAt?.toISOString() ?? null, voidedAt: invoice.voidedAt?.toISOString() ?? null,
+  };
 }
 
 type AuthenticatedUser = {
@@ -1144,6 +1176,116 @@ app.delete('/api/v1/work-orders/:id/materials/:materialId', requireRoles(OpsUser
   if (outcome.kind === 'not_found') return void res.status(404).json({ error: 'Material not found.' });
   if (outcome.kind === 'locked') return void res.status(409).json({ error: 'Invoiced or paid work orders require a later accounting adjustment workflow.' });
   res.json({ data: serializeMaterial(outcome.material) });
+});
+
+app.get('/api/v1/work-orders/:id/invoice-drafts', async (req: Request, res: Response) => {
+  const workOrderId = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  if (workOrderId === null) return void res.status(400).json({ error: 'id must be a positive integer.' });
+  const invoices = await prisma.workOrderInvoice.findMany({
+    where: { workOrderId },
+    include: { lines: { orderBy: { id: 'asc' } }, createdBy: true, issuedBy: true, voidedBy: true },
+    orderBy: { id: 'desc' },
+  });
+  res.json({ data: invoices.map(serializeInvoice) });
+});
+
+app.post('/api/v1/work-orders/:id/invoice-drafts', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
+  const workOrderId = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  if (workOrderId === null) return void res.status(400).json({ error: 'id must be a positive integer.' });
+  const outcome = await prisma.$transaction(async (tx) => {
+    const workOrder = await tx.workOrder.findUnique({
+      where: { id: workOrderId },
+      include: {
+        client: true,
+        expenses: { where: { voidedAt: null, billAmount: { not: null } } },
+        materials: { where: { voidedAt: null, unitPrice: { not: null } } },
+      },
+    });
+    if (!workOrder) return { kind: 'not_found' as const };
+    if (workOrder.source === WorkOrderSource.FIELD_NATION) return { kind: 'provider_only' as const };
+    if (workOrder.status !== WorkOrderStatus.COMPLETED) return { kind: 'not_completed' as const, status: workOrder.status };
+    if (!workOrder.client) return { kind: 'missing_client' as const };
+    const activeInvoice = await tx.workOrderInvoice.findFirst({ where: { workOrderId, status: { in: [WorkOrderInvoiceStatus.DRAFT, WorkOrderInvoiceStatus.ISSUED] } }, select: { id: true } });
+    if (activeInvoice) return { kind: 'exists' as const, invoiceId: activeInvoice.id };
+
+    const lines: Array<{ lineType: WorkOrderInvoiceLineType; description: string; quantity: Prisma.Decimal; unitAmount: Prisma.Decimal; totalAmount: Prisma.Decimal; sourceRecordId?: string }> = [];
+    if (workOrder.grossPay && workOrder.grossPay.gt(0)) {
+      lines.push({ lineType: WorkOrderInvoiceLineType.LABOR, description: workOrder.title, quantity: new Prisma.Decimal(1), unitAmount: workOrder.grossPay, totalAmount: workOrder.grossPay, sourceRecordId: workOrder.id.toString() });
+    }
+    for (const material of workOrder.materials) {
+      const totalAmount = material.quantity.mul(material.unitPrice!);
+      lines.push({ lineType: WorkOrderInvoiceLineType.MATERIAL, description: material.description, quantity: material.quantity, unitAmount: material.unitPrice!, totalAmount, sourceRecordId: material.id.toString() });
+    }
+    for (const expense of workOrder.expenses) {
+      lines.push({ lineType: WorkOrderInvoiceLineType.EXPENSE, description: expense.description, quantity: new Prisma.Decimal(1), unitAmount: expense.billAmount!, totalAmount: expense.billAmount!, sourceRecordId: expense.id.toString() });
+    }
+    const totalAmount = lines.reduce((total, line) => total.plus(line.totalAmount), new Prisma.Decimal(0));
+    if (lines.length === 0 || totalAmount.lte(0)) return { kind: 'no_lines' as const };
+    const created = await tx.workOrderInvoice.create({
+      data: {
+        workOrderId, clientName: workOrder.client.name, clientEmail: workOrder.client.email, totalAmount, createdById: req.auth!.userId,
+        lines: { create: lines },
+      },
+      include: { lines: { orderBy: { id: 'asc' } }, createdBy: true, issuedBy: true, voidedBy: true },
+    });
+    await writeAuditEvent(tx, req.auth!, 'work_order.invoice_draft_created', 'work_order', workOrderId.toString(), {
+      invoice: auditInvoiceSnapshot(created), lineCount: lines.length,
+    });
+    return { kind: 'created' as const, invoice: created };
+  });
+  if (outcome.kind === 'not_found') return void res.status(404).json({ error: 'Work order not found.' });
+  if (outcome.kind === 'provider_only') return void res.status(409).json({ error: 'FieldNation work orders are payout-only and cannot create customer invoice drafts.' });
+  if (outcome.kind === 'not_completed') return void res.status(409).json({ error: `Only completed direct-work orders can create an invoice draft (current status: ${outcome.status}).` });
+  if (outcome.kind === 'missing_client') return void res.status(409).json({ error: 'Link a client before creating a direct-work invoice draft.' });
+  if (outcome.kind === 'exists') return void res.status(409).json({ error: `An active invoice draft already exists (id ${outcome.invoiceId.toString()}).` });
+  if (outcome.kind === 'no_lines') return void res.status(409).json({ error: 'An invoice draft needs positive billable labor, materials, or reimbursable expenses.' });
+  res.status(201).json({ data: serializeInvoice(outcome.invoice) });
+});
+
+app.post('/api/v1/work-orders/:id/invoice-drafts/:invoiceId/issue', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN), async (req: Request, res: Response) => {
+  const workOrderId = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  const invoiceId = typeof req.params.invoiceId === 'string' ? parseId(req.params.invoiceId) : null;
+  if (workOrderId === null || invoiceId === null) return void res.status(400).json({ error: 'Valid work-order and invoice ids are required.' });
+  const outcome = await prisma.$transaction(async (tx) => {
+    const invoice = await tx.workOrderInvoice.findFirst({
+      where: { id: invoiceId, workOrderId },
+      include: { lines: { orderBy: { id: 'asc' } }, createdBy: true, issuedBy: true, voidedBy: true, workOrder: { select: { status: true } } },
+    });
+    if (!invoice) return { kind: 'not_found' as const };
+    if (invoice.status !== WorkOrderInvoiceStatus.DRAFT) return { kind: 'not_draft' as const, status: invoice.status };
+    if (invoice.workOrder.status !== WorkOrderStatus.COMPLETED) return { kind: 'invalid_status' as const, status: invoice.workOrder.status };
+    const issued = await tx.workOrderInvoice.update({
+      where: { id: invoiceId }, data: { status: WorkOrderInvoiceStatus.ISSUED, issuedAt: new Date(), issuedById: req.auth!.userId },
+      include: { lines: { orderBy: { id: 'asc' } }, createdBy: true, issuedBy: true, voidedBy: true },
+    });
+    await tx.workOrder.update({ where: { id: workOrderId }, data: { status: WorkOrderStatus.INVOICED } });
+    await writeAuditEvent(tx, req.auth!, 'work_order.invoice_issued', 'work_order', workOrderId.toString(), { invoice: auditInvoiceSnapshot(issued), changedFields: ['invoice.status', 'work_order.status'] });
+    return { kind: 'issued' as const, invoice: issued };
+  });
+  if (outcome.kind === 'not_found') return void res.status(404).json({ error: 'Invoice draft not found.' });
+  if (outcome.kind === 'not_draft') return void res.status(409).json({ error: `Only draft invoices can be issued (current status: ${outcome.status}).` });
+  if (outcome.kind === 'invalid_status') return void res.status(409).json({ error: `The work order must remain completed to issue this invoice (current status: ${outcome.status}).` });
+  res.json({ data: serializeInvoice(outcome.invoice) });
+});
+
+app.post('/api/v1/work-orders/:id/invoice-drafts/:invoiceId/void', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN), async (req: Request, res: Response) => {
+  const workOrderId = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  const invoiceId = typeof req.params.invoiceId === 'string' ? parseId(req.params.invoiceId) : null;
+  if (workOrderId === null || invoiceId === null) return void res.status(400).json({ error: 'Valid work-order and invoice ids are required.' });
+  const outcome = await prisma.$transaction(async (tx) => {
+    const existing = await tx.workOrderInvoice.findFirst({ where: { id: invoiceId, workOrderId }, include: { lines: true, createdBy: true, issuedBy: true, voidedBy: true } });
+    if (!existing) return { kind: 'not_found' as const };
+    if (existing.status !== WorkOrderInvoiceStatus.DRAFT) return { kind: 'not_draft' as const, status: existing.status };
+    const voided = await tx.workOrderInvoice.update({
+      where: { id: invoiceId }, data: { status: WorkOrderInvoiceStatus.VOIDED, voidedAt: new Date(), voidedById: req.auth!.userId },
+      include: { lines: { orderBy: { id: 'asc' } }, createdBy: true, issuedBy: true, voidedBy: true },
+    });
+    await writeAuditEvent(tx, req.auth!, 'work_order.invoice_draft_voided', 'work_order', workOrderId.toString(), { invoice: auditInvoiceSnapshot(existing) });
+    return { kind: 'voided' as const, invoice: voided };
+  });
+  if (outcome.kind === 'not_found') return void res.status(404).json({ error: 'Invoice draft not found.' });
+  if (outcome.kind === 'not_draft') return void res.status(409).json({ error: `Only draft invoices can be voided (current status: ${outcome.status}).` });
+  res.json({ data: serializeInvoice(outcome.invoice) });
 });
 
 app.get('/api/v1/work-orders/:id/attachments', async (req: Request, res: Response) => {

@@ -46,6 +46,17 @@ the API before exposing it beyond the server.
   `DELETE /api/v1/work-orders/:id/materials/:materialId` are OWNER/ADMIN-only
   soft-void actions. They retain the entry and its audit trail rather than
   deleting financial history.
+- `GET /api/v1/work-orders/:id/invoice-drafts` returns historical V2 invoice
+  snapshots for one work order.
+- `POST /api/v1/work-orders/:id/invoice-drafts` creates a fixed invoice draft
+  from completed direct work: billable labor, materials with a unit price, and
+  expenses with a bill amount. FieldNation work orders remain payout-only.
+- `POST /api/v1/work-orders/:id/invoice-drafts/:invoiceId/issue` is
+  OWNER/ADMIN-only. It issues a draft and moves the completed work order to
+  INVOICED in the same audited transaction. It does not send an email, charge a
+  card, or touch V1 accounting.
+- `POST /api/v1/work-orders/:id/invoice-drafts/:invoiceId/void` is
+  OWNER/ADMIN-only and only voids an unissued draft, preserving its snapshot.
 - `GET /api/v1/work-orders/:id/attachments` lists active private attachments.
 - `POST /api/v1/work-orders/:id/attachments` accepts one binary file (up to
   25 MiB) from OWNER, ADMIN, or OPERATOR. The client sends an
@@ -78,6 +89,13 @@ into a financial record. Their cost and optional bill totals remain editable
 only before the work order is invoiced or paid. V2 does not post accounting
 journals in this slice; the next accounting layer will consume these audited
 source records without duplicating V1 accounting data.
+
+Invoice drafts are V2-only financial snapshots for direct/client work. They
+never exist for FieldNation jobs, because those jobs are provider payouts rather
+than customer receivables. Issuing a draft makes the source work order
+historical and prepares it for a later payment/reconciliation module; it does
+not represent payment, a bank deposit, Stripe processing, or an external invoice
+delivery.
 
 ## OPS identity and access
 

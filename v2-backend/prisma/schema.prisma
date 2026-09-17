@@ -73,6 +73,18 @@ enum WorkOrderMaterialSource {
   OTHER
 }
 
+enum WorkOrderInvoiceStatus {
+  DRAFT
+  ISSUED
+  VOIDED
+}
+
+enum WorkOrderInvoiceLineType {
+  LABOR
+  MATERIAL
+  EXPENSE
+}
+
 model Client {
   id               BigInt       @id @default(autoincrement()) @db.UnsignedBigInt
   name             String       @unique @db.VarChar(191)
@@ -109,6 +121,7 @@ model WorkOrder {
   attachments         WorkOrderAttachment[]
   expenses            WorkOrderExpense[]
   materials           WorkOrderMaterial[]
+  invoices            WorkOrderInvoice[]
 
   @@unique([source, sourceReference])
   @@index([status, scheduledAt])
@@ -136,6 +149,9 @@ model OpsUser {
   expensesVoided       WorkOrderExpense[]    @relation("WorkOrderExpenseVoider")
   materialsCreated     WorkOrderMaterial[]   @relation("WorkOrderMaterialCreator")
   materialsVoided      WorkOrderMaterial[]   @relation("WorkOrderMaterialVoider")
+  invoicesCreated      WorkOrderInvoice[]    @relation("WorkOrderInvoiceCreator")
+  invoicesIssued       WorkOrderInvoice[]    @relation("WorkOrderInvoiceIssuer")
+  invoicesVoided       WorkOrderInvoice[]    @relation("WorkOrderInvoiceVoider")
 }
 
 model OpsInvite {
@@ -258,4 +274,44 @@ model WorkOrderMaterial {
 
   @@index([workOrderId, voidedAt, createdAt])
   @@index([createdById, createdAt])
+}
+
+model WorkOrderInvoice {
+  id             BigInt                 @id @default(autoincrement()) @db.UnsignedBigInt
+  status         WorkOrderInvoiceStatus @default(DRAFT)
+  clientName     String                 @db.VarChar(191)
+  clientEmail    String?                @db.VarChar(191)
+  currency       String                 @default("USD") @db.Char(3)
+  totalAmount    Decimal                @db.Decimal(10, 2)
+  createdAt      DateTime               @default(now()) @db.DateTime(3)
+  updatedAt      DateTime               @updatedAt @db.DateTime(3)
+  issuedAt       DateTime?              @db.DateTime(3)
+  voidedAt       DateTime?              @db.DateTime(3)
+  workOrderId    BigInt                 @db.UnsignedBigInt
+  createdById    BigInt                 @db.UnsignedBigInt
+  issuedById     BigInt?                @db.UnsignedBigInt
+  voidedById     BigInt?                @db.UnsignedBigInt
+  workOrder      WorkOrder              @relation(fields: [workOrderId], references: [id], onDelete: Restrict)
+  createdBy      OpsUser                @relation("WorkOrderInvoiceCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  issuedBy       OpsUser?               @relation("WorkOrderInvoiceIssuer", fields: [issuedById], references: [id], onDelete: Restrict)
+  voidedBy       OpsUser?               @relation("WorkOrderInvoiceVoider", fields: [voidedById], references: [id], onDelete: Restrict)
+  lines          WorkOrderInvoiceLine[]
+
+  @@index([workOrderId, status, createdAt])
+  @@index([status, issuedAt])
+}
+
+model WorkOrderInvoiceLine {
+  id             BigInt                   @id @default(autoincrement()) @db.UnsignedBigInt
+  lineType       WorkOrderInvoiceLineType
+  description    String                   @db.VarChar(255)
+  quantity       Decimal                  @db.Decimal(10, 3)
+  unitAmount     Decimal                  @db.Decimal(10, 2)
+  totalAmount    Decimal                  @db.Decimal(10, 2)
+  sourceRecordId String?                  @db.VarChar(64)
+  createdAt      DateTime                 @default(now()) @db.DateTime(3)
+  invoiceId      BigInt                   @db.UnsignedBigInt
+  invoice        WorkOrderInvoice         @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId, id])
 }
