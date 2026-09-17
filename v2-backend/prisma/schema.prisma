@@ -111,6 +111,7 @@ enum InvoicePaymentMethod {
 enum PaymentReconciliationStatus {
   APPLIED
   REVIEW_REQUIRED
+  REJECTED
 }
 
 model Client {
@@ -185,6 +186,7 @@ model OpsUser {
   paymentsCreated      InvoicePayment[]      @relation("InvoicePaymentCreator")
   paymentsPosted       InvoicePayment[]      @relation("InvoicePaymentPoster")
   paymentReconciliations PaymentReconciliationEvent[] @relation("PaymentReconciliationRecorder")
+  paymentReconciliationsReviewed PaymentReconciliationEvent[] @relation("PaymentReconciliationReviewer")
 }
 
 model OpsInvite {
@@ -411,11 +413,15 @@ model PaymentReconciliationEvent {
   netAmount            Decimal                    @db.Decimal(10, 2)
   settledAt            DateTime                   @db.DateTime(3)
   reviewReason         String?                    @db.VarChar(255)
+  reviewedAt           DateTime?                  @db.DateTime(3)
+  reviewDecisionNote   String?                    @db.VarChar(255)
   createdAt            DateTime                   @default(now()) @db.DateTime(3)
   paymentId            BigInt                     @db.UnsignedBigInt
   recordedById         BigInt                     @db.UnsignedBigInt
   payment              InvoicePayment             @relation(fields: [paymentId], references: [id], onDelete: Restrict)
   recordedBy           OpsUser                    @relation("PaymentReconciliationRecorder", fields: [recordedById], references: [id], onDelete: Restrict)
+  reviewedBy           OpsUser?                   @relation("PaymentReconciliationReviewer", fields: [reviewedById], references: [id], onDelete: Restrict)
+  reviewedById         BigInt?                    @db.UnsignedBigInt
 
   @@index([paymentId, createdAt])
   @@index([status, createdAt])

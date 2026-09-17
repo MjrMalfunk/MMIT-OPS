@@ -125,6 +125,14 @@ add entries rather than alter these posted revenue lines.
 - `POST /api/v1/payments/:paymentId/post` is deliberately disabled. Future
   Stripe/webhook integration must call the reconciliation contract with actual
   settlement values; this patch adds no Stripe credentials or external calls.
+- `GET /api/v1/payment-reconciliations` is an OWNER/ADMIN-only review queue;
+  it defaults to `REVIEW_REQUIRED` and accepts `status` and `limit` filters.
+- `POST /api/v1/payment-reconciliations/:eventId/approve` rechecks that the
+  settlement is still a complete invoice payment before posting it. Approval
+  is audited and cannot override a stale, partial, or conflicting settlement.
+- `POST /api/v1/payment-reconciliations/:eventId/reject` requires a note and
+  closes the event without changing payment, invoice, work-order, or journal
+  state.
 
 ## OPS identity and access
 

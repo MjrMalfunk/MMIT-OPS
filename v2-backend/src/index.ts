@@ -203,6 +203,9 @@ type WorkOrderMaterialWithUsers = Prisma.WorkOrderMaterialGetPayload<{
 type WorkOrderInvoiceWithPeople = Prisma.WorkOrderInvoiceGetPayload<{
   include: { lines: true; createdBy: true; issuedBy: true; voidedBy: true };
 }>;
+type PaymentReconciliationWithPayment = Prisma.PaymentReconciliationEventGetPayload<{
+  include: { payment: { include: { invoice: true } }; recordedBy: true; reviewedBy: true };
+}>;
 
 function serializeWorkOrder(workOrder: WorkOrderWithClient) {
   return {
@@ -382,6 +385,18 @@ function serializeReconciliation(event: Prisma.PaymentReconciliationEventGetPayl
     grossAmount: event.grossAmount.toString(),
     feeAmount: event.feeAmount.toString(),
     netAmount: event.netAmount.toString(),
+  };
+}
+
+function serializeReconciliationQueueItem(event: PaymentReconciliationWithPayment) {
+  return {
+    ...serializeReconciliation(event),
+    reviewedAt: event.reviewedAt,
+    reviewDecisionNote: event.reviewDecisionNote,
+    reviewedBy: event.reviewedBy ? { id: event.reviewedBy.id.toString(), email: event.reviewedBy.email, displayName: event.reviewedBy.displayName } : null,
+    recordedBy: { id: event.recordedBy.id.toString(), email: event.recordedBy.email, displayName: event.recordedBy.displayName },
+    payment: serializePayment(event.payment),
+    invoice: { id: event.payment.invoice.id.toString(), status: event.payment.invoice.status, totalAmount: event.payment.invoice.totalAmount.toString() },
   };
 }
 
@@ -1440,6 +1455,64 @@ app.post('/api/v1/payments/:paymentId/reconcile', requireAuth, requireRoles(OpsU
   if (outcome.kind === 'replayed') return void res.json({ data: { replayed: true, reconciliation: serializeReconciliation(outcome.event) } });
   if (outcome.kind === 'review') return void res.status(202).json({ data: { reviewRequired: true, reconciliation: serializeReconciliation(outcome.event) } });
   res.status(201).json({ data: { reconciliation: serializeReconciliation(outcome.event), payment: serializePayment(outcome.payment), journalId: outcome.journalId.toString() } });
+});
+
+app.get('/api/v1/payment-reconciliations', requireAuth, requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN), async (req: Request, res: Response) => {
+  const requestedStatus = req.query.status;
+  const status = requestedStatus === undefined ? PaymentReconciliationStatus.REVIEW_REQUIRED : requestedStatus;
+  if (!isEnumValue(PaymentReconciliationStatus, status)) return void res.status(400).json({ error: 'status must be REVIEW_REQUIRED, APPLIED, or REJECTED.' });
+  const limit = typeof req.query.limit === 'string' && /^\d+$/.test(req.query.limit) ? Math.min(Math.max(Number(req.query.limit), 1), 100) : 50;
+  const events = await prisma.paymentReconciliationEvent.findMany({
+    where: { status }, include: { payment: { include: { invoice: true } }, recordedBy: true, reviewedBy: true }, orderBy: { createdAt: 'desc' }, take: limit,
+  });
+  res.json({ data: events.map(serializeReconciliationQueueItem), status, count: events.length });
+});
+
+app.post('/api/v1/payment-reconciliations/:eventId/reject', requireAuth, requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN), async (req: Request, res: Response) => {
+  const eventId = typeof req.params.eventId === 'string' ? parseId(req.params.eventId) : null;
+  const body = requestBody(req); const note = body ? parseNullableText(body.note, 255) : undefined;
+  if (eventId === null || !note) return void res.status(400).json({ error: 'A review event id and nonblank rejection note are required.' });
+  const event = await prisma.$transaction(async (tx) => {
+    const existing = await tx.paymentReconciliationEvent.findUnique({ where: { id: eventId } });
+    if (!existing) return { kind: 'missing' as const };
+    if (existing.status !== PaymentReconciliationStatus.REVIEW_REQUIRED) return { kind: 'closed' as const, status: existing.status };
+    const rejected = await tx.paymentReconciliationEvent.update({ where: { id: eventId }, data: { status: PaymentReconciliationStatus.REJECTED, reviewedAt: new Date(), reviewedById: req.auth!.userId, reviewDecisionNote: note } });
+    await writeAuditEvent(tx, req.auth!, 'invoice.payment_reconciliation_rejected', 'invoice', existing.paymentId.toString(), { reconciliationId: eventId.toString(), processorEventId: existing.processorEventId, note });
+    return { kind: 'rejected' as const, event: rejected };
+  });
+  if (event.kind === 'missing') return void res.status(404).json({ error: 'Reconciliation event not found.' });
+  if (event.kind === 'closed') return void res.status(409).json({ error: `Reconciliation event is already ${event.status}.` });
+  res.json({ data: { reconciliation: serializeReconciliation(event.event) } });
+});
+
+app.post('/api/v1/payment-reconciliations/:eventId/approve', requireAuth, requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN), async (req: Request, res: Response) => {
+  const eventId = typeof req.params.eventId === 'string' ? parseId(req.params.eventId) : null;
+  const body = requestBody(req); const note = body && hasOwn(body, 'note') ? parseNullableText(body.note, 255) : null;
+  if (eventId === null || note === undefined) return void res.status(400).json({ error: 'A valid reconciliation event id and optional note are required.' });
+  const outcome = await prisma.$transaction(async (tx) => {
+    const event = await tx.paymentReconciliationEvent.findUnique({ where: { id: eventId }, include: { payment: { include: { invoice: { include: { workOrder: true } } } } } });
+    if (!event) return { kind: 'missing' as const };
+    if (event.status !== PaymentReconciliationStatus.REVIEW_REQUIRED) return { kind: 'closed' as const, status: event.status };
+    const reasons: string[] = [];
+    if (event.payment.status !== InvoicePaymentStatus.PENDING) reasons.push(`payment is ${event.payment.status}`);
+    if (event.payment.invoice.status !== WorkOrderInvoiceStatus.ISSUED) reasons.push(`invoice is ${event.payment.invoice.status}`);
+    if (!event.payment.grossAmount.equals(event.grossAmount) || !event.payment.invoice.totalAmount.equals(event.grossAmount)) reasons.push('settlement is not an exact full invoice amount');
+    if (event.payment.processorReference && event.payment.processorReference !== event.processorReference) reasons.push('processor reference conflicts with the pending payment');
+    if (reasons.length) return { kind: 'stale' as const, reasons };
+    const journal = await tx.accountingJournal.create({ data: { sourceType: AccountingJournalSourceType.PAYMENT, sourceId: event.payment.id.toString(), memo: `Payment ${event.payment.id.toString()} · reviewed settlement ${event.balanceTransactionId}`.slice(0, 255), postedById: req.auth!.userId, entries: { create: [{ accountCode: '1010', debitAmount: event.netAmount, creditAmount: 0 }, ...(event.feeAmount.gt(0) ? [{ accountCode: '5200', debitAmount: event.feeAmount, creditAmount: 0 }] : []), { accountCode: '1120', debitAmount: 0, creditAmount: event.grossAmount }] } }, include: { entries: true } });
+    const debitTotal = journal.entries.reduce((total, entry) => total.plus(entry.debitAmount), new Prisma.Decimal(0)); const creditTotal = journal.entries.reduce((total, entry) => total.plus(entry.creditAmount), new Prisma.Decimal(0));
+    if (!debitTotal.equals(creditTotal) || debitTotal.lte(0)) throw new Error('Reviewed payment journal must be balanced and positive.');
+    const payment = await tx.invoicePayment.update({ where: { id: event.payment.id }, data: { status: InvoicePaymentStatus.POSTED, method: event.actualMethod, processorReference: event.processorReference, feeAmount: event.feeAmount, netAmount: event.netAmount, receivedAt: event.settledAt, postedAt: new Date(), postedById: req.auth!.userId, accountingJournalId: journal.id } });
+    await tx.workOrderInvoice.update({ where: { id: event.payment.invoiceId }, data: { status: WorkOrderInvoiceStatus.PAID } });
+    await tx.workOrder.update({ where: { id: event.payment.invoice.workOrderId }, data: { status: WorkOrderStatus.PAID } });
+    const applied = await tx.paymentReconciliationEvent.update({ where: { id: event.id }, data: { status: PaymentReconciliationStatus.APPLIED, reviewedAt: new Date(), reviewedById: req.auth!.userId, reviewDecisionNote: note } });
+    await writeAuditEvent(tx, req.auth!, 'invoice.payment_reconciliation_approved', 'invoice', event.payment.invoiceId.toString(), { reconciliationId: event.id.toString(), paymentId: event.payment.id.toString(), journalId: journal.id.toString(), note });
+    return { kind: 'approved' as const, event: applied, payment, journalId: journal.id };
+  });
+  if (outcome.kind === 'missing') return void res.status(404).json({ error: 'Reconciliation event not found.' });
+  if (outcome.kind === 'closed') return void res.status(409).json({ error: `Reconciliation event is already ${outcome.status}.` });
+  if (outcome.kind === 'stale') return void res.status(409).json({ error: 'This settlement is no longer safe to approve.', reasons: outcome.reasons });
+  res.json({ data: { reconciliation: serializeReconciliation(outcome.event), payment: serializePayment(outcome.payment), journalId: outcome.journalId.toString() } });
 });
 
 app.get('/api/v1/work-orders/:id/attachments', async (req: Request, res: Response) => {
