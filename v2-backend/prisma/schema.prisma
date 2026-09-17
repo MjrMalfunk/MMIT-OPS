@@ -96,6 +96,17 @@ enum AccountingJournalSourceType {
   ADJUSTMENT
 }
 
+enum InvoicePaymentStatus {
+  PENDING
+  POSTED
+  VOIDED
+}
+
+enum InvoicePaymentMethod {
+  ACH_BANK
+  CARD
+}
+
 model Client {
   id               BigInt       @id @default(autoincrement()) @db.UnsignedBigInt
   name             String       @unique @db.VarChar(191)
@@ -165,6 +176,8 @@ model OpsUser {
   invoicesVoided       WorkOrderInvoice[]    @relation("WorkOrderInvoiceVoider")
   journalsPosted       AccountingJournal[]   @relation("AccountingJournalPoster")
   journalsVoided       AccountingJournal[]   @relation("AccountingJournalVoider")
+  paymentsCreated      InvoicePayment[]      @relation("InvoicePaymentCreator")
+  paymentsPosted       InvoicePayment[]      @relation("InvoicePaymentPoster")
 }
 
 model OpsInvite {
@@ -311,6 +324,7 @@ model WorkOrderInvoice {
   voidedBy       OpsUser?               @relation("WorkOrderInvoiceVoider", fields: [voidedById], references: [id], onDelete: Restrict)
   accountingJournal AccountingJournal?  @relation("WorkOrderInvoiceAccountingJournal", fields: [accountingJournalId], references: [id], onDelete: Restrict)
   lines          WorkOrderInvoiceLine[]
+  payments       InvoicePayment[]
 
   @@index([workOrderId, status, createdAt])
   @@index([status, issuedAt])
@@ -346,9 +360,34 @@ model AccountingJournal {
   voidedBy    OpsUser?                    @relation("AccountingJournalVoider", fields: [voidedById], references: [id], onDelete: Restrict)
   entries     AccountingJournalEntry[]
   invoice     WorkOrderInvoice?           @relation("WorkOrderInvoiceAccountingJournal")
+  payment     InvoicePayment?
 
   @@unique([sourceType, sourceId])
   @@index([status, postedAt])
+}
+
+model InvoicePayment {
+  id                  BigInt               @id @default(autoincrement()) @db.UnsignedBigInt
+  status              InvoicePaymentStatus @default(PENDING)
+  method              InvoicePaymentMethod
+  processorReference  String?              @unique @db.VarChar(191)
+  grossAmount         Decimal              @db.Decimal(10, 2)
+  feeAmount           Decimal?             @db.Decimal(10, 2)
+  netAmount           Decimal?             @db.Decimal(10, 2)
+  receivedAt          DateTime?            @db.DateTime(3)
+  postedAt            DateTime?            @db.DateTime(3)
+  voidedAt            DateTime?            @db.DateTime(3)
+  createdAt           DateTime             @default(now()) @db.DateTime(3)
+  invoiceId           BigInt               @db.UnsignedBigInt
+  accountingJournalId BigInt?              @unique @db.UnsignedBigInt
+  createdById         BigInt               @db.UnsignedBigInt
+  postedById          BigInt?              @db.UnsignedBigInt
+  invoice             WorkOrderInvoice     @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  accountingJournal   AccountingJournal?   @relation(fields: [accountingJournalId], references: [id], onDelete: Restrict)
+  createdBy           OpsUser              @relation("InvoicePaymentCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  postedBy            OpsUser?             @relation("InvoicePaymentPoster", fields: [postedById], references: [id], onDelete: Restrict)
+
+  @@index([invoiceId, status, createdAt])
 }
 
 model AccountingJournalEntry {

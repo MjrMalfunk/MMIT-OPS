@@ -6,6 +6,8 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve, sep } from 'node:path';
 import {
   AccountingJournalSourceType,
+  InvoicePaymentMethod,
+  InvoicePaymentStatus,
   ClientStatus,
   OpsUserRole,
   OpsUserStatus,
@@ -1339,6 +1341,44 @@ app.post('/api/v1/work-orders/:id/invoice-drafts/:invoiceId/void', requireRoles(
   if (outcome.kind === 'not_found') return void res.status(404).json({ error: 'Invoice draft not found.' });
   if (outcome.kind === 'not_draft') return void res.status(409).json({ error: `Only draft invoices can be voided (current status: ${outcome.status}).` });
   res.json({ data: serializeInvoice(outcome.invoice) });
+});
+
+app.post('/api/v1/invoices/:invoiceId/payments', requireAuth, requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
+  const invoiceId = typeof req.params.invoiceId === 'string' ? parseId(req.params.invoiceId) : null;
+  const body = requestBody(req); const grossAmount = body ? parseOptionalMoney(body.grossAmount) : undefined;
+  const method = body?.method; const processorReference = body && hasOwn(body, 'processorReference') ? parseNullableText(body.processorReference, 191) : null;
+  if (invoiceId === null || !body || !isEnumValue(InvoicePaymentMethod, method) || !grossAmount || processorReference === undefined) return void res.status(400).json({ error: 'Provide an issued invoice, ACH_BANK or CARD method, positive grossAmount, and optional processorReference.' });
+  if (new Prisma.Decimal(grossAmount).lte(0)) return void res.status(400).json({ error: 'grossAmount must be positive.' });
+  const payment = await prisma.$transaction(async (tx) => {
+    const invoice = await tx.workOrderInvoice.findUnique({ where: { id: invoiceId }, select: { status: true } });
+    if (!invoice || invoice.status !== WorkOrderInvoiceStatus.ISSUED) return null;
+    const created = await tx.invoicePayment.create({ data: { invoiceId, method, grossAmount, processorReference, createdById: req.auth!.userId } });
+    await writeAuditEvent(tx, req.auth!, 'invoice.payment_pending', 'invoice', invoiceId.toString(), { paymentId: created.id.toString(), method, grossAmount });
+    return created;
+  });
+  if (!payment) return void res.status(409).json({ error: 'Payments can only be recorded against an issued invoice.' });
+  res.status(201).json({ data: { ...payment, id: payment.id.toString(), invoiceId: payment.invoiceId.toString(), createdById: payment.createdById.toString(), grossAmount: payment.grossAmount.toString() } });
+});
+
+app.post('/api/v1/payments/:paymentId/post', requireAuth, requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN), async (req: Request, res: Response) => {
+  const paymentId = typeof req.params.paymentId === 'string' ? parseId(req.params.paymentId) : null; const body = requestBody(req);
+  const feeAmount = body ? parseOptionalMoney(body.feeAmount) : undefined;
+  if (paymentId === null || !body || feeAmount === undefined || feeAmount === null) return void res.status(400).json({ error: 'Provide a non-negative feeAmount from the confirmed processor settlement.' });
+  const outcome = await prisma.$transaction(async (tx) => {
+    const payment = await tx.invoicePayment.findUnique({ where: { id: paymentId }, include: { invoice: { include: { workOrder: true } } } });
+    if (!payment) return { kind: 'missing' as const };
+    if (payment.status === InvoicePaymentStatus.POSTED) return { kind: 'posted' as const, payment };
+    if (payment.status !== InvoicePaymentStatus.PENDING) return { kind: 'invalid' as const };
+    const fee = new Prisma.Decimal(feeAmount); if (fee.lt(0) || fee.gt(payment.grossAmount)) return { kind: 'fee' as const };
+    const net = payment.grossAmount.minus(fee); const journal = await tx.accountingJournal.create({ data: { sourceType: AccountingJournalSourceType.PAYMENT, sourceId: payment.id.toString(), memo: `Payment ${payment.id.toString()}`, postedById: req.auth!.userId, entries: { create: [{ accountCode: '1010', debitAmount: net, creditAmount: 0 }, { accountCode: '5200', debitAmount: fee, creditAmount: 0 }, { accountCode: '1120', debitAmount: 0, creditAmount: payment.grossAmount }] } } });
+    const posted = await tx.invoicePayment.update({ where: { id: payment.id }, data: { status: InvoicePaymentStatus.POSTED, feeAmount: fee, netAmount: net, receivedAt: new Date(), postedAt: new Date(), postedById: req.auth!.userId, accountingJournalId: journal.id } });
+    await tx.workOrderInvoice.update({ where: { id: payment.invoiceId }, data: { status: WorkOrderInvoiceStatus.ISSUED } });
+    await tx.workOrder.update({ where: { id: payment.invoice.workOrderId }, data: { status: WorkOrderStatus.PAID } });
+    await writeAuditEvent(tx, req.auth!, 'invoice.payment_posted', 'invoice', payment.invoiceId.toString(), { paymentId: payment.id.toString(), grossAmount: payment.grossAmount.toString(), feeAmount: fee.toString(), netAmount: net.toString(), journalId: journal.id.toString() });
+    return { kind: 'posted' as const, payment: posted };
+  });
+  if (outcome.kind === 'missing') return void res.status(404).json({ error: 'Payment not found.' }); if (outcome.kind === 'invalid') return void res.status(409).json({ error: 'Only pending payments can be posted.' }); if (outcome.kind === 'fee') return void res.status(400).json({ error: 'feeAmount cannot exceed grossAmount.' });
+  res.json({ data: { ...outcome.payment, id: outcome.payment.id.toString(), invoiceId: outcome.payment.invoiceId.toString(), createdById: outcome.payment.createdById.toString(), postedById: outcome.payment.postedById?.toString() ?? null, accountingJournalId: outcome.payment.accountingJournalId?.toString() ?? null, grossAmount: outcome.payment.grossAmount.toString(), feeAmount: outcome.payment.feeAmount?.toString() ?? null, netAmount: outcome.payment.netAmount?.toString() ?? null } });
 });
 
 app.get('/api/v1/work-orders/:id/attachments', async (req: Request, res: Response) => {
