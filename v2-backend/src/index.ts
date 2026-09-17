@@ -48,6 +48,7 @@ const prisma = new PrismaClient();
 // Middleware for parsing JSON data and enabling Cross-Origin requests
 app.use(cors());
 app.use(express.json());
+app.use('/ops', express.static(resolve(process.cwd(), 'public')));
 
 // Foundational base route to verify our server is alive and kicking
 app.get('/api/health', async (_req: Request, res: Response) => {
