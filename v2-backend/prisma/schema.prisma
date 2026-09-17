@@ -85,6 +85,17 @@ enum WorkOrderInvoiceLineType {
   EXPENSE
 }
 
+enum AccountingJournalStatus {
+  POSTED
+  VOIDED
+}
+
+enum AccountingJournalSourceType {
+  WORK_ORDER_INVOICE
+  PAYMENT
+  ADJUSTMENT
+}
+
 model Client {
   id               BigInt       @id @default(autoincrement()) @db.UnsignedBigInt
   name             String       @unique @db.VarChar(191)
@@ -152,6 +163,8 @@ model OpsUser {
   invoicesCreated      WorkOrderInvoice[]    @relation("WorkOrderInvoiceCreator")
   invoicesIssued       WorkOrderInvoice[]    @relation("WorkOrderInvoiceIssuer")
   invoicesVoided       WorkOrderInvoice[]    @relation("WorkOrderInvoiceVoider")
+  journalsPosted       AccountingJournal[]   @relation("AccountingJournalPoster")
+  journalsVoided       AccountingJournal[]   @relation("AccountingJournalVoider")
 }
 
 model OpsInvite {
@@ -291,10 +304,12 @@ model WorkOrderInvoice {
   createdById    BigInt                 @db.UnsignedBigInt
   issuedById     BigInt?                @db.UnsignedBigInt
   voidedById     BigInt?                @db.UnsignedBigInt
+  accountingJournalId BigInt?            @unique @db.UnsignedBigInt
   workOrder      WorkOrder              @relation(fields: [workOrderId], references: [id], onDelete: Restrict)
   createdBy      OpsUser                @relation("WorkOrderInvoiceCreator", fields: [createdById], references: [id], onDelete: Restrict)
   issuedBy       OpsUser?               @relation("WorkOrderInvoiceIssuer", fields: [issuedById], references: [id], onDelete: Restrict)
   voidedBy       OpsUser?               @relation("WorkOrderInvoiceVoider", fields: [voidedById], references: [id], onDelete: Restrict)
+  accountingJournal AccountingJournal?  @relation("WorkOrderInvoiceAccountingJournal", fields: [accountingJournalId], references: [id], onDelete: Restrict)
   lines          WorkOrderInvoiceLine[]
 
   @@index([workOrderId, status, createdAt])
@@ -314,4 +329,37 @@ model WorkOrderInvoiceLine {
   invoice        WorkOrderInvoice         @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
 
   @@index([invoiceId, id])
+}
+
+model AccountingJournal {
+  id          BigInt                      @id @default(autoincrement()) @db.UnsignedBigInt
+  status      AccountingJournalStatus     @default(POSTED)
+  sourceType  AccountingJournalSourceType
+  sourceId    String                      @db.VarChar(64)
+  memo        String                      @db.VarChar(255)
+  postedAt    DateTime                    @default(now()) @db.DateTime(3)
+  voidedAt    DateTime?                   @db.DateTime(3)
+  createdAt   DateTime                    @default(now()) @db.DateTime(3)
+  postedById  BigInt                      @db.UnsignedBigInt
+  voidedById  BigInt?                     @db.UnsignedBigInt
+  postedBy    OpsUser                     @relation("AccountingJournalPoster", fields: [postedById], references: [id], onDelete: Restrict)
+  voidedBy    OpsUser?                    @relation("AccountingJournalVoider", fields: [voidedById], references: [id], onDelete: Restrict)
+  entries     AccountingJournalEntry[]
+  invoice     WorkOrderInvoice?           @relation("WorkOrderInvoiceAccountingJournal")
+
+  @@unique([sourceType, sourceId])
+  @@index([status, postedAt])
+}
+
+model AccountingJournalEntry {
+  id          BigInt              @id @default(autoincrement()) @db.UnsignedBigInt
+  accountCode String              @db.VarChar(16)
+  debitAmount Decimal             @db.Decimal(10, 2)
+  creditAmount Decimal            @db.Decimal(10, 2)
+  createdAt   DateTime            @default(now()) @db.DateTime(3)
+  journalId   BigInt              @db.UnsignedBigInt
+  journal     AccountingJournal   @relation(fields: [journalId], references: [id], onDelete: Cascade)
+
+  @@index([journalId, id])
+  @@index([accountCode, createdAt])
 }

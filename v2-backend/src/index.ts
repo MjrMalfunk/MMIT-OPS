@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve, sep } from 'node:path';
 import {
+  AccountingJournalSourceType,
   ClientStatus,
   OpsUserRole,
   OpsUserStatus,
@@ -342,6 +343,16 @@ function auditInvoiceSnapshot(invoice: { id: bigint; status: WorkOrderInvoiceSta
   return {
     id: invoice.id.toString(), status: invoice.status, clientName: invoice.clientName, clientEmail: invoice.clientEmail,
     totalAmount: invoice.totalAmount.toString(), issuedAt: invoice.issuedAt?.toISOString() ?? null, voidedAt: invoice.voidedAt?.toISOString() ?? null,
+  };
+}
+
+function serializeJournal(journal: Prisma.AccountingJournalGetPayload<{ include: { entries: true; postedBy: true; voidedBy: true } }>) {
+  return {
+    ...journal,
+    id: journal.id.toString(), postedById: journal.postedById.toString(), voidedById: journal.voidedById?.toString() ?? null,
+    entries: journal.entries.map((entry) => ({ ...entry, id: entry.id.toString(), journalId: entry.journalId.toString(), debitAmount: entry.debitAmount.toString(), creditAmount: entry.creditAmount.toString() })),
+    postedBy: { id: journal.postedBy.id.toString(), email: journal.postedBy.email, displayName: journal.postedBy.displayName },
+    voidedBy: journal.voidedBy ? { id: journal.voidedBy.id.toString(), email: journal.voidedBy.email, displayName: journal.voidedBy.displayName } : null,
   };
 }
 
@@ -758,6 +769,25 @@ function nextAuthError(error: unknown, res: Response): void {
 
 app.use('/api/v1/clients', requireAuth);
 app.use('/api/v1/work-orders', requireAuth);
+app.use('/api/v1/accounting', requireAuth);
+
+app.get('/api/v1/accounting/journals', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN), async (req: Request, res: Response) => {
+  const rawLimit = req.query.limit;
+  if (rawLimit !== undefined && typeof rawLimit !== 'string') {
+    res.status(400).json({ error: 'limit must be a single number.' });
+    return;
+  }
+  const parsedLimit = rawLimit === undefined ? 50 : Number(rawLimit);
+  if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 100) {
+    res.status(400).json({ error: 'limit must be a whole number from 1 through 100.' });
+    return;
+  }
+  const journals = await prisma.accountingJournal.findMany({
+    include: { entries: { orderBy: { id: 'asc' } }, postedBy: true, voidedBy: true },
+    orderBy: { id: 'desc' }, take: parsedLimit,
+  });
+  res.json({ data: journals.map(serializeJournal) });
+});
 
 app.get('/api/v1/clients', async (req: Request, res: Response) => {
   const search = req.query.search;
@@ -1254,12 +1284,35 @@ app.post('/api/v1/work-orders/:id/invoice-drafts/:invoiceId/issue', requireRoles
     if (!invoice) return { kind: 'not_found' as const };
     if (invoice.status !== WorkOrderInvoiceStatus.DRAFT) return { kind: 'not_draft' as const, status: invoice.status };
     if (invoice.workOrder.status !== WorkOrderStatus.COMPLETED) return { kind: 'invalid_status' as const, status: invoice.workOrder.status };
+    const journal = await tx.accountingJournal.create({
+      data: {
+        sourceType: AccountingJournalSourceType.WORK_ORDER_INVOICE,
+        sourceId: invoice.id.toString(),
+        memo: `Invoice ${invoice.id.toString()} · ${invoice.clientName}`.slice(0, 255),
+        postedById: req.auth!.userId,
+        entries: {
+          create: [
+            { accountCode: '1120', debitAmount: invoice.totalAmount, creditAmount: new Prisma.Decimal(0) },
+            { accountCode: '4100', debitAmount: new Prisma.Decimal(0), creditAmount: invoice.totalAmount },
+          ],
+        },
+      },
+      include: { entries: true, postedBy: true, voidedBy: true },
+    });
+    const debitTotal = journal.entries.reduce((total, entry) => total.plus(entry.debitAmount), new Prisma.Decimal(0));
+    const creditTotal = journal.entries.reduce((total, entry) => total.plus(entry.creditAmount), new Prisma.Decimal(0));
+    if (!debitTotal.equals(creditTotal) || debitTotal.lte(0)) {
+      throw new Error('Invoice journal must be balanced and positive.');
+    }
     const issued = await tx.workOrderInvoice.update({
-      where: { id: invoiceId }, data: { status: WorkOrderInvoiceStatus.ISSUED, issuedAt: new Date(), issuedById: req.auth!.userId },
+      where: { id: invoiceId }, data: { status: WorkOrderInvoiceStatus.ISSUED, issuedAt: new Date(), issuedById: req.auth!.userId, accountingJournalId: journal.id },
       include: { lines: { orderBy: { id: 'asc' } }, createdBy: true, issuedBy: true, voidedBy: true },
     });
     await tx.workOrder.update({ where: { id: workOrderId }, data: { status: WorkOrderStatus.INVOICED } });
-    await writeAuditEvent(tx, req.auth!, 'work_order.invoice_issued', 'work_order', workOrderId.toString(), { invoice: auditInvoiceSnapshot(issued), changedFields: ['invoice.status', 'work_order.status'] });
+    await writeAuditEvent(tx, req.auth!, 'work_order.invoice_issued', 'work_order', workOrderId.toString(), {
+      invoice: auditInvoiceSnapshot(issued), journal: { id: journal.id.toString(), sourceType: journal.sourceType, sourceId: journal.sourceId, debitTotal: debitTotal.toFixed(2), creditTotal: creditTotal.toFixed(2) },
+      changedFields: ['invoice.status', 'invoice.accountingJournalId', 'work_order.status'],
+    });
     return { kind: 'issued' as const, invoice: issued };
   });
   if (outcome.kind === 'not_found') return void res.status(404).json({ error: 'Invoice draft not found.' });

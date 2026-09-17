@@ -53,8 +53,9 @@ the API before exposing it beyond the server.
   expenses with a bill amount. FieldNation work orders remain payout-only.
 - `POST /api/v1/work-orders/:id/invoice-drafts/:invoiceId/issue` is
   OWNER/ADMIN-only. It issues a draft and moves the completed work order to
-  INVOICED in the same audited transaction. It does not send an email, charge a
-  card, or touch V1 accounting.
+  INVOICED in the same audited transaction. It also creates one balanced V2
+  accounting journal: debit `1120` Accounts Receivable and credit `4100` Field
+  Service Income. It does not send an email, charge a card, or touch V1.
 - `POST /api/v1/work-orders/:id/invoice-drafts/:invoiceId/void` is
   OWNER/ADMIN-only and only voids an unissued draft, preserving its snapshot.
 - `GET /api/v1/work-orders/:id/attachments` lists active private attachments.
@@ -68,6 +69,8 @@ the API before exposing it beyond the server.
   only and soft-deletes the record; the private file is retained for audit.
 - `GET /api/v1/audit-events` is OWNER/ADMIN-only and returns the newest 50
   audit events (up to 100). Optional filters: `subjectType`, `subjectId`.
+- `GET /api/v1/accounting/journals` is OWNER/ADMIN-only and returns newest V2
+  journals (up to 100), including their immutable debit and credit lines.
 
 Client and work-order endpoints require an authenticated V2 OPS session before
 they can be read or changed.
@@ -96,6 +99,12 @@ than customer receivables. Issuing a draft makes the source work order
 historical and prepares it for a later payment/reconciliation module; it does
 not represent payment, a bank deposit, Stripe processing, or an external invoice
 delivery.
+
+The journal source pair is unique, so an invoice cannot create duplicate revenue
+on retry. A journal is created atomically with invoice issue, is verified as
+positive and balanced before commit, and locks the source work order's financial
+values. Payment clearing and adjustment journals are later modules; they will
+add entries rather than alter these posted revenue lines.
 
 ## OPS identity and access
 
