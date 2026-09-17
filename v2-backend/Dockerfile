@@ -17,6 +17,7 @@ COPY prisma ./prisma
 RUN pnpm prisma generate
 
 COPY src ./src
+COPY public ./public
 RUN pnpm build
 
 FROM build AS runtime
