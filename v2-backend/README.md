@@ -106,6 +106,26 @@ positive and balanced before commit, and locks the source work order's financial
 values. Payment clearing and adjustment journals are later modules; they will
 add entries rather than alter these posted revenue lines.
 
+## Payment reconciliation
+
+- `POST /api/v1/invoices/:invoiceId/payments` records an expected payment as
+  `PENDING`. ACH/bank is the default operational choice; card is an explicit
+  fallback. A pending ACH submission is never treated as paid.
+- `POST /api/v1/payments/:paymentId/reconcile` is OWNER/ADMIN-only and is the
+  only route that clears a payment. It requires the confirmed processor event,
+  balance-transaction identifier, actual method, gross, fee, net, and settled
+  time. The optional payout reference is retained when available.
+- An exact, full settlement posts one balanced V2 journal: debit `1010` Bank
+  for net cash, debit `5200` Processing Fees when applicable, and credit `1120`
+  Accounts Receivable for gross. It then marks the invoice and work order paid.
+- A method, reference, gross, or partial-payment mismatch is recorded as
+  `REVIEW_REQUIRED`; it creates no journal and changes neither invoice nor work
+  order status. Replaying a processor event returns the existing reconciliation
+  rather than duplicating accounting.
+- `POST /api/v1/payments/:paymentId/post` is deliberately disabled. Future
+  Stripe/webhook integration must call the reconciliation contract with actual
+  settlement values; this patch adds no Stripe credentials or external calls.
+
 ## OPS identity and access
 
 V2 uses password sign-in plus mandatory TOTP and one-time recovery codes. It

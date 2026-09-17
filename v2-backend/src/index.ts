@@ -8,6 +8,7 @@ import {
   AccountingJournalSourceType,
   InvoicePaymentMethod,
   InvoicePaymentStatus,
+  PaymentReconciliationStatus,
   ClientStatus,
   OpsUserRole,
   OpsUserStatus,
@@ -355,6 +356,32 @@ function serializeJournal(journal: Prisma.AccountingJournalGetPayload<{ include:
     entries: journal.entries.map((entry) => ({ ...entry, id: entry.id.toString(), journalId: entry.journalId.toString(), debitAmount: entry.debitAmount.toString(), creditAmount: entry.creditAmount.toString() })),
     postedBy: { id: journal.postedBy.id.toString(), email: journal.postedBy.email, displayName: journal.postedBy.displayName },
     voidedBy: journal.voidedBy ? { id: journal.voidedBy.id.toString(), email: journal.voidedBy.email, displayName: journal.voidedBy.displayName } : null,
+  };
+}
+
+function serializePayment(payment: Prisma.InvoicePaymentGetPayload<Record<string, never>>) {
+  return {
+    ...payment,
+    id: payment.id.toString(),
+    invoiceId: payment.invoiceId.toString(),
+    createdById: payment.createdById.toString(),
+    postedById: payment.postedById?.toString() ?? null,
+    accountingJournalId: payment.accountingJournalId?.toString() ?? null,
+    grossAmount: payment.grossAmount.toString(),
+    feeAmount: payment.feeAmount?.toString() ?? null,
+    netAmount: payment.netAmount?.toString() ?? null,
+  };
+}
+
+function serializeReconciliation(event: Prisma.PaymentReconciliationEventGetPayload<Record<string, never>>) {
+  return {
+    ...event,
+    id: event.id.toString(),
+    paymentId: event.paymentId.toString(),
+    recordedById: event.recordedById.toString(),
+    grossAmount: event.grossAmount.toString(),
+    feeAmount: event.feeAmount.toString(),
+    netAmount: event.netAmount.toString(),
   };
 }
 
@@ -1357,28 +1384,62 @@ app.post('/api/v1/invoices/:invoiceId/payments', requireAuth, requireRoles(OpsUs
     return created;
   });
   if (!payment) return void res.status(409).json({ error: 'Payments can only be recorded against an issued invoice.' });
-  res.status(201).json({ data: { ...payment, id: payment.id.toString(), invoiceId: payment.invoiceId.toString(), createdById: payment.createdById.toString(), grossAmount: payment.grossAmount.toString() } });
+  res.status(201).json({ data: serializePayment(payment) });
 });
 
-app.post('/api/v1/payments/:paymentId/post', requireAuth, requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN), async (req: Request, res: Response) => {
-  const paymentId = typeof req.params.paymentId === 'string' ? parseId(req.params.paymentId) : null; const body = requestBody(req);
+app.post('/api/v1/payments/:paymentId/post', requireAuth, requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN), (_req: Request, res: Response) => {
+  res.status(409).json({ error: 'Raw payment posting is disabled. Reconcile a confirmed settlement with POST /api/v1/payments/:paymentId/reconcile.' });
+});
+
+app.post('/api/v1/payments/:paymentId/reconcile', requireAuth, requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN), async (req: Request, res: Response) => {
+  const paymentId = typeof req.params.paymentId === 'string' ? parseId(req.params.paymentId) : null;
+  const body = requestBody(req);
+  const processorEventId = body ? parseNullableText(body.processorEventId, 191) : undefined;
+  const balanceTransactionId = body ? parseNullableText(body.balanceTransactionId, 191) : undefined;
+  const payoutReference = body && hasOwn(body, 'payoutReference') ? parseNullableText(body.payoutReference, 191) : null;
+  const processorReference = body ? parseNullableText(body.processorReference, 191) : undefined;
+  const grossAmount = body ? parseOptionalMoney(body.grossAmount) : undefined;
   const feeAmount = body ? parseOptionalMoney(body.feeAmount) : undefined;
-  if (paymentId === null || !body || feeAmount === undefined || feeAmount === null) return void res.status(400).json({ error: 'Provide a non-negative feeAmount from the confirmed processor settlement.' });
+  const netAmount = body ? parseOptionalMoney(body.netAmount) : undefined;
+  const settledAt = body ? parseOptionalTimestamp(body.settledAt) : undefined;
+  const actualMethod = body?.method;
+  if (paymentId === null || !body || !processorEventId || !balanceTransactionId || payoutReference === undefined || !processorReference || !grossAmount || !feeAmount || !netAmount || !settledAt || !isEnumValue(InvoicePaymentMethod, actualMethod)) return void res.status(400).json({ error: 'Provide processorEventId, balanceTransactionId, processorReference, ACH_BANK or CARD method, grossAmount, feeAmount, netAmount, and settledAt. payoutReference is optional.' });
+  const gross = new Prisma.Decimal(grossAmount); const fee = new Prisma.Decimal(feeAmount); const net = new Prisma.Decimal(netAmount);
+  if (gross.lte(0) || fee.lt(0) || net.lt(0) || !gross.minus(fee).equals(net)) return void res.status(400).json({ error: 'Amounts must be non-negative, grossAmount positive, and netAmount exactly equal to grossAmount minus feeAmount.' });
   const outcome = await prisma.$transaction(async (tx) => {
+    const priorEvent = await tx.paymentReconciliationEvent.findFirst({ where: { OR: [{ processorEventId }, { balanceTransactionId }] } });
+    if (priorEvent) {
+      if (priorEvent.processorEventId === processorEventId && priorEvent.paymentId === paymentId) return { kind: 'replayed' as const, event: priorEvent };
+      return { kind: 'duplicate_settlement' as const };
+    }
     const payment = await tx.invoicePayment.findUnique({ where: { id: paymentId }, include: { invoice: { include: { workOrder: true } } } });
     if (!payment) return { kind: 'missing' as const };
-    if (payment.status === InvoicePaymentStatus.POSTED) return { kind: 'posted' as const, payment };
-    if (payment.status !== InvoicePaymentStatus.PENDING) return { kind: 'invalid' as const };
-    const fee = new Prisma.Decimal(feeAmount); if (fee.lt(0) || fee.gt(payment.grossAmount)) return { kind: 'fee' as const };
-    const net = payment.grossAmount.minus(fee); const journal = await tx.accountingJournal.create({ data: { sourceType: AccountingJournalSourceType.PAYMENT, sourceId: payment.id.toString(), memo: `Payment ${payment.id.toString()}`, postedById: req.auth!.userId, entries: { create: [{ accountCode: '1010', debitAmount: net, creditAmount: 0 }, { accountCode: '5200', debitAmount: fee, creditAmount: 0 }, { accountCode: '1120', debitAmount: 0, creditAmount: payment.grossAmount }] } } });
-    const posted = await tx.invoicePayment.update({ where: { id: payment.id }, data: { status: InvoicePaymentStatus.POSTED, feeAmount: fee, netAmount: net, receivedAt: new Date(), postedAt: new Date(), postedById: req.auth!.userId, accountingJournalId: journal.id } });
-    await tx.workOrderInvoice.update({ where: { id: payment.invoiceId }, data: { status: WorkOrderInvoiceStatus.ISSUED } });
-    await tx.workOrder.update({ where: { id: payment.invoice.workOrderId }, data: { status: WorkOrderStatus.PAID } });
-    await writeAuditEvent(tx, req.auth!, 'invoice.payment_posted', 'invoice', payment.invoiceId.toString(), { paymentId: payment.id.toString(), grossAmount: payment.grossAmount.toString(), feeAmount: fee.toString(), netAmount: net.toString(), journalId: journal.id.toString() });
-    return { kind: 'posted' as const, payment: posted };
+    const reviewReasons: string[] = [];
+    if (payment.status !== InvoicePaymentStatus.PENDING) reviewReasons.push(`payment is ${payment.status}`);
+    if (payment.invoice.status !== WorkOrderInvoiceStatus.ISSUED) reviewReasons.push(`invoice is ${payment.invoice.status}`);
+    if (payment.method !== actualMethod) reviewReasons.push('actual method differs from the pending payment method');
+    if (!payment.grossAmount.equals(gross)) reviewReasons.push('settled gross differs from the pending payment amount');
+    if (!payment.invoice.totalAmount.equals(gross)) reviewReasons.push('partial or overpayment requires review');
+    if (payment.processorReference && payment.processorReference !== processorReference) reviewReasons.push('processor reference differs from the pending payment reference');
+    const reviewReason = reviewReasons.join('; ').slice(0, 255) || null;
+    const event = await tx.paymentReconciliationEvent.create({ data: { status: reviewReason ? PaymentReconciliationStatus.REVIEW_REQUIRED : PaymentReconciliationStatus.APPLIED, processorEventId, balanceTransactionId, payoutReference, processorReference, actualMethod, grossAmount: gross, feeAmount: fee, netAmount: net, settledAt, reviewReason, paymentId, recordedById: req.auth!.userId } });
+    if (reviewReason) {
+      await writeAuditEvent(tx, req.auth!, 'invoice.payment_reconciliation_review_required', 'invoice', payment.invoiceId.toString(), { paymentId: payment.id.toString(), processorEventId, balanceTransactionId, reviewReason, grossAmount: gross.toFixed(2), feeAmount: fee.toFixed(2), netAmount: net.toFixed(2), method: actualMethod });
+      return { kind: 'review' as const, event };
+    }
+    const journal = await tx.accountingJournal.create({ data: { sourceType: AccountingJournalSourceType.PAYMENT, sourceId: payment.id.toString(), memo: `Payment ${payment.id.toString()} · settlement ${balanceTransactionId}`.slice(0, 255), postedById: req.auth!.userId, entries: { create: [{ accountCode: '1010', debitAmount: net, creditAmount: new Prisma.Decimal(0) }, ...(fee.gt(0) ? [{ accountCode: '5200', debitAmount: fee, creditAmount: new Prisma.Decimal(0) }] : []), { accountCode: '1120', debitAmount: new Prisma.Decimal(0), creditAmount: gross }] } }, include: { entries: true } });
+    const debitTotal = journal.entries.reduce((total, entry) => total.plus(entry.debitAmount), new Prisma.Decimal(0)); const creditTotal = journal.entries.reduce((total, entry) => total.plus(entry.creditAmount), new Prisma.Decimal(0));
+    if (!debitTotal.equals(creditTotal) || debitTotal.lte(0)) throw new Error('Payment journal must be balanced and positive.');
+    const posted = await tx.invoicePayment.update({ where: { id: payment.id }, data: { status: InvoicePaymentStatus.POSTED, method: actualMethod, processorReference, feeAmount: fee, netAmount: net, receivedAt: settledAt, postedAt: new Date(), postedById: req.auth!.userId, accountingJournalId: journal.id } });
+    await tx.workOrderInvoice.update({ where: { id: payment.invoiceId }, data: { status: WorkOrderInvoiceStatus.PAID } }); await tx.workOrder.update({ where: { id: payment.invoice.workOrderId }, data: { status: WorkOrderStatus.PAID } });
+    await writeAuditEvent(tx, req.auth!, 'invoice.payment_reconciled', 'invoice', payment.invoiceId.toString(), { paymentId: payment.id.toString(), processorEventId, balanceTransactionId, payoutReference, processorReference, grossAmount: gross.toFixed(2), feeAmount: fee.toFixed(2), netAmount: net.toFixed(2), method: actualMethod, settledAt: settledAt.toISOString(), journalId: journal.id.toString() });
+    return { kind: 'applied' as const, event, payment: posted, journalId: journal.id };
   });
-  if (outcome.kind === 'missing') return void res.status(404).json({ error: 'Payment not found.' }); if (outcome.kind === 'invalid') return void res.status(409).json({ error: 'Only pending payments can be posted.' }); if (outcome.kind === 'fee') return void res.status(400).json({ error: 'feeAmount cannot exceed grossAmount.' });
-  res.json({ data: { ...outcome.payment, id: outcome.payment.id.toString(), invoiceId: outcome.payment.invoiceId.toString(), createdById: outcome.payment.createdById.toString(), postedById: outcome.payment.postedById?.toString() ?? null, accountingJournalId: outcome.payment.accountingJournalId?.toString() ?? null, grossAmount: outcome.payment.grossAmount.toString(), feeAmount: outcome.payment.feeAmount?.toString() ?? null, netAmount: outcome.payment.netAmount?.toString() ?? null } });
+  if (outcome.kind === 'missing') return void res.status(404).json({ error: 'Payment not found.' });
+  if (outcome.kind === 'duplicate_settlement') return void res.status(409).json({ error: 'This processor event or balance transaction is already recorded.' });
+  if (outcome.kind === 'replayed') return void res.json({ data: { replayed: true, reconciliation: serializeReconciliation(outcome.event) } });
+  if (outcome.kind === 'review') return void res.status(202).json({ data: { reviewRequired: true, reconciliation: serializeReconciliation(outcome.event) } });
+  res.status(201).json({ data: { reconciliation: serializeReconciliation(outcome.event), payment: serializePayment(outcome.payment), journalId: outcome.journalId.toString() } });
 });
 
 app.get('/api/v1/work-orders/:id/attachments', async (req: Request, res: Response) => {
