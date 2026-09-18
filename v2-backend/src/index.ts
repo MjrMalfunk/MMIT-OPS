@@ -39,6 +39,7 @@ import {
   verifyPassword,
   verifyTotp,
 } from './auth.js';
+import { canonicalJson, parseTrackerPacket, TrackerPacketValidationError } from './tracker-import.js';
 
 // Load environment variables (db passwords, ports, secrets) securely
 dotenv.config();
@@ -2342,6 +2343,149 @@ app.patch('/api/v1/work-orders/:id/client', requireRoles(OpsUserRole.OWNER, OpsU
     }
     throw error;
   }
+});
+
+function serializeTrackerImportSummary(importRecord: {
+  id: string;
+  shiftId: string;
+  packetSchema: string;
+  workOrderNumber: string;
+  contentSha256: string;
+  metrics: Prisma.JsonValue;
+  warnings: Prisma.JsonValue;
+  appliedAt: Date;
+  workOrderId: bigint;
+}) {
+  return {
+    id: importRecord.id,
+    shiftId: importRecord.shiftId,
+    packetSchema: importRecord.packetSchema,
+    workOrderNumber: importRecord.workOrderNumber,
+    contentSha256: importRecord.contentSha256,
+    workOrderId: importRecord.workOrderId.toString(),
+    metrics: importRecord.metrics,
+    warnings: importRecord.warnings,
+    appliedAt: importRecord.appliedAt,
+  };
+}
+
+app.post('/api/v1/work-orders/:id/tracker-import', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
+  const id = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  const body = requestBody(req);
+  if (id === null || !body) {
+    res.status(400).json({ error: 'A valid work-order id and tracker JSON object are required.' });
+    return;
+  }
+
+  let parsed: ReturnType<typeof parseTrackerPacket>;
+  try {
+    parsed = parseTrackerPacket(body);
+  } catch (error: unknown) {
+    if (error instanceof TrackerPacketValidationError) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+    throw error;
+  }
+  const contentSha256 = createHash('sha256').update(canonicalJson(parsed.rawPacket)).digest('hex');
+
+  const outcome = await prisma.$transaction(async (tx) => {
+    const before = await tx.workOrder.findUnique({ where: { id } });
+    if (!before) return { kind: 'not_found' as const };
+    if (before.source !== WorkOrderSource.FIELD_NATION || before.sourceReference !== parsed.workOrderNumber) {
+      return { kind: 'mismatch' as const };
+    }
+
+    const existing = await tx.workOrderTrackerImport.findFirst({
+      where: { OR: [{ shiftId: parsed.shiftId }, { workOrderId: id }] },
+    });
+    if (existing) {
+      if (existing.shiftId === parsed.shiftId && existing.workOrderId === id && existing.contentSha256 === contentSha256) {
+        const current = await tx.workOrder.findUnique({ where: { id }, include: { client: true } });
+        if (!current) return { kind: 'not_found' as const };
+        return { kind: 'idempotent' as const, workOrder: current, trackerImport: existing };
+      }
+      return {
+        kind: 'duplicate' as const,
+        existingShiftId: existing.shiftId,
+        existingWorkOrderId: existing.workOrderId.toString(),
+      };
+    }
+
+    if (before.status === WorkOrderStatus.CANCELLED) return { kind: 'cancelled' as const };
+    if (workOrderFinanciallyLocked(before.status)) return { kind: 'locked' as const };
+
+    const calculation = calculateWorkOrderPayout({
+      ...before,
+      checkInAt: parsed.checkInAt,
+      checkOutAt: parsed.checkOutAt,
+      onsiteMinutes: parsed.metrics.totals.onsite,
+    });
+    if ('error' in calculation) return { kind: 'invalid_calculation' as const, error: calculation.error };
+
+    const appliedAt = new Date();
+    const payCalculation = {
+      ...calculation.details,
+      calculationSource: 'tracker_import',
+      trackerShiftId: parsed.shiftId,
+    } as Prisma.InputJsonObject;
+    const trackerImport = await tx.workOrderTrackerImport.create({
+      data: {
+        shiftId: parsed.shiftId,
+        packetSchema: parsed.packetSchema,
+        workOrderNumber: parsed.workOrderNumber,
+        contentSha256,
+        rawPacket: parsed.rawPacket as unknown as Prisma.InputJsonValue,
+        metrics: parsed.metrics as unknown as Prisma.InputJsonValue,
+        warnings: parsed.metrics.warnings as unknown as Prisma.InputJsonValue,
+        startedAt: parsed.startedAt,
+        completedAt: parsed.completedAt,
+        appliedAt,
+        workOrder: { connect: { id } },
+        uploadedBy: { connect: { id: req.auth!.userId } },
+      },
+    });
+    const updated = await tx.workOrder.update({
+      where: { id },
+      data: {
+        status: WorkOrderStatus.COMPLETED,
+        checkInAt: parsed.checkInAt,
+        checkOutAt: parsed.checkOutAt,
+        mileage: parsed.mileage.toFixed(2),
+        driveMinutes: parsed.metrics.totals.drive,
+        onsiteMinutes: parsed.metrics.totals.onsite,
+        adminMinutes: before.adminMinutes + parsed.metrics.totals.admin,
+        actualGrossPay: calculation.amount,
+        payCalculatedAt: appliedAt,
+        payCalculation,
+      },
+      include: { client: true },
+    });
+    await writeAuditEvent(tx, req.auth!, 'work_order.tracker_imported', 'work_order', updated.id.toString(), {
+      before: auditWorkOrderSnapshot(before),
+      after: auditWorkOrderSnapshot(updated),
+      changedFields: ['status', 'checkInAt', 'checkOutAt', 'mileage', 'driveMinutes', 'onsiteMinutes', 'adminMinutes', 'actualGrossPay', 'payCalculatedAt', 'payCalculation'],
+      trackerImport: { id: trackerImport.id, shiftId: parsed.shiftId, contentSha256 },
+      metrics: parsed.metrics,
+    } as unknown as Prisma.InputJsonValue);
+    return { kind: 'applied' as const, workOrder: updated, trackerImport };
+  });
+
+  if (outcome.kind === 'not_found') return void res.status(404).json({ error: 'Work order not found.' });
+  if (outcome.kind === 'mismatch') return void res.status(409).json({ error: 'Tracker work-order number does not match this Field Nation work order.' });
+  if (outcome.kind === 'duplicate') return void res.status(409).json({ error: 'This outing or work order already has a tracker import.', existingShiftId: outcome.existingShiftId, existingWorkOrderId: outcome.existingWorkOrderId });
+  if (outcome.kind === 'cancelled') return void res.status(409).json({ error: 'Cancelled work orders cannot receive tracker data.' });
+  if (outcome.kind === 'locked') return void res.status(409).json({ error: 'Invoiced or paid work orders require a later accounting adjustment workflow.' });
+  if (outcome.kind === 'invalid_calculation') return void res.status(400).json({ error: outcome.error });
+  const data = {
+    workOrder: serializeWorkOrder(outcome.workOrder),
+    trackerImport: serializeTrackerImportSummary(outcome.trackerImport),
+  };
+  if (outcome.kind === 'idempotent') {
+    res.json({ data: { ...data, idempotent: true } });
+    return;
+  }
+  res.status(201).json({ data: { ...data, idempotent: false } });
 });
 
 app.patch('/api/v1/work-orders/:id/status', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
