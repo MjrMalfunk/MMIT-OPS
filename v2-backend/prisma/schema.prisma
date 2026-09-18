@@ -114,6 +114,14 @@ enum PaymentReconciliationStatus {
   REJECTED
 }
 
+enum FieldNationImportStatus {
+  RECEIVED
+  PARSED
+  REVIEW_REQUIRED
+  CONVERTED
+  REJECTED
+}
+
 model Client {
   id               BigInt       @id @default(autoincrement()) @db.UnsignedBigInt
   name             String       @unique @db.VarChar(191)
@@ -151,10 +159,39 @@ model WorkOrder {
   expenses            WorkOrderExpense[]
   materials           WorkOrderMaterial[]
   invoices            WorkOrderInvoice[]
+  fieldNationImport   FieldNationImport?
 
   @@unique([source, sourceReference])
   @@index([status, scheduledAt])
   @@index([clientId])
+}
+
+model FieldNationImport {
+  id              BigInt                  @id @default(autoincrement()) @db.UnsignedBigInt
+  messageId       String                  @unique @db.VarChar(191)
+  sender          String?                 @db.VarChar(191)
+  subject         String?                 @db.VarChar(255)
+  receivedAt      DateTime?               @db.DateTime(3)
+  rawText         String                  @db.LongText
+  status          FieldNationImportStatus @default(RECEIVED)
+  sourceReference String?                 @db.VarChar(191)
+  title           String?                 @db.VarChar(255)
+  location        String?                 @db.VarChar(255)
+  scheduledAt     DateTime?               @db.DateTime(3)
+  grossPay        Decimal?                @db.Decimal(10, 2)
+  estimatedHours  Decimal?                @db.Decimal(8, 2)
+  mileage         Decimal?                @db.Decimal(10, 2)
+  score           Decimal?                @db.Decimal(5, 2)
+  parsedData      Json?
+  workOrderId     BigInt?                 @unique @db.UnsignedBigInt
+  createdById     BigInt                  @db.UnsignedBigInt
+  createdAt       DateTime                @default(now()) @db.DateTime(3)
+  updatedAt       DateTime                @updatedAt @db.DateTime(3)
+  workOrder       WorkOrder?              @relation(fields: [workOrderId], references: [id], onDelete: SetNull)
+  createdBy       OpsUser                 @relation(fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([status, createdAt])
+  @@index([sourceReference])
 }
 
 model OpsUser {
@@ -187,6 +224,7 @@ model OpsUser {
   paymentsPosted       InvoicePayment[]      @relation("InvoicePaymentPoster")
   paymentReconciliations PaymentReconciliationEvent[] @relation("PaymentReconciliationRecorder")
   paymentReconciliationsReviewed PaymentReconciliationEvent[] @relation("PaymentReconciliationReviewer")
+  fieldNationImports   FieldNationImport[]
 }
 
 model OpsInvite {

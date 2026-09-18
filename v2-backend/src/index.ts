@@ -10,6 +10,7 @@ import {
   InvoicePaymentStatus,
   PaymentReconciliationStatus,
   ClientStatus,
+  FieldNationImportStatus,
   OpsUserRole,
   OpsUserStatus,
   Prisma,
@@ -94,6 +95,88 @@ function parseOptionalMoney(value: unknown): string | null | undefined {
   if (typeof value !== 'number' && typeof value !== 'string') return undefined;
   const normalized = String(value).trim();
   return /^\d+(\.\d{1,2})?$/.test(normalized) ? normalized : undefined;
+}
+
+type FieldNationParsed = {
+  sourceReference: string | null;
+  title: string | null;
+  location: string | null;
+  scheduledAt: Date | null;
+  grossPay: string | null;
+  estimatedHours: string | null;
+  mileage: string | null;
+  score: string;
+  scoreReasons: string[];
+};
+
+function firstField(text: string, labels: string[]): string | null {
+  const labelPattern = labels.map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const match = text.match(new RegExp(`(?:${labelPattern})\\s*[:#-]?\\s*([^\\r\\n]+)`, 'i'));
+  return match?.[1]?.trim() || null;
+}
+
+function parseFieldNationMessage(rawText: string): FieldNationParsed {
+  const text = rawText.replace(/\r\n/g, '\n');
+  const sourceReference = firstField(text, ['work order', 'work order number', 'opportunity', 'job id'])?.match(/[A-Z0-9][A-Z0-9_-]{3,}/i)?.[0] ?? null;
+  const title = firstField(text, ['job title', 'work title', 'title']);
+  const location = firstField(text, ['location', 'site address', 'address']);
+  const payText = firstField(text, ['gross pay', 'total pay', 'estimated pay', 'pay']);
+  const hoursText = firstField(text, ['estimated hours', 'scheduled hours', 'hours']);
+  const mileageText = firstField(text, ['mileage', 'miles', 'distance']);
+  const grossPay = payText?.replace(/[^0-9.]/g, '') || null;
+  const estimatedHours = hoursText?.replace(/[^0-9.]/g, '') || null;
+  const mileage = mileageText?.replace(/[^0-9.]/g, '') || null;
+  const scheduledText = firstField(text, ['scheduled start', 'scheduled date', 'appointment']);
+  const parsedScheduled = scheduledText ? new Date(scheduledText) : null;
+  const scheduledAt = parsedScheduled && !Number.isNaN(parsedScheduled.getTime()) ? parsedScheduled : null;
+  const scoreReasons: string[] = [];
+  let score = 50;
+  const pay = grossPay ? Number(grossPay) : 0;
+  const hours = estimatedHours ? Number(estimatedHours) : 0;
+  const miles = mileage ? Number(mileage) : 0;
+  if (pay > 0 && hours > 0) {
+    const hourly = pay / hours;
+    score += Math.min(30, Math.max(-20, (hourly - 25) * 1.2));
+    scoreReasons.push(`estimated gross hourly rate $${hourly.toFixed(2)}`);
+  } else scoreReasons.push('missing pay or estimated hours');
+  if (miles > 0) {
+    score -= Math.min(20, miles / 10);
+    scoreReasons.push(`${miles.toFixed(1)} estimated miles`);
+  }
+  if (!sourceReference) scoreReasons.push('missing source reference');
+  if (!scheduledAt) scoreReasons.push('missing scheduled date');
+  return {
+    sourceReference,
+    title,
+    location,
+    scheduledAt,
+    grossPay: grossPay && /^\d+(\.\d{1,2})?$/.test(grossPay) ? Number(grossPay).toFixed(2) : null,
+    estimatedHours: estimatedHours && /^\d+(\.\d{1,2})?$/.test(estimatedHours) ? Number(estimatedHours).toFixed(2) : null,
+    mileage: mileage && /^\d+(\.\d{1,2})?$/.test(mileage) ? Number(mileage).toFixed(2) : null,
+    score: Math.max(0, Math.min(100, score)).toFixed(2),
+    scoreReasons,
+  };
+}
+
+function serializeFieldNationImport(item: Prisma.FieldNationImportGetPayload<{ include: { workOrder: true } }>) {
+  return {
+    id: item.id.toString(),
+    messageId: item.messageId,
+    sender: item.sender,
+    subject: item.subject,
+    receivedAt: item.receivedAt,
+    status: item.status,
+    sourceReference: item.sourceReference,
+    title: item.title,
+    location: item.location,
+    scheduledAt: item.scheduledAt,
+    grossPay: item.grossPay?.toFixed(2) ?? null,
+    estimatedHours: item.estimatedHours?.toFixed(2) ?? null,
+    mileage: item.mileage?.toFixed(2) ?? null,
+    score: item.score?.toFixed(2) ?? null,
+    parsedData: item.parsedData,
+    workOrderId: item.workOrderId?.toString() ?? null,
+  };
 }
 
 function parsePositiveQuantity(value: unknown): string | undefined {
@@ -805,6 +888,126 @@ app.get('/api/v1/audit-events', requireAuth, requireRoles(OpsUserRole.OWNER, Ops
     take: limit,
   });
   res.json({ data: events.map(serializeAuditEvent) });
+});
+
+app.use('/api/v1/fieldnation', requireAuth);
+
+app.post('/api/v1/fieldnation/imports', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
+  const { messageId, sender, subject, receivedAt, rawText } = req.body ?? {};
+  if (typeof messageId !== 'string' || messageId.trim().length < 1 || messageId.trim().length > 191) {
+    res.status(400).json({ error: 'messageId is required and must be 1-191 characters.' });
+    return;
+  }
+  if (typeof rawText !== 'string' || rawText.trim().length < 1 || rawText.length > 2_000_000) {
+    res.status(400).json({ error: 'rawText is required and must be no larger than 2 MB.' });
+    return;
+  }
+  if (sender !== undefined && sender !== null && typeof sender !== 'string') {
+    res.status(400).json({ error: 'sender must be text when provided.' });
+    return;
+  }
+  if (subject !== undefined && subject !== null && typeof subject !== 'string') {
+    res.status(400).json({ error: 'subject must be text when provided.' });
+    return;
+  }
+  const parsedReceivedAt = receivedAt === undefined ? null : parseOptionalTimestamp(receivedAt);
+  if (parsedReceivedAt === undefined) {
+    res.status(400).json({ error: 'receivedAt must be an ISO timestamp when provided.' });
+    return;
+  }
+  const parsed = parseFieldNationMessage(rawText);
+  const status = parsed.sourceReference && parsed.title && parsed.grossPay
+    ? FieldNationImportStatus.PARSED
+    : FieldNationImportStatus.REVIEW_REQUIRED;
+  const existing = await prisma.fieldNationImport.findUnique({ where: { messageId: messageId.trim() }, include: { workOrder: true } });
+  if (existing) {
+    res.json({ data: serializeFieldNationImport(existing), duplicate: true });
+    return;
+  }
+  const created = await prisma.$transaction(async (tx) => {
+    const imported = await tx.fieldNationImport.create({
+      data: {
+        messageId: messageId.trim(),
+        sender: typeof sender === 'string' ? sender.trim() || null : null,
+        subject: typeof subject === 'string' ? subject.trim() || null : null,
+        receivedAt: parsedReceivedAt,
+        rawText,
+        status,
+        sourceReference: parsed.sourceReference,
+        title: parsed.title,
+        location: parsed.location,
+        scheduledAt: parsed.scheduledAt,
+        grossPay: parsed.grossPay,
+        estimatedHours: parsed.estimatedHours,
+        mileage: parsed.mileage,
+        score: parsed.score,
+        parsedData: { scoreReasons: parsed.scoreReasons },
+        createdById: req.auth!.userId,
+      },
+      include: { workOrder: true },
+    });
+    await writeAuditEvent(tx, req.auth!, 'fieldnation.import_received', 'fieldnation_import', imported.id.toString(), {
+      messageId: imported.messageId, status: imported.status, sourceReference: imported.sourceReference, score: imported.score?.toFixed(2) ?? null,
+    });
+    return imported;
+  });
+  res.status(201).json({ data: serializeFieldNationImport(created), duplicate: false });
+});
+
+app.get('/api/v1/fieldnation/imports', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR, OpsUserRole.VIEWER), async (req: Request, res: Response) => {
+  const rawLimit = req.query.limit;
+  const rawStatus = req.query.status;
+  if ((rawLimit !== undefined && typeof rawLimit !== 'string') || (rawStatus !== undefined && typeof rawStatus !== 'string')) {
+    res.status(400).json({ error: 'limit and status must be single text values.' });
+    return;
+  }
+  const limit = rawLimit === undefined ? 50 : Number(rawLimit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    res.status(400).json({ error: 'limit must be a whole number from 1 through 100.' });
+    return;
+  }
+  if (rawStatus !== undefined && !isEnumValue(FieldNationImportStatus, rawStatus)) {
+    res.status(400).json({ error: 'status must be a valid FieldNation import status.' });
+    return;
+  }
+  const imports = await prisma.fieldNationImport.findMany({
+    where: rawStatus ? { status: rawStatus as FieldNationImportStatus } : undefined,
+    include: { workOrder: true }, orderBy: { id: 'desc' }, take: limit,
+  });
+  res.json({ data: imports.map(serializeFieldNationImport) });
+});
+
+app.get('/api/v1/fieldnation/imports/:id', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR, OpsUserRole.VIEWER), async (req: Request, res: Response) => {
+  const id = parseId(req.params.id as string);
+  if (id === null) { res.status(400).json({ error: 'A valid import id is required.' }); return; }
+  const item = await prisma.fieldNationImport.findUnique({ where: { id }, include: { workOrder: true } });
+  if (!item) { res.status(404).json({ error: 'FieldNation import not found.' }); return; }
+  res.json({ data: serializeFieldNationImport(item) });
+});
+
+app.post('/api/v1/fieldnation/imports/:id/convert', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
+  const id = parseId(req.params.id as string);
+  if (id === null) { res.status(400).json({ error: 'A valid import id is required.' }); return; }
+  const item = await prisma.fieldNationImport.findUnique({ where: { id } });
+  if (!item) { res.status(404).json({ error: 'FieldNation import not found.' }); return; }
+  if (item.workOrderId) { res.status(409).json({ error: 'This import has already been converted.', workOrderId: item.workOrderId.toString() }); return; }
+  if (!item.sourceReference) { res.status(409).json({ error: 'This import needs a source reference before conversion.' }); return; }
+  const workOrder = await prisma.$transaction(async (tx) => {
+    const created = await tx.workOrder.create({ data: {
+      source: WorkOrderSource.FIELD_NATION,
+      sourceReference: item.sourceReference!,
+      status: WorkOrderStatus.REQUESTED,
+      title: item.title || `FieldNation ${item.sourceReference}`,
+      scheduledAt: item.scheduledAt,
+      grossPay: item.grossPay,
+      mileage: item.mileage,
+      notes: `Imported from FieldNation email ${item.messageId}.${item.location ? ` Location: ${item.location}.` : ''}`,
+    } });
+    await tx.fieldNationImport.update({ where: { id }, data: { status: FieldNationImportStatus.CONVERTED, workOrderId: created.id } });
+    await writeAuditEvent(tx, req.auth!, 'fieldnation.import_converted', 'fieldnation_import', id.toString(), { workOrderId: created.id.toString(), sourceReference: item.sourceReference });
+    return created;
+  });
+  res.status(201).json({ data: { importId: id.toString(), workOrderId: workOrder.id.toString(), sourceReference: workOrder.sourceReference } });
 });
 
 function nextAuthError(error: unknown, res: Response): void {

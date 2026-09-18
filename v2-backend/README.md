@@ -134,6 +134,23 @@ add entries rather than alter these posted revenue lines.
   closes the event without changing payment, invoice, work-order, or journal
   state.
 
+## FieldNation intake foundation
+
+- `POST /api/v1/fieldnation/imports` accepts one raw FieldNation message at a
+  time. It is duplicate-safe on `messageId`, preserves the original text, and
+  stores the first parsed opportunity fields plus an explainable score.
+- `GET /api/v1/fieldnation/imports` lists the newest captured messages. Use
+  `?status=REVIEW_REQUIRED` to show messages that need operator attention.
+- `GET /api/v1/fieldnation/imports/:id` returns the parsed import without
+  exposing the raw message in list responses.
+- `POST /api/v1/fieldnation/imports/:id/convert` creates a V2
+  `FIELD_NATION` work order only after a source reference is present. Conversion
+  is explicit and audited; email capture never silently creates a work order.
+
+This is the safe first importer slice. Mailbox polling, the complete V1
+FieldNation parser, and automatic scoring refinements will be layered on after
+real redacted messages have been replayed through this review queue.
+
 ## OPS identity and access
 
 V2 uses password sign-in plus mandatory TOTP and one-time recovery codes. It
