@@ -33,6 +33,10 @@ the API before exposing it beyond the server.
   schedule, actual check-in/out, gross pay, mileage, drive/onsite/admin minutes,
   and notes. Check-out cannot precede check-in. Invoiced and paid work orders
   allow notes only until a dedicated adjustment workflow is added.
+- `PATCH /api/v1/work-orders/:id/pay` updates the compensation terms before a
+  work order is invoiced or paid. `payType` is `FIXED`, `HOURLY`, or `BLENDED`.
+  `grossPay` is the advertised/max amount; the separate `actualGrossPay` is
+  calculated when the work order moves to `COMPLETED`.
 - `PATCH /api/v1/work-orders/:id/client` explicitly links or unlinks a client.
 - `PATCH /api/v1/work-orders/:id/status` applies a valid lifecycle transition.
 - `GET /api/v1/work-orders/:id/costs` returns active materials, expenses, and
@@ -150,6 +154,22 @@ add entries rather than alter these posted revenue lines.
 This is the safe first importer slice. Mailbox polling, the complete V1
 FieldNation parser, and automatic scoring refinements will be layered on after
 real redacted messages have been replayed through this review queue.
+
+## Pay terms and completion payout
+
+V2 keeps the original advertised amount in `grossPay` and preserves the terms
+used to derive it. Fixed work uses `payBaseAmount`. Hourly work uses
+`payHourlyRate`, optionally capped by `payHoursCap`. Blended work uses
+`payBaseAmount` for `payBaseHours`, then pays `payHourlyRate` for additional
+onsite hours up to `payHoursCap`.
+
+For example, `$100 for 2 hours, up to 3 additional hours at $40/hour` is stored
+with an advertised maximum of `$220`. If the completed work has four onsite
+hours, V2 calculates an actual payout of `$180` (`$100 + 2 × $40`) and retains
+the formula and inputs in `payCalculation` for auditability. Onsite minutes are
+preferred; when they are not recorded, check-in and check-out timestamps are
+used. Variable-pay work cannot be completed until one of those duration sources
+is available.
 
 ## OPS identity and access
 

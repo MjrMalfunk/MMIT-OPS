@@ -21,6 +21,7 @@ import {
   WorkOrderInvoiceLineType,
   WorkOrderInvoiceStatus,
   WorkOrderMaterialSource,
+  WorkOrderPayType,
   WorkOrderSource,
   WorkOrderStatus,
 } from '@prisma/client';
@@ -97,12 +98,27 @@ function parseOptionalMoney(value: unknown): string | null | undefined {
   return /^\d+(\.\d{1,2})?$/.test(normalized) ? normalized : undefined;
 }
 
+function parseOptionalHours(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  if (typeof value !== 'number' && typeof value !== 'string') return undefined;
+  const normalized = String(value).trim();
+  if (!/^\d+(\.\d{1,2})?$/.test(normalized)) return undefined;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) && parsed <= 10_080 ? normalized : undefined;
+}
+
 type FieldNationParsed = {
   sourceReference: string | null;
   title: string | null;
   location: string | null;
   scheduledAt: Date | null;
   grossPay: string | null;
+  payType: WorkOrderPayType;
+  payBaseAmount: string | null;
+  payBaseHours: string | null;
+  payHourlyRate: string | null;
+  payHoursCap: string | null;
   estimatedHours: string | null;
   mileage: string | null;
   score: string;
@@ -115,6 +131,15 @@ function firstField(text: string, labels: string[]): string | null {
   return match?.[1]?.trim() || null;
 }
 
+function firstMoneyValue(value: string | null): string | null {
+  const match = value?.match(/\d+(?:\.\d{1,2})?/);
+  return match?.[0] ?? null;
+}
+
+function decimalText(value: number): string {
+  return value.toFixed(2);
+}
+
 function parseFieldNationMessage(rawText: string): FieldNationParsed {
   const text = rawText.replace(/\r\n/g, '\n');
   const sourceReference = firstField(text, ['work order', 'work order number', 'opportunity', 'job id'])?.match(/[A-Z0-9][A-Z0-9_-]{3,}/i)?.[0] ?? null;
@@ -123,12 +148,44 @@ function parseFieldNationMessage(rawText: string): FieldNationParsed {
   const payText = firstField(text, ['gross pay', 'total pay', 'estimated pay', 'pay']);
   const hoursText = firstField(text, ['estimated hours', 'scheduled hours', 'hours']);
   const mileageText = firstField(text, ['mileage', 'miles', 'distance']);
-  const grossPay = payText?.replace(/[^0-9.]/g, '') || null;
-  const estimatedHours = hoursText?.replace(/[^0-9.]/g, '') || null;
+  let grossPay = firstMoneyValue(payText);
+  let estimatedHours = firstMoneyValue(hoursText);
   const mileage = mileageText?.replace(/[^0-9.]/g, '') || null;
   const scheduledText = firstField(text, ['scheduled start', 'scheduled date', 'appointment']);
   const parsedScheduled = scheduledText ? new Date(scheduledText) : null;
   const scheduledAt = parsedScheduled && !Number.isNaN(parsedScheduled.getTime()) ? parsedScheduled : null;
+  const payTypeText = firstField(text, ['pay type', 'compensation type'])?.toUpperCase() ?? '';
+  const blendedMatch = text.match(/\$?\s*(\d+(?:\.\d{1,2})?)\s*(?:for|includes?)\s*(\d+(?:\.\d{1,2})?)\s*(?:hours?|hrs?).*?(?:up to|max(?:imum)?(?: of)?)\s*(\d+(?:\.\d{1,2})?)\s*(?:hours?|hrs?)?\s*(?:at|@)\s*\$?\s*(\d+(?:\.\d{1,2})?)\s*(?:\/\s*(?:hr|hour)|per\s*(?:hr|hour))/i);
+  const hourlyMatch = text.match(/\$?\s*(\d+(?:\.\d{1,2})?)\s*(?:\/\s*(?:hr|hour)|per\s*(?:hr|hour))/i);
+  const capMatch = text.match(/(?:up to|max(?:imum)?(?: of)?|cap(?:ped)? at)\s*(\d+(?:\.\d{1,2})?)\s*(?:hours?|hrs?)?/i);
+  let payType: WorkOrderPayType = WorkOrderPayType.FIXED;
+  let payBaseAmount = grossPay;
+  let payBaseHours: string | null = null;
+  let payHourlyRate: string | null = null;
+  let payHoursCap: string | null = null;
+  if (blendedMatch || payTypeText.includes('BLENDED')) {
+    const baseAmount = blendedMatch?.[1] ?? firstMoneyValue(firstField(text, ['base pay', 'base amount']));
+    const baseHours = blendedMatch?.[2] ?? firstMoneyValue(firstField(text, ['base hours', 'included hours']));
+    const hoursCap = blendedMatch?.[3] ?? capMatch?.[1] ?? null;
+    const hourlyRate = blendedMatch?.[4] ?? firstMoneyValue(firstField(text, ['additional rate', 'hourly rate', 'rate per hour'])) ?? hourlyMatch?.[1] ?? null;
+    if (baseAmount && baseHours && hourlyRate && hoursCap) {
+      payType = WorkOrderPayType.BLENDED;
+      payBaseAmount = Number(baseAmount).toFixed(2);
+      payBaseHours = Number(baseHours).toFixed(2);
+      payHourlyRate = Number(hourlyRate).toFixed(2);
+      payHoursCap = Number(hoursCap).toFixed(2);
+      grossPay = decimalText(Number(payBaseAmount) + Number(payHourlyRate) * Number(payHoursCap));
+      estimatedHours = decimalText(Number(payBaseHours) + Number(payHoursCap));
+    }
+  } else if (payTypeText.includes('HOURLY') || hourlyMatch) {
+    payType = WorkOrderPayType.HOURLY;
+    payBaseAmount = null;
+    payHourlyRate = firstMoneyValue(firstField(text, ['hourly rate', 'rate per hour'])) ?? hourlyMatch?.[1] ?? null;
+    payHoursCap = capMatch?.[1] ? Number(capMatch[1]).toFixed(2) : null;
+    if (payHourlyRate && !grossPay && estimatedHours) {
+      grossPay = decimalText(Number(payHourlyRate) * Number(estimatedHours));
+    }
+  }
   const scoreReasons: string[] = [];
   let score = 50;
   const pay = grossPay ? Number(grossPay) : 0;
@@ -151,10 +208,71 @@ function parseFieldNationMessage(rawText: string): FieldNationParsed {
     location,
     scheduledAt,
     grossPay: grossPay && /^\d+(\.\d{1,2})?$/.test(grossPay) ? Number(grossPay).toFixed(2) : null,
+    payType,
+    payBaseAmount,
+    payBaseHours,
+    payHourlyRate,
+    payHoursCap,
     estimatedHours: estimatedHours && /^\d+(\.\d{1,2})?$/.test(estimatedHours) ? Number(estimatedHours).toFixed(2) : null,
     mileage: mileage && /^\d+(\.\d{1,2})?$/.test(mileage) ? Number(mileage).toFixed(2) : null,
     score: Math.max(0, Math.min(100, score)).toFixed(2),
     scoreReasons,
+  };
+}
+
+type ParsedPayTerms = {
+  grossPay: string | null;
+  payType: WorkOrderPayType;
+  payBaseAmount: string | null;
+  payBaseHours: string | null;
+  payHourlyRate: string | null;
+  payHoursCap: string | null;
+};
+
+function parsePayTermsInput(body: Record<string, unknown>, fallbackGrossPay: string | null = null): ParsedPayTerms | { error: string } {
+  const payType = body.payType === undefined ? WorkOrderPayType.FIXED : body.payType;
+  if (!isEnumValue(WorkOrderPayType, payType)) return { error: 'payType must be FIXED, HOURLY, or BLENDED.' };
+
+  const grossPayValue = hasOwn(body, 'grossPay') ? parseOptionalMoney(body.grossPay) : fallbackGrossPay;
+  const baseAmountValue = hasOwn(body, 'payBaseAmount') ? parseOptionalMoney(body.payBaseAmount) : undefined;
+  const baseHoursValue = hasOwn(body, 'payBaseHours') ? parseOptionalHours(body.payBaseHours) : undefined;
+  const hourlyRateValue = hasOwn(body, 'payHourlyRate') ? parseOptionalMoney(body.payHourlyRate) : undefined;
+  const hoursCapValue = hasOwn(body, 'payHoursCap') ? parseOptionalHours(body.payHoursCap) : undefined;
+  if ([grossPayValue, baseAmountValue, baseHoursValue, hourlyRateValue, hoursCapValue].some((value) => value === undefined)) {
+    return { error: 'Pay amounts must be non-negative amounts with at most two decimals; pay hours must be non-negative values with at most two decimals.' };
+  }
+
+  let grossPay = grossPayValue ?? null;
+  if (payType === WorkOrderPayType.FIXED) {
+    const payBaseAmount = baseAmountValue === undefined ? grossPay : baseAmountValue;
+    if (grossPay === null && payBaseAmount !== null && payBaseAmount !== undefined) grossPay = payBaseAmount;
+    return { grossPay, payType, payBaseAmount: payBaseAmount ?? null, payBaseHours: null, payHourlyRate: null, payHoursCap: null };
+  }
+
+  if (hourlyRateValue === undefined || hourlyRateValue === null) {
+    return { error: `${payType === WorkOrderPayType.HOURLY ? 'Hourly' : 'Blended'} pay requires payHourlyRate.` };
+  }
+  if (payType === WorkOrderPayType.HOURLY) {
+    const payHoursCap = hoursCapValue ?? null;
+    if (grossPay === null && payHoursCap !== null) {
+      grossPay = new Prisma.Decimal(hourlyRateValue).mul(payHoursCap).toFixed(2);
+    }
+    return { grossPay, payType, payBaseAmount: null, payBaseHours: null, payHourlyRate: hourlyRateValue, payHoursCap };
+  }
+
+  if (baseAmountValue === undefined || baseAmountValue === null || baseHoursValue === undefined || baseHoursValue === null || hoursCapValue === undefined || hoursCapValue === null) {
+    return { error: 'Blended pay requires payBaseAmount, payBaseHours, payHourlyRate, and payHoursCap.' };
+  }
+  if (grossPay === null) {
+    grossPay = new Prisma.Decimal(baseAmountValue).plus(new Prisma.Decimal(hourlyRateValue).mul(hoursCapValue)).toFixed(2);
+  }
+  return {
+    grossPay,
+    payType,
+    payBaseAmount: baseAmountValue,
+    payBaseHours: baseHoursValue,
+    payHourlyRate: hourlyRateValue,
+    payHoursCap: hoursCapValue,
   };
 }
 
@@ -171,6 +289,11 @@ function serializeFieldNationImport(item: Prisma.FieldNationImportGetPayload<{ i
     location: item.location,
     scheduledAt: item.scheduledAt,
     grossPay: item.grossPay?.toFixed(2) ?? null,
+    payType: item.payType,
+    payBaseAmount: item.payBaseAmount?.toFixed(2) ?? null,
+    payBaseHours: item.payBaseHours?.toFixed(2) ?? null,
+    payHourlyRate: item.payHourlyRate?.toFixed(2) ?? null,
+    payHoursCap: item.payHoursCap?.toFixed(2) ?? null,
     estimatedHours: item.estimatedHours?.toFixed(2) ?? null,
     mileage: item.mileage?.toFixed(2) ?? null,
     score: item.score?.toFixed(2) ?? null,
@@ -297,6 +420,14 @@ function serializeWorkOrder(workOrder: WorkOrderWithClient) {
     id: workOrder.id.toString(),
     clientId: workOrder.clientId?.toString() ?? null,
     grossPay: workOrder.grossPay?.toString() ?? null,
+    payType: workOrder.payType,
+    payBaseAmount: workOrder.payBaseAmount?.toString() ?? null,
+    payBaseHours: workOrder.payBaseHours?.toString() ?? null,
+    payHourlyRate: workOrder.payHourlyRate?.toString() ?? null,
+    payHoursCap: workOrder.payHoursCap?.toString() ?? null,
+    actualGrossPay: workOrder.actualGrossPay?.toString() ?? null,
+    payCalculatedAt: workOrder.payCalculatedAt,
+    payCalculation: workOrder.payCalculation,
     mileage: workOrder.mileage?.toString() ?? null,
     client: workOrder.client ? { ...workOrder.client, id: workOrder.client.id.toString() } : null,
   };
@@ -557,6 +688,14 @@ function auditWorkOrderSnapshot(workOrder: {
   clientId: bigint | null;
   scheduledAt: Date | null;
   grossPay: Prisma.Decimal | null;
+  payType: WorkOrderPayType;
+  payBaseAmount: Prisma.Decimal | null;
+  payBaseHours: Prisma.Decimal | null;
+  payHourlyRate: Prisma.Decimal | null;
+  payHoursCap: Prisma.Decimal | null;
+  actualGrossPay: Prisma.Decimal | null;
+  payCalculatedAt: Date | null;
+  payCalculation: Prisma.JsonValue | null;
   mileage: Prisma.Decimal | null;
   driveMinutes: number;
   onsiteMinutes: number;
@@ -572,11 +711,104 @@ function auditWorkOrderSnapshot(workOrder: {
     clientId: workOrder.clientId?.toString() ?? null,
     scheduledAt: workOrder.scheduledAt?.toISOString() ?? null,
     grossPay: workOrder.grossPay?.toString() ?? null,
+    payType: workOrder.payType,
+    payBaseAmount: workOrder.payBaseAmount?.toString() ?? null,
+    payBaseHours: workOrder.payBaseHours?.toString() ?? null,
+    payHourlyRate: workOrder.payHourlyRate?.toString() ?? null,
+    payHoursCap: workOrder.payHoursCap?.toString() ?? null,
+    actualGrossPay: workOrder.actualGrossPay?.toString() ?? null,
+    payCalculatedAt: workOrder.payCalculatedAt?.toISOString() ?? null,
+    payCalculation: workOrder.payCalculation,
     mileage: workOrder.mileage?.toString() ?? null,
     driveMinutes: workOrder.driveMinutes,
     onsiteMinutes: workOrder.onsiteMinutes,
     adminMinutes: workOrder.adminMinutes,
     hasNotes: Boolean(workOrder.notes),
+  };
+}
+
+type WorkOrderPayRecord = {
+  payType: WorkOrderPayType;
+  grossPay: Prisma.Decimal | null;
+  payBaseAmount: Prisma.Decimal | null;
+  payBaseHours: Prisma.Decimal | null;
+  payHourlyRate: Prisma.Decimal | null;
+  payHoursCap: Prisma.Decimal | null;
+  checkInAt: Date | null;
+  checkOutAt: Date | null;
+  onsiteMinutes: number;
+};
+
+type PayCalculationResult =
+  | { amount: Prisma.Decimal | null; details: Prisma.JsonObject }
+  | { error: string };
+
+function calculateWorkOrderPayout(workOrder: WorkOrderPayRecord): PayCalculationResult {
+  const actualHours = workOrder.onsiteMinutes > 0
+    ? new Prisma.Decimal(workOrder.onsiteMinutes).div(60)
+    : workOrder.checkInAt && workOrder.checkOutAt
+      ? new Prisma.Decimal(workOrder.checkOutAt.getTime() - workOrder.checkInAt.getTime()).div(3_600_000)
+      : null;
+
+  if (workOrder.payType === WorkOrderPayType.FIXED) {
+    const amount = workOrder.payBaseAmount ?? workOrder.grossPay;
+    return {
+      amount,
+      details: {
+        payType: WorkOrderPayType.FIXED,
+        actualHours: actualHours ? actualHours.toFixed(2) : 'not tracked',
+        actualGrossPay: amount?.toFixed(2) ?? 'not set',
+        formula: 'fixed amount',
+      },
+    };
+  }
+
+  if (!actualHours) {
+    return { error: 'Onsite minutes or check-in/check-out times are required to calculate hourly or blended pay.' };
+  }
+
+  if (workOrder.payType === WorkOrderPayType.HOURLY) {
+    if (!workOrder.payHourlyRate) return { error: 'An hourly rate is required to calculate hourly pay.' };
+    const billableHours = workOrder.payHoursCap && actualHours.gt(workOrder.payHoursCap)
+      ? workOrder.payHoursCap
+      : actualHours;
+    const amount = workOrder.payHourlyRate.mul(billableHours).toDecimalPlaces(2);
+    return {
+      amount,
+      details: {
+        payType: WorkOrderPayType.HOURLY,
+        actualHours: actualHours.toFixed(2),
+        billableHours: billableHours.toFixed(2),
+        hourlyRate: workOrder.payHourlyRate.toFixed(2),
+        maxGrossPay: workOrder.grossPay?.toFixed(2) ?? 'not set',
+        actualGrossPay: amount.toFixed(2),
+        formula: 'billable hours × hourly rate',
+      },
+    };
+  }
+
+  if (!workOrder.payBaseAmount || !workOrder.payBaseHours || !workOrder.payHourlyRate || !workOrder.payHoursCap) {
+    return { error: 'Blended pay requires a base amount, included base hours, additional hourly rate, and an hours cap.' };
+  }
+  const extraHours = actualHours.minus(workOrder.payBaseHours);
+  const billableExtraHours = extraHours.gt(0)
+    ? (extraHours.gt(workOrder.payHoursCap) ? workOrder.payHoursCap : extraHours)
+    : new Prisma.Decimal(0);
+  const amount = workOrder.payBaseAmount.plus(workOrder.payHourlyRate.mul(billableExtraHours)).toDecimalPlaces(2);
+  return {
+    amount,
+    details: {
+      payType: WorkOrderPayType.BLENDED,
+      actualHours: actualHours.toFixed(2),
+      baseAmount: workOrder.payBaseAmount.toFixed(2),
+      baseHours: workOrder.payBaseHours.toFixed(2),
+      hourlyRate: workOrder.payHourlyRate.toFixed(2),
+      billableExtraHours: billableExtraHours.toFixed(2),
+      hoursCap: workOrder.payHoursCap.toFixed(2),
+      maxGrossPay: workOrder.grossPay?.toFixed(2) ?? 'not set',
+      actualGrossPay: amount.toFixed(2),
+      formula: 'base amount + billable extra hours × hourly rate',
+    },
   };
 }
 
@@ -938,10 +1170,22 @@ app.post('/api/v1/fieldnation/imports', requireRoles(OpsUserRole.OWNER, OpsUserR
         location: parsed.location,
         scheduledAt: parsed.scheduledAt,
         grossPay: parsed.grossPay,
+        payType: parsed.payType,
+        payBaseAmount: parsed.payBaseAmount,
+        payBaseHours: parsed.payBaseHours,
+        payHourlyRate: parsed.payHourlyRate,
+        payHoursCap: parsed.payHoursCap,
         estimatedHours: parsed.estimatedHours,
         mileage: parsed.mileage,
         score: parsed.score,
-        parsedData: { scoreReasons: parsed.scoreReasons },
+        parsedData: {
+          scoreReasons: parsed.scoreReasons,
+          payType: parsed.payType,
+          payBaseAmount: parsed.payBaseAmount,
+          payBaseHours: parsed.payBaseHours,
+          payHourlyRate: parsed.payHourlyRate,
+          payHoursCap: parsed.payHoursCap,
+        },
         createdById: req.auth!.userId,
       },
       include: { workOrder: true },
@@ -1000,6 +1244,11 @@ app.post('/api/v1/fieldnation/imports/:id/convert', requireRoles(OpsUserRole.OWN
       title: item.title || `FieldNation ${item.sourceReference}`,
       scheduledAt: item.scheduledAt,
       grossPay: item.grossPay,
+      payType: item.payType,
+      payBaseAmount: item.payBaseAmount,
+      payBaseHours: item.payBaseHours,
+      payHourlyRate: item.payHourlyRate,
+      payHoursCap: item.payHoursCap,
       mileage: item.mileage,
       notes: `Imported from FieldNation email ${item.messageId}.${item.location ? ` Location: ${item.location}.` : ''}`,
     } });
@@ -1248,7 +1497,8 @@ app.get('/api/v1/work-orders', async (req: Request, res: Response) => {
 });
 
 app.post('/api/v1/work-orders', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
-  const { source, sourceReference, title, clientId, scheduledAt, grossPay, notes } = req.body ?? {};
+  const body = requestBody(req);
+  const { source, sourceReference, title, clientId, scheduledAt, notes } = body ?? {};
   if (!isEnumValue(WorkOrderSource, source)) {
     res.status(400).json({ error: 'source must be FIELD_NATION, MANUAL, SYNCRO, or OTHER.' });
     return;
@@ -1266,14 +1516,14 @@ app.post('/api/v1/work-orders', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMI
     res.status(400).json({ error: 'clientId must be a positive integer.' });
     return;
   }
-  const parsedPay = parseOptionalMoney(grossPay);
-  if (parsedPay === undefined) {
-    res.status(400).json({ error: 'grossPay must be a non-negative amount with at most two decimals.' });
+  const parsedTerms = body ? parsePayTermsInput(body) : { error: 'A JSON work-order object is required.' };
+  if ('error' in parsedTerms) {
+    res.status(400).json({ error: parsedTerms.error });
     return;
   }
   const parsedScheduledAt = scheduledAt === undefined || scheduledAt === null || scheduledAt === ''
     ? null
-    : new Date(scheduledAt);
+    : typeof scheduledAt === 'string' ? new Date(scheduledAt) : null;
   if (parsedScheduledAt && Number.isNaN(parsedScheduledAt.getTime())) {
     res.status(400).json({ error: 'scheduledAt must be a valid ISO timestamp.' });
     return;
@@ -1288,14 +1538,19 @@ app.post('/api/v1/work-orders', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMI
           title: title.trim(),
           clientId: parsedClientId,
           scheduledAt: parsedScheduledAt,
-          grossPay: parsedPay,
+          grossPay: parsedTerms.grossPay,
+          payType: parsedTerms.payType,
+          payBaseAmount: parsedTerms.payBaseAmount,
+          payBaseHours: parsedTerms.payBaseHours,
+          payHourlyRate: parsedTerms.payHourlyRate,
+          payHoursCap: parsedTerms.payHoursCap,
           notes: typeof notes === 'string' ? notes.trim() || null : null,
         },
         include: { client: true },
       });
       await writeAuditEvent(tx, req.auth!, 'work_order.created', 'work_order', created.id.toString(), {
         after: auditWorkOrderSnapshot(created),
-        changedFields: ['source', 'sourceReference', 'title', 'clientId', 'scheduledAt', 'grossPay', 'notes'],
+        changedFields: ['source', 'sourceReference', 'title', 'clientId', 'scheduledAt', 'grossPay', 'payType', 'payBaseAmount', 'payBaseHours', 'payHourlyRate', 'payHoursCap', 'notes'],
       });
       return created;
     });
@@ -1862,6 +2117,59 @@ app.delete('/api/v1/work-orders/:id/attachments/:attachmentId', requireRoles(Ops
   res.json({ data: serializeAttachment(attachment) });
 });
 
+app.patch('/api/v1/work-orders/:id/pay', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
+  const id = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  const body = requestBody(req);
+  if (id === null || !body) {
+    res.status(400).json({ error: 'A valid work-order id and JSON pay-terms object are required.' });
+    return;
+  }
+  const outcome = await prisma.$transaction(async (tx) => {
+    const before = await tx.workOrder.findUnique({ where: { id } });
+    if (!before) return { kind: 'not_found' as const };
+    if (workOrderFinanciallyLocked(before.status)) return { kind: 'locked' as const };
+    const parsedTerms = parsePayTermsInput(body, before.grossPay?.toString() ?? null);
+    if ('error' in parsedTerms) return { kind: 'invalid_terms' as const, error: parsedTerms.error };
+
+    const candidate: WorkOrderPayRecord = {
+      ...before,
+      grossPay: parsedTerms.grossPay === null ? null : new Prisma.Decimal(parsedTerms.grossPay),
+      payType: parsedTerms.payType,
+      payBaseAmount: parsedTerms.payBaseAmount === null ? null : new Prisma.Decimal(parsedTerms.payBaseAmount),
+      payBaseHours: parsedTerms.payBaseHours === null ? null : new Prisma.Decimal(parsedTerms.payBaseHours),
+      payHourlyRate: parsedTerms.payHourlyRate === null ? null : new Prisma.Decimal(parsedTerms.payHourlyRate),
+      payHoursCap: parsedTerms.payHoursCap === null ? null : new Prisma.Decimal(parsedTerms.payHoursCap),
+    };
+    const calculation = before.status === WorkOrderStatus.COMPLETED ? calculateWorkOrderPayout(candidate) : null;
+    if (calculation && 'error' in calculation) return { kind: 'invalid_calculation' as const, error: calculation.error };
+    const updated = await tx.workOrder.update({
+      where: { id },
+      data: {
+        grossPay: parsedTerms.grossPay,
+        payType: parsedTerms.payType,
+        payBaseAmount: parsedTerms.payBaseAmount,
+        payBaseHours: parsedTerms.payBaseHours,
+        payHourlyRate: parsedTerms.payHourlyRate,
+        payHoursCap: parsedTerms.payHoursCap,
+        ...(calculation && !('error' in calculation)
+          ? { actualGrossPay: calculation.amount, payCalculatedAt: new Date(), payCalculation: calculation.details }
+          : {}),
+      },
+      include: { client: true },
+    });
+    await writeAuditEvent(tx, req.auth!, 'work_order.pay_terms_changed', 'work_order', updated.id.toString(), {
+      before: auditWorkOrderSnapshot(before),
+      after: auditWorkOrderSnapshot(updated),
+      changedFields: ['grossPay', 'payType', 'payBaseAmount', 'payBaseHours', 'payHourlyRate', 'payHoursCap', ...(calculation ? ['actualGrossPay', 'payCalculatedAt', 'payCalculation'] : [])],
+    });
+    return { kind: 'updated' as const, workOrder: updated };
+  });
+  if (outcome.kind === 'not_found') return void res.status(404).json({ error: 'Work order not found.' });
+  if (outcome.kind === 'locked') return void res.status(409).json({ error: 'Invoiced or paid work orders require a later accounting adjustment workflow.' });
+  if (outcome.kind === 'invalid_terms' || outcome.kind === 'invalid_calculation') return void res.status(400).json({ error: outcome.error });
+  res.json({ data: serializeWorkOrder(outcome.workOrder) });
+});
+
 app.patch('/api/v1/work-orders/:id', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
   const id = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
   const body = requestBody(req);
@@ -2035,15 +2343,22 @@ app.patch('/api/v1/work-orders/:id/status', requireRoles(OpsUserRole.OWNER, OpsU
     if (!lifecycle[before.status].includes(nextStatus)) {
       return { kind: 'invalid_transition' as const, from: before.status };
     }
+    const calculation = nextStatus === WorkOrderStatus.COMPLETED ? calculateWorkOrderPayout(before) : null;
+    if (calculation && 'error' in calculation) return { kind: 'invalid_calculation' as const, error: calculation.error };
     const updated = await tx.workOrder.update({
       where: { id },
-      data: { status: nextStatus },
+      data: {
+        status: nextStatus,
+        ...(calculation && !('error' in calculation)
+          ? { actualGrossPay: calculation.amount, payCalculatedAt: new Date(), payCalculation: calculation.details }
+          : {}),
+      },
       include: { client: true },
     });
     await writeAuditEvent(tx, req.auth!, 'work_order.status_changed', 'work_order', updated.id.toString(), {
       before: auditWorkOrderSnapshot(before),
       after: auditWorkOrderSnapshot(updated),
-      changedFields: ['status'],
+      changedFields: ['status', ...(calculation ? ['actualGrossPay', 'payCalculatedAt', 'payCalculation'] : [])],
     });
     return { kind: 'updated' as const, workOrder: updated };
   });
@@ -2053,6 +2368,10 @@ app.patch('/api/v1/work-orders/:id/status', requireRoles(OpsUserRole.OWNER, OpsU
   }
   if (outcome.kind === 'invalid_transition') {
     res.status(409).json({ error: `Cannot move ${outcome.from} directly to ${nextStatus}.` });
+    return;
+  }
+  if (outcome.kind === 'invalid_calculation') {
+    res.status(400).json({ error: outcome.error });
     return;
   }
   res.json({ data: serializeWorkOrder(outcome.workOrder) });

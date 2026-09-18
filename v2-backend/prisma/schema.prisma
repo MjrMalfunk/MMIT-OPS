@@ -25,6 +25,12 @@ enum WorkOrderStatus {
   CANCELLED
 }
 
+enum WorkOrderPayType {
+  FIXED
+  HOURLY
+  BLENDED
+}
+
 enum ClientStatus {
   PROSPECT
   ACTIVE
@@ -147,6 +153,14 @@ model WorkOrder {
   checkInAt           DateTime?       @db.DateTime(3)
   checkOutAt          DateTime?       @db.DateTime(3)
   grossPay            Decimal?        @db.Decimal(10, 2)
+  payType             WorkOrderPayType @default(FIXED)
+  payBaseAmount       Decimal?        @db.Decimal(10, 2)
+  payBaseHours        Decimal?        @db.Decimal(8, 2)
+  payHourlyRate       Decimal?        @db.Decimal(10, 2)
+  payHoursCap         Decimal?        @db.Decimal(8, 2)
+  actualGrossPay      Decimal?        @db.Decimal(10, 2)
+  payCalculatedAt     DateTime?       @db.DateTime(3)
+  payCalculation      Json?
   mileage             Decimal?        @db.Decimal(10, 2)
   driveMinutes        Int             @default(0) @db.UnsignedInt
   onsiteMinutes       Int             @default(0) @db.UnsignedInt
@@ -179,6 +193,11 @@ model FieldNationImport {
   location        String?                 @db.VarChar(255)
   scheduledAt     DateTime?               @db.DateTime(3)
   grossPay        Decimal?                @db.Decimal(10, 2)
+  payType         WorkOrderPayType        @default(FIXED)
+  payBaseAmount   Decimal?                @db.Decimal(10, 2)
+  payBaseHours    Decimal?                @db.Decimal(8, 2)
+  payHourlyRate   Decimal?                @db.Decimal(10, 2)
+  payHoursCap     Decimal?                @db.Decimal(8, 2)
   estimatedHours  Decimal?                @db.Decimal(8, 2)
   mileage         Decimal?                @db.Decimal(10, 2)
   score           Decimal?                @db.Decimal(5, 2)
