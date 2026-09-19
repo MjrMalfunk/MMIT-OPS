@@ -52,6 +52,9 @@
       item && item.parsed && item.parsed.scoreReasons,
       item && item.parsed && item.parsed.reasons,
       item && item.parsed && item.parsed.warnings,
+      item && item.parsedData && item.parsedData.scoreReasons,
+      item && item.parsedData && item.parsedData.reasons,
+      item && item.parsedData && item.parsedData.warnings,
     ];
     for (const candidate of candidates) {
       if (Array.isArray(candidate)) return candidate.filter(Boolean).map(String);
