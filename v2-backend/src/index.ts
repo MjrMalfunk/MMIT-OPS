@@ -1383,6 +1383,56 @@ app.patch('/api/v1/fieldnation/imports/:id/review', requireRoles(OpsUserRole.OWN
   res.json({ data: serializeFieldNationImport(outcome.import) });
 });
 
+app.post('/api/v1/fieldnation/imports/:id/convert', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response, next: NextFunction) => {
+  const id = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  if (id === null) {
+    res.status(400).json({ error: 'id must be a positive integer.' });
+    return;
+  }
+
+  const item = await prisma.fieldNationImport.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      status: true,
+      workOrderId: true,
+      sourceReference: true,
+      scheduledAt: true,
+      grossPay: true,
+      payType: true,
+      payBaseAmount: true,
+      payBaseHours: true,
+      payHourlyRate: true,
+      payHoursCap: true,
+    },
+  });
+  if (!item) {
+    res.status(404).json({ error: 'FieldNation import not found.' });
+    return;
+  }
+  if (item.workOrderId) {
+    res.status(409).json({ error: 'This import has already been converted.' });
+    return;
+  }
+
+  const grossPay = item.grossPay ? Number(item.grossPay) : 0;
+  const baseAmount = item.payBaseAmount ? Number(item.payBaseAmount) : 0;
+  const baseHours = item.payBaseHours ? Number(item.payBaseHours) : 0;
+  const hourlyRate = item.payHourlyRate ? Number(item.payHourlyRate) : 0;
+  const hoursCap = item.payHoursCap ? Number(item.payHoursCap) : 0;
+  const payReady = item.payType === WorkOrderPayType.FIXED
+    ? grossPay > 0 || baseAmount > 0
+    : item.payType === WorkOrderPayType.HOURLY
+      ? hourlyRate > 0
+      : baseAmount > 0 && baseHours >= 0 && hourlyRate > 0 && hoursCap >= 0;
+
+  if (item.status !== FieldNationImportStatus.PARSED || !item.sourceReference || !item.scheduledAt || !payReady) {
+    res.status(409).json({ error: 'Complete and save the required review data before conversion.' });
+    return;
+  }
+  next();
+});
+
 app.post('/api/v1/fieldnation/imports/:id/convert', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
   const id = parseId(req.params.id as string);
   if (id === null) { res.status(400).json({ error: 'A valid import id is required.' }); return; }

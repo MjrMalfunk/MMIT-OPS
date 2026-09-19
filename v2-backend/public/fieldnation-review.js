@@ -229,7 +229,7 @@
       const remainingReasons = Array.isArray(review && review.remainingReasons)
         ? review.remainingReasons.filter(Boolean).map(String)
         : reviewRequirementsFor(item);
-      const canConvert = !workOrderId && Boolean(sourceReference);
+      const canConvert = !workOrderId && Boolean(sourceReference) && remainingReasons.length === 0;
       const editable = !workOrderId;
       const payType = importValue(item, 'payType') || 'FIXED';
 
@@ -272,7 +272,7 @@
         ` : ''}
         <div class="fieldnation-review-actions">
           ${workOrderId ? `<button type="button" data-open-work-order="${html(workOrderId)}">Open work order #${html(workOrderId)}</button>` : ''}
-          ${!workOrderId && !canConvert ? '<span class="muted">Save a source reference before this import can become a work order.</span>' : ''}
+          ${!workOrderId && !canConvert ? '<span class="muted">Save the required review data before this import can become a work order.</span>' : ''}
         </div>
       `);
 
