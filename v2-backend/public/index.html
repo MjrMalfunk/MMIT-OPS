@@ -45,5 +45,6 @@
     async function showApp(user){$('login').classList.add('hidden');$('app').classList.remove('hidden');if(user){$('name').textContent=user.displayName;$('identity').textContent=`${user.displayName} · ${user.role}`}load()}
     if(token)showApp();
   </script>
+  <script src="tracker-import.js?v=2"></script>
 </body>
 </html>
