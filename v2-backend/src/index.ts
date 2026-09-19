@@ -1230,6 +1230,159 @@ app.get('/api/v1/fieldnation/imports/:id', requireRoles(OpsUserRole.OWNER, OpsUs
   res.json({ data: serializeFieldNationImport(item) });
 });
 
+app.patch('/api/v1/fieldnation/imports/:id/review', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
+  const id = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  const body = requestBody(req);
+  if (id === null || !body) {
+    res.status(400).json({ error: 'A valid import id and JSON review object are required.' });
+    return;
+  }
+
+  const outcome = await prisma.$transaction(async (tx) => {
+    const before = await tx.fieldNationImport.findUnique({ where: { id } });
+    if (!before) return { kind: 'not_found' as const };
+    if (before.workOrderId) return { kind: 'converted' as const };
+
+    const sourceReference = hasOwn(body, 'sourceReference') ? parseNullableText(body.sourceReference, 191) : before.sourceReference;
+    const title = hasOwn(body, 'title') ? parseNullableText(body.title, 255) : before.title;
+    const location = hasOwn(body, 'location') ? parseNullableText(body.location, 255) : before.location;
+    if (sourceReference === undefined || title === undefined || location === undefined) {
+      return { kind: 'invalid' as const, error: 'sourceReference, title, and location must be text or null within their length limits.' };
+    }
+
+    const scheduledAt = hasOwn(body, 'scheduledAt')
+      ? parseOptionalTimestamp(body.scheduledAt)
+      : before.scheduledAt;
+    if (scheduledAt === undefined) {
+      return { kind: 'invalid' as const, error: 'scheduledAt must be an ISO timestamp with a timezone or null.' };
+    }
+
+    const payInput: Record<string, unknown> = {
+      payType: hasOwn(body, 'payType') ? body.payType : before.payType,
+      grossPay: hasOwn(body, 'grossPay') ? body.grossPay : before.grossPay?.toFixed(2) ?? null,
+      payBaseAmount: hasOwn(body, 'payBaseAmount') ? body.payBaseAmount : before.payBaseAmount?.toFixed(2) ?? null,
+      payBaseHours: hasOwn(body, 'payBaseHours') ? body.payBaseHours : before.payBaseHours?.toFixed(2) ?? null,
+      payHourlyRate: hasOwn(body, 'payHourlyRate') ? body.payHourlyRate : before.payHourlyRate?.toFixed(2) ?? null,
+      payHoursCap: hasOwn(body, 'payHoursCap') ? body.payHoursCap : before.payHoursCap?.toFixed(2) ?? null,
+    };
+    const parsedTerms = parsePayTermsInput(payInput);
+    if ('error' in parsedTerms) return { kind: 'invalid' as const, error: parsedTerms.error };
+
+    const estimatedHours = hasOwn(body, 'estimatedHours')
+      ? parseOptionalHours(body.estimatedHours)
+      : before.estimatedHours?.toFixed(2) ?? null;
+    const mileage = hasOwn(body, 'mileage')
+      ? parseOptionalMoney(body.mileage)
+      : before.mileage?.toFixed(2) ?? null;
+    if (estimatedHours === undefined || mileage === undefined) {
+      return { kind: 'invalid' as const, error: 'estimatedHours and mileage must be non-negative values with at most two decimals or null.' };
+    }
+
+    const payType = parsedTerms.payType;
+    const grossPay = parsedTerms.grossPay ? Number(parsedTerms.grossPay) : 0;
+    const baseAmount = parsedTerms.payBaseAmount ? Number(parsedTerms.payBaseAmount) : 0;
+    const baseHours = parsedTerms.payBaseHours ? Number(parsedTerms.payBaseHours) : 0;
+    const hourlyRate = parsedTerms.payHourlyRate ? Number(parsedTerms.payHourlyRate) : 0;
+    const hoursCap = parsedTerms.payHoursCap ? Number(parsedTerms.payHoursCap) : 0;
+    const payReady = payType === WorkOrderPayType.FIXED
+      ? grossPay > 0 || baseAmount > 0
+      : payType === WorkOrderPayType.HOURLY
+        ? hourlyRate > 0
+        : baseAmount > 0 && baseHours >= 0 && hourlyRate > 0 && hoursCap >= 0;
+    const remainingReasons: string[] = [];
+    if (!sourceReference) remainingReasons.push('source reference is required');
+    if (!scheduledAt) remainingReasons.push('scheduled date is required');
+    if (!payReady) remainingReasons.push('pay terms are required');
+
+    const rawParsedData = before.parsedData;
+    const parsedDataRecord = rawParsedData && typeof rawParsedData === 'object' && !Array.isArray(rawParsedData)
+      ? rawParsedData as Record<string, unknown>
+      : {};
+    const parsedData = {
+      ...parsedDataRecord,
+      review: {
+        savedAt: new Date().toISOString(),
+        remainingReasons,
+        fields: {
+          sourceReference: sourceReference ?? null,
+          title: title ?? null,
+          location: location ?? null,
+          scheduledAt: scheduledAt?.toISOString() ?? null,
+          grossPay: parsedTerms.grossPay,
+          payType,
+          payBaseAmount: parsedTerms.payBaseAmount,
+          payBaseHours: parsedTerms.payBaseHours,
+          payHourlyRate: parsedTerms.payHourlyRate,
+          payHoursCap: parsedTerms.payHoursCap,
+          estimatedHours,
+          mileage,
+        },
+      },
+    };
+
+    const updated = await tx.fieldNationImport.update({
+      where: { id },
+      data: {
+        sourceReference,
+        title,
+        location,
+        scheduledAt,
+        grossPay: parsedTerms.grossPay,
+        payType,
+        payBaseAmount: parsedTerms.payBaseAmount,
+        payBaseHours: parsedTerms.payBaseHours,
+        payHourlyRate: parsedTerms.payHourlyRate,
+        payHoursCap: parsedTerms.payHoursCap,
+        estimatedHours,
+        mileage,
+        status: remainingReasons.length ? FieldNationImportStatus.REVIEW_REQUIRED : FieldNationImportStatus.PARSED,
+        parsedData: parsedData as Prisma.InputJsonValue,
+      },
+      include: { workOrder: true },
+    });
+
+    const snapshot = (value: typeof before | typeof updated) => ({
+      id: value.id.toString(),
+      status: value.status,
+      sourceReference: value.sourceReference,
+      title: value.title,
+      location: value.location,
+      scheduledAt: value.scheduledAt?.toISOString() ?? null,
+      grossPay: value.grossPay?.toFixed(2) ?? null,
+      payType: value.payType,
+      payBaseAmount: value.payBaseAmount?.toFixed(2) ?? null,
+      payBaseHours: value.payBaseHours?.toFixed(2) ?? null,
+      payHourlyRate: value.payHourlyRate?.toFixed(2) ?? null,
+      payHoursCap: value.payHoursCap?.toFixed(2) ?? null,
+      estimatedHours: value.estimatedHours?.toFixed(2) ?? null,
+      mileage: value.mileage?.toFixed(2) ?? null,
+      score: value.score?.toFixed(2) ?? null,
+      workOrderId: value.workOrderId?.toString() ?? null,
+    });
+    await writeAuditEvent(tx, req.auth!, 'fieldnation.import_review_updated', 'fieldnation_import', updated.id.toString(), {
+      before: snapshot(before),
+      after: snapshot(updated),
+      changedFields: ['sourceReference', 'title', 'location', 'scheduledAt', 'grossPay', 'payType', 'payBaseAmount', 'payBaseHours', 'payHourlyRate', 'payHoursCap', 'estimatedHours', 'mileage', 'status'],
+      remainingReasons,
+    });
+    return { kind: 'updated' as const, import: updated };
+  });
+
+  if (outcome.kind === 'not_found') {
+    res.status(404).json({ error: 'FieldNation import not found.' });
+    return;
+  }
+  if (outcome.kind === 'converted') {
+    res.status(409).json({ error: 'Converted imports cannot be edited.' });
+    return;
+  }
+  if (outcome.kind === 'invalid') {
+    res.status(400).json({ error: outcome.error });
+    return;
+  }
+  res.json({ data: serializeFieldNationImport(outcome.import) });
+});
+
 app.post('/api/v1/fieldnation/imports/:id/convert', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
   const id = parseId(req.params.id as string);
   if (id === null) { res.status(400).json({ error: 'A valid import id is required.' }); return; }
