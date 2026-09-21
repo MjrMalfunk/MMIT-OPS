@@ -1484,7 +1484,6 @@ app.post('/api/v1/fieldnation/imports/:id/convert', requireRoles(OpsUserRole.OWN
   next();
 });
 
-        clientId: await resolveFieldNationClientId(tx, fieldNationClientNameFromData(item.parsedData, item.rawText)),
 app.post('/api/v1/fieldnation/imports/:id/convert', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
   const id = parseId(req.params.id as string);
   if (id === null) { res.status(400).json({ error: 'A valid import id is required.' }); return; }
@@ -1498,6 +1497,7 @@ app.post('/api/v1/fieldnation/imports/:id/convert', requireRoles(OpsUserRole.OWN
       sourceReference: item.sourceReference!,
       status: WorkOrderStatus.REQUESTED,
       title: item.title || `FieldNation ${item.sourceReference}`,
+      clientId: await resolveFieldNationClientId(tx, fieldNationClientNameFromData(item.parsedData, item.rawText)),
       scheduledAt: item.scheduledAt,
       grossPay: item.grossPay,
       payType: item.payType,
