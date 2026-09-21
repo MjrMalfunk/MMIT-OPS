@@ -126,15 +126,69 @@ type FieldNationParsed = {
   scoreReasons: string[];
 };
 
-function fieldNationClientNameFromText(rawText: string): string | null {
-  const value = firstField(rawText.replace(/\r\n/g, '\n'), [
-    'client name', 'customer name', 'end client', 'customer', 'client', 'company',
-  ]);
-  if (!value) return null;
-  const normalized = value.replace(/\s+/g, ' ').trim();
+function fieldNationTextLines(rawText: string): string[] {
+  return rawText
+    .replace(/\r\n?/g, '\n')
+    .replace(/<br\s*\/?\s*>/gi, '\n')
+    .replace(/&nbsp;|&#x20;|\u00a0/gi, ' ')
+    .replace(/&bull;/gi, '•')
+    .split('\n')
+    .map((line) => line
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/^[\s|#>*]+/, '')
+      .replace(/[|]+$/, '')
+      .replace(/\s+/g, ' ')
+      .trim())
+    .filter(Boolean);
+}
+
+function cleanFieldNationClientName(value: string): string | null {
+  const normalized = value
+    .replace(/[\*_]/g, '')
+    .replace(/^[|#>*\s]+|[|*\s]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
   if (!normalized || normalized.length > 191) return null;
   if (/^(?:contact|email|phone|number)\b/i.test(normalized)) return null;
+  if (/^(?:status|available|location|pay|schedule|type of work|work order id)$/i.test(normalized)) return null;
+  if (/^(?:identity validation|consent|overview|before site visit|at site visit|when on site|technician payment|expectations & requirements)$/i.test(normalized)) return null;
   return normalized;
+}
+
+function fieldNationExplicitClientName(rawText: string): string | null {
+  const lines = fieldNationTextLines(rawText);
+  const labelOnly = /^(?:client(?: name)?|customer name|end client|buyer|company)$/i;
+  const sameLine = /^(?:client(?: name)?|customer(?: name)?|end client|buyer|company)\s*[:#-]\s*(.+)$/i;
+  for (let index = 0; index < Math.min(lines.length, 80); index += 1) {
+    const line = lines[index].replace(/[\*_]/g, '').trim();
+    const sameLineMatch = line.match(sameLine);
+    const candidate = sameLineMatch?.[1] ?? (labelOnly.test(line) ? lines[index + 1] ?? '' : '');
+    const cleaned = cleanFieldNationClientName(candidate);
+    if (cleaned) return cleaned;
+  }
+  return null;
+}
+
+function fieldNationHeaderClientName(rawText: string): string | null {
+  const lines = fieldNationTextLines(rawText);
+  const locationBullet = /[•·]\s*[A-Za-z .'-]+,\s*[A-Z]{2}\s+\d{5}\b/;
+  for (let index = 0; index < Math.min(lines.length, 80); index += 1) {
+    if (!locationBullet.test(lines[index])) continue;
+    for (let start = index; start >= Math.max(0, index - 3); start -= 1) {
+      const source = lines[start];
+      const bulletIndex = source.search(/[•·]/);
+      const companyPrefix = bulletIndex >= 0 ? source.slice(0, bulletIndex) : source;
+      if (!companyPrefix.includes('(')) continue;
+      const candidate = companyPrefix.split(/[(:]/)[0].trim();
+      const cleaned = cleanFieldNationClientName(candidate);
+      if (cleaned && /[A-Za-z0-9]/.test(cleaned) && !/^\d/.test(cleaned)) return cleaned;
+    }
+  }
+  return null;
+}
+
+function fieldNationClientNameFromText(rawText: string): string | null {
+  return fieldNationExplicitClientName(rawText) ?? fieldNationHeaderClientName(rawText);
 }
 
 function normalizeFieldNationClientName(value: string): string {
