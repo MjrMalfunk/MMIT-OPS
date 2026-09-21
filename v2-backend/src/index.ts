@@ -126,6 +126,47 @@ type FieldNationParsed = {
   scoreReasons: string[];
 };
 
+function fieldNationClientNameFromText(rawText: string): string | null {
+  const value = firstField(rawText.replace(/\r\n/g, '\n'), [
+    'client name', 'customer name', 'end client', 'customer', 'client', 'company',
+  ]);
+  if (!value) return null;
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (!normalized || normalized.length > 191) return null;
+  if (/^(?:contact|email|phone|number)\b/i.test(normalized)) return null;
+  return normalized;
+}
+
+function normalizeFieldNationClientName(value: string): string {
+  return value.toLocaleLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
+}
+
+function fieldNationClientNameFromData(parsedData: unknown, rawText: string): string | null {
+  const record = parsedData && typeof parsedData === 'object' && !Array.isArray(parsedData)
+    ? parsedData as Record<string, unknown>
+    : {};
+  const review = record.review && typeof record.review === 'object' && !Array.isArray(record.review)
+    ? record.review as Record<string, unknown>
+    : {};
+  const fields = review.fields && typeof review.fields === 'object' && !Array.isArray(review.fields)
+    ? review.fields as Record<string, unknown>
+    : {};
+  for (const candidate of [fields.clientName, record.clientName]) {
+    if (typeof candidate === 'string') {
+      const normalized = candidate.replace(/\s+/g, ' ').trim();
+      if (normalized && normalized.length <= 191) return normalized;
+    }
+  }
+  return fieldNationClientNameFromText(rawText);
+}
+
+async function resolveFieldNationClientId(tx: Prisma.TransactionClient, clientName: string | null): Promise<bigint | null> {
+  const normalized = clientName ? normalizeFieldNationClientName(clientName) : '';
+  if (!normalized) return null;
+  const candidates = await tx.client.findMany({ select: { id: true, name: true } });
+  const matches = candidates.filter((client) => normalizeFieldNationClientName(client.name) === normalized);
+  return matches.length === 1 ? matches[0].id : null;
+}
 function firstField(text: string, labels: string[]): string | null {
   const labelPattern = labels.map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
   const match = text.match(new RegExp(`(?:${labelPattern})\\s*[:#-]?\\s*([^\\r\\n]+)`, 'i'));
@@ -278,6 +319,7 @@ function parsePayTermsInput(body: Record<string, unknown>, fallbackGrossPay: str
 }
 
 function serializeFieldNationImport(item: Prisma.FieldNationImportGetPayload<{ include: { workOrder: true } }>) {
+  const clientName = fieldNationClientNameFromData(item.parsedData, item.rawText);
   return {
     id: item.id.toString(),
     messageId: item.messageId,
@@ -288,6 +330,7 @@ function serializeFieldNationImport(item: Prisma.FieldNationImportGetPayload<{ i
     sourceReference: item.sourceReference,
     title: item.title,
     location: item.location,
+    clientName,
     scheduledAt: item.scheduledAt,
     grossPay: item.grossPay?.toFixed(2) ?? null,
     payType: item.payType,
@@ -1246,8 +1289,14 @@ app.patch('/api/v1/fieldnation/imports/:id/review', requireRoles(OpsUserRole.OWN
     const sourceReference = hasOwn(body, 'sourceReference') ? parseNullableText(body.sourceReference, 191) : before.sourceReference;
     const title = hasOwn(body, 'title') ? parseNullableText(body.title, 255) : before.title;
     const location = hasOwn(body, 'location') ? parseNullableText(body.location, 255) : before.location;
+    const clientName = hasOwn(body, 'clientName')
+      ? parseNullableText(body.clientName, 191)
+      : fieldNationClientNameFromData(before.parsedData, before.rawText);
     if (sourceReference === undefined || title === undefined || location === undefined) {
       return { kind: 'invalid' as const, error: 'sourceReference, title, and location must be text or null within their length limits.' };
+    }
+    if (clientName === undefined) {
+      return { kind: 'invalid' as const, error: 'clientName must be text or null and 191 characters or fewer.' };
     }
 
     const scheduledAt = hasOwn(body, 'scheduledAt')
@@ -1300,6 +1349,7 @@ app.patch('/api/v1/fieldnation/imports/:id/review', requireRoles(OpsUserRole.OWN
       : {};
     const parsedData = {
       ...parsedDataRecord,
+      clientName,
       review: {
         savedAt: new Date().toISOString(),
         remainingReasons,
@@ -1307,6 +1357,7 @@ app.patch('/api/v1/fieldnation/imports/:id/review', requireRoles(OpsUserRole.OWN
           sourceReference: sourceReference ?? null,
           title: title ?? null,
           location: location ?? null,
+          clientName: clientName ?? null,
           scheduledAt: scheduledAt?.toISOString() ?? null,
           grossPay: parsedTerms.grossPay,
           payType,
@@ -1433,6 +1484,7 @@ app.post('/api/v1/fieldnation/imports/:id/convert', requireRoles(OpsUserRole.OWN
   next();
 });
 
+        clientId: await resolveFieldNationClientId(tx, fieldNationClientNameFromData(item.parsedData, item.rawText)),
 app.post('/api/v1/fieldnation/imports/:id/convert', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
   const id = parseId(req.params.id as string);
   if (id === null) { res.status(400).json({ error: 'A valid import id is required.' }); return; }

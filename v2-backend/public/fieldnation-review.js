@@ -107,6 +107,7 @@
       sourceReference: optional('sourceReference'),
       title: optional('title'),
       location: optional('location'),
+      clientName: optional('clientName'),
       scheduledAt,
       payType: formField(form, 'payType') || 'FIXED',
       grossPay: optional('grossPay'),
@@ -232,6 +233,7 @@
       const canConvert = !workOrderId && Boolean(sourceReference) && remainingReasons.length === 0;
       const editable = !workOrderId;
       const payType = importValue(item, 'payType') || 'FIXED';
+      const clientName = importValue(item, 'clientName');
 
       setPanel(`
         <div class="fieldnation-review-heading"><h2>${html(importValue(item, 'title') || 'FieldNation import')}</h2><button type="button" class="secondary" data-close-fieldnation-review>Close</button></div>
@@ -243,6 +245,7 @@
           <div><small>Schedule</small><strong>${html(dateTime(importValue(item, 'scheduledAt')))}</strong></div>
           <div><small>Source reference</small><strong>${html(sourceReference)}</strong></div>
           <div><small>Location</small><strong>${html(importValue(item, 'location'))}</strong></div>
+          <div><small>FieldNation client</small><strong>${html(clientName)}</strong></div>
           <div><small>Message ID</small><strong>${html(importValue(item, 'messageId'))}</strong></div>
           <div><small>Received</small><strong>${html(dateTime(importValue(item, 'receivedAt')))}</strong></div>
         </div>
@@ -257,6 +260,7 @@
               <label>Source reference<input name="sourceReference" maxlength="191" value="${html(inputValue(sourceReference))}" required></label>
               <label>Title<input name="title" maxlength="255" value="${html(inputValue(importValue(item, 'title')))}"></label>
               <label>Location<input name="location" maxlength="255" value="${html(inputValue(importValue(item, 'location')))}"></label>
+              <label>FieldNation client<input name="clientName" maxlength="191" value="${html(inputValue(clientName))}"></label>
               <label>Scheduled date and time<input name="scheduledAt" type="datetime-local" value="${html(dateTimeLocal(importValue(item, 'scheduledAt')))}"></label>
               <label>Pay type<select name="payType"><option value="FIXED" ${payType === 'FIXED' ? 'selected' : ''}>Fixed amount</option><option value="HOURLY" ${payType === 'HOURLY' ? 'selected' : ''}>Hourly</option><option value="BLENDED" ${payType === 'BLENDED' ? 'selected' : ''}>Blended</option></select></label>
               <label>Advertised/max pay<input name="grossPay" inputmode="decimal" type="number" min="0" step="0.01" value="${html(inputValue(importValue(item, 'grossPay')))}"></label>
