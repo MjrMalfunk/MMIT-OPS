@@ -26,6 +26,12 @@
     .fieldnation-review-form input,.fieldnation-review-form select{display:block;width:100%;margin-top:5px;padding:9px;border:1px solid #29415f;border-radius:8px;background:#08172a;color:#e8f0fb;outline:none}
     .fieldnation-review-form input:focus,.fieldnation-review-form select:focus{border-color:#67a8ff}
     .fieldnation-review-form-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:13px}
+    .fieldnation-capture{margin-top:16px;padding:14px;border:1px solid #29415f;background:#0a192c;border-radius:10px}
+    .fieldnation-capture h3{margin:0 0 5px;font-size:16px}
+    .fieldnation-capture p{color:#9db0c8;margin:0 0 11px}
+    .fieldnation-capture-state{margin:9px 0;color:#b8f2da}
+    .fieldnation-capture-bookmark{display:inline-block;padding:9px 12px;border-radius:8px;background:#5f9df4;color:#061426;font-weight:700;text-decoration:none;cursor:grab}
+    .fieldnation-capture-meta{display:block;margin-top:8px;color:#9db0c8;font-size:12px}
     @media(max-width:800px){.fieldnation-review-grid,.fieldnation-review-form-grid{grid-template-columns:repeat(2,1fr)}}
     @media(max-width:520px){.fieldnation-review-grid,.fieldnation-review-form-grid{grid-template-columns:1fr}}
   `;
@@ -122,10 +128,31 @@
 
   function importValue(item, key) {
     if (item && item[key] != null) return item[key];
-    for (const nested of [item && item.parsed, item && item.opportunity, item && item.details]) {
+    const capture = item && item.parsedData && item.parsedData.capture;
+    for (const nested of [item && item.parsed, item && item.opportunity, item && item.details, capture && capture.parsed]) {
       if (nested && nested[key] != null) return nested[key];
     }
     return null;
+  }
+
+  function captureObject(item) {
+    const parsedData = item && item.parsedData;
+    return parsedData && typeof parsedData === 'object' && !Array.isArray(parsedData) && parsedData.capture && typeof parsedData.capture === 'object'
+      ? parsedData.capture
+      : null;
+  }
+
+  function captureBookmarklet(id, sourceReference) {
+    const receiver = new URL(window.location.href);
+    receiver.search = '';
+    receiver.hash = '';
+    receiver.searchParams.set('fnCapture', '1');
+    receiver.searchParams.set('importId', String(id));
+    receiver.searchParams.set('sourceReference', String(sourceReference));
+    const receiverUrl = receiver.toString();
+    const opsOrigin = window.location.origin;
+    const script = `(function(){var receiver=window.open(${JSON.stringify(receiverUrl)},'mmitFnCapture','popup,width=620,height=520');if(!receiver){alert('Allow popups for OPS, then run Capture again.');return;}var sent=false;function send(){if(sent)return;sent=true;var links=Array.from(document.querySelectorAll('a[href]')).filter(function(a){return a.getClientRects().length>0;}).slice(0,750).map(function(a){return{text:(a.innerText||a.textContent||'').trim().slice(0,500),url:a.href};});receiver.postMessage({type:'mmit-fn-capture-payload',importId:${JSON.stringify(String(id))},sourceReference:${JSON.stringify(String(sourceReference))},sourceUrl:location.href,pageTitle:document.title||'',visibleText:(document.body&&document.body.innerText)||'',capturedAt:new Date().toISOString(),links:links},${JSON.stringify(opsOrigin)});window.removeEventListener('message',ready);}function ready(event){if(event.origin!==${JSON.stringify(opsOrigin)}||event.source!==receiver||!event.data||event.data.type!=='mmit-fn-capture-ready')return;send();}window.addEventListener('message',ready);setTimeout(send,2500);}())`;
+    return `javascript:${encodeURIComponent(script)}`;
   }
 
   function reasonsFor(item) {
@@ -234,6 +261,17 @@
       const editable = !workOrderId;
       const payType = importValue(item, 'payType') || 'FIXED';
       const clientName = importValue(item, 'clientName');
+      const capture = captureObject(item);
+      const workOrderUrl = sourceReference ? `https://app.fieldnation.com/workorders/${encodeURIComponent(sourceReference)}` : null;
+      const captureCard = sourceReference ? `
+        <div class="fieldnation-capture">
+          <h3>FieldNation source packet</h3>
+          <p>Drag the capture button to your bookmarks bar. Open this exact W/O in FieldNation, then click it. OPS receives only rendered page text and visible HTTP(S) links—never your FieldNation credentials or cookies.</p>
+          ${capture ? `<div class="fieldnation-capture-state">Captured ${html(dateTime(capture.capturedAt))} · integrity checked (${html(String(capture.sha256 || '').slice(0, 12))}…)</div>` : '<div class="fieldnation-capture-state">Capture available</div>'}
+          <a class="fieldnation-capture-bookmark" href="${html(captureBookmarklet(id, sourceReference))}" onclick="return false">Capture FN W/O ${html(sourceReference)}</a>
+          ${workOrderUrl ? `<a class="secondary" href="${html(workOrderUrl)}" target="_blank" rel="noopener noreferrer">Open FieldNation W/O</a>` : ''}
+          <small class="fieldnation-capture-meta">Drag the capture button—do not click it on this OPS page.</small>
+        </div>` : '';
 
       setPanel(`
         <div class="fieldnation-review-heading"><h2>${html(importValue(item, 'title') || 'FieldNation import')}</h2><button type="button" class="secondary" data-close-fieldnation-review>Close</button></div>
@@ -252,6 +290,7 @@
         ${remainingReasons.length ? `<div class="fieldnation-review-requirements"><strong>Requirements remaining before conversion</strong><ul>${remainingReasons.map((reason) => `<li>${html(reason)}</li>`).join('')}</ul></div>` : editable ? '<div class="fieldnation-review-requirements ready"><strong>Ready for explicit conversion.</strong></div>' : ''}
         ${reasons.length ? `<div class="fieldnation-review-reasons"><strong>Score and review reasons</strong><ul>${reasons.map((reason) => `<li>${html(reason)}</li>`).join('')}</ul></div>` : ''}
         <div class="fieldnation-review-note">The original message is retained by V2 for auditability and intentionally stays out of the dashboard list.</div>
+        ${captureCard}
         ${editable ? `
           <form class="fieldnation-review-form" data-fieldnation-review-form>
             <h3>Verified review data</h3>
@@ -297,4 +336,15 @@
       `);
     }
   };
+
+  window.addEventListener('storage', (event) => {
+    if (event.key !== 'mmit_ops_v2_fn_capture_notice' || !event.newValue) return;
+    try {
+      const notice = JSON.parse(event.newValue);
+      if (!notice || !notice.importId) return;
+      Promise.resolve(typeof window.load === 'function' ? window.load() : null)
+        .then(() => window.openFieldNationImport(notice.importId))
+        .catch(() => {});
+    } catch {}
+  });
 }());

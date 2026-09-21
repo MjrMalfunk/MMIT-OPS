@@ -1327,6 +1327,121 @@ app.get('/api/v1/fieldnation/imports/:id', requireRoles(OpsUserRole.OWNER, OpsUs
   res.json({ data: serializeFieldNationImport(item) });
 });
 
+app.post('/api/v1/fieldnation/imports/:id/capture', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
+  const id = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  const body = requestBody(req);
+  if (id === null || !body) {
+    res.status(400).json({ error: 'A valid import id and JSON capture payload are required.' });
+    return;
+  }
+
+  const sourceReference = typeof body.sourceReference === 'string' ? body.sourceReference.trim() : '';
+  const sourceUrl = typeof body.sourceUrl === 'string' ? body.sourceUrl.trim() : '';
+  const pageTitle = body.pageTitle === undefined || body.pageTitle === null ? null : parseNullableText(body.pageTitle, 500);
+  const visibleText = typeof body.visibleText === 'string' ? body.visibleText : '';
+  const capturedAt = parseOptionalTimestamp(body.capturedAt);
+  if (!sourceReference || !sourceUrl || pageTitle === undefined || !visibleText.trim() || Buffer.byteLength(visibleText, 'utf8') > 2_000_000 || capturedAt === undefined || capturedAt === null) {
+    res.status(400).json({ error: 'sourceReference, a valid FieldNation work-order URL, non-empty visibleText (up to 2 MB), and capturedAt are required.' });
+    return;
+  }
+  if (!Array.isArray(body.links) || body.links.length > 750) {
+    res.status(400).json({ error: 'links must be an array containing no more than 750 visible links.' });
+    return;
+  }
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(sourceUrl);
+  } catch {
+    res.status(400).json({ error: 'sourceUrl must be a valid URL.' });
+    return;
+  }
+  const expectedPath = `/workorders/${sourceReference}`;
+  if (parsedUrl.protocol !== 'https:' || parsedUrl.hostname !== 'app.fieldnation.com' || parsedUrl.pathname !== expectedPath) {
+    res.status(400).json({ error: 'sourceUrl must be the exact https://app.fieldnation.com/workorders/<sourceReference> page.' });
+    return;
+  }
+
+  const safeLinks: Array<{ text: string; url: string }> = [];
+  for (const candidate of body.links) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+    const record = candidate as Record<string, unknown>;
+    if (typeof record.url !== 'string' || record.url.length > 2048) continue;
+    try {
+      const url = new URL(record.url);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') continue;
+      safeLinks.push({ text: typeof record.text === 'string' ? record.text.slice(0, 500) : '', url: url.toString() });
+    } catch {
+      // Ignore malformed or non-web links from the visible-page capture.
+    }
+  }
+
+  const outcome = await prisma.$transaction(async (tx) => {
+    const before = await tx.fieldNationImport.findUnique({ where: { id }, include: { workOrder: true } });
+    if (!before) return { kind: 'not_found' as const };
+    if (!before.sourceReference || before.sourceReference !== sourceReference) return { kind: 'reference_mismatch' as const };
+
+    const parsed = parseFieldNationMessage(visibleText);
+    if (parsed.sourceReference && parsed.sourceReference !== before.sourceReference) return { kind: 'page_mismatch' as const };
+    const clientName = fieldNationClientNameFromText(visibleText);
+    const rawParsedData = before.parsedData;
+    const parsedDataRecord = rawParsedData && typeof rawParsedData === 'object' && !Array.isArray(rawParsedData)
+      ? rawParsedData as Record<string, unknown>
+      : {};
+    const sha256 = createHash('sha256').update(visibleText).digest('hex');
+    const updated = await tx.fieldNationImport.update({
+      where: { id },
+      data: {
+        parsedData: {
+          ...parsedDataRecord,
+          capture: {
+            version: 1,
+            capturedAt: capturedAt.toISOString(),
+            sourceUrl: parsedUrl.toString(),
+            pageTitle,
+            visibleText,
+            links: safeLinks,
+            sha256,
+            parsed: {
+              sourceReference: parsed.sourceReference,
+              title: parsed.title,
+              location: parsed.location,
+              scheduledAt: parsed.scheduledAt?.toISOString() ?? null,
+              grossPay: parsed.grossPay,
+              payType: parsed.payType,
+              payBaseAmount: parsed.payBaseAmount,
+              payBaseHours: parsed.payBaseHours,
+              payHourlyRate: parsed.payHourlyRate,
+              payHoursCap: parsed.payHoursCap,
+              estimatedHours: parsed.estimatedHours,
+              mileage: parsed.mileage,
+              score: parsed.score,
+              scoreReasons: parsed.scoreReasons,
+              clientName,
+            },
+          },
+        } as Prisma.InputJsonValue,
+      },
+      include: { workOrder: true },
+    });
+    await writeAuditEvent(tx, req.auth!, 'fieldnation.import_captured', 'fieldnation_import', updated.id.toString(), {
+      sourceReference,
+      sourceUrl: parsedUrl.toString(),
+      capturedAt: capturedAt.toISOString(),
+      pageTitle,
+      visibleTextBytes: Buffer.byteLength(visibleText, 'utf8'),
+      linkCount: safeLinks.length,
+      sha256,
+    });
+    return { kind: 'updated' as const, import: updated };
+  });
+
+  if (outcome.kind === 'not_found') { res.status(404).json({ error: 'FieldNation import not found.' }); return; }
+  if (outcome.kind === 'reference_mismatch') { res.status(409).json({ error: 'The capture reference does not match this FieldNation import.' }); return; }
+  if (outcome.kind === 'page_mismatch') { res.status(409).json({ error: 'The captured FieldNation page appears to be for a different work order.' }); return; }
+  res.json({ data: serializeFieldNationImport(outcome.import) });
+});
+
 app.patch('/api/v1/fieldnation/imports/:id/review', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
   const id = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
   const body = requestBody(req);
