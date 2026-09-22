@@ -1492,6 +1492,61 @@ app.post('/api/v1/fieldnation/captures', requireRoles(OpsUserRole.OWNER, OpsUser
   }
 
   const parsed = parseFieldNationMessage(visibleText);
+  // Page captures need explicit FieldNation labels; free-form message parsing
+  // can mistake unrelated page numbers for the estimated duration.
+  const estimateMatch = visibleText.match(/\bEstimated\s+(\d+(?:\.\d+)?)\s+hours?\s+to complete\b/i);
+  parsed.estimatedHours = estimateMatch ? Number(estimateMatch[1]) : null;
+
+  const scheduleDateMatch = visibleText.match(/\b(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)[a-z]*,\s*([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4})\b/i);
+  const arriveTimeMatch = visibleText.match(/\bArrive at\s+(\d{1,2}):(\d{2})\s*(AM|PM)\s*\((EST|EDT|CST|CDT|MST|MDT|PST|PDT)\)/i);
+  if (scheduleDateMatch && arriveTimeMatch) {
+    const monthNumbers: Record<string, number> = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+    const zoneOffsets: Record<string, number> = { EST: -5, EDT: -4, CST: -6, CDT: -5, MST: -7, MDT: -6, PST: -8, PDT: -7 };
+    const monthNumber = monthNumbers[scheduleDateMatch[1].slice(0, 3).toLowerCase()];
+    const zone = arriveTimeMatch[4].toUpperCase();
+    const hour12 = Number(arriveTimeMatch[1]) % 12;
+    const hour24 = hour12 + (arriveTimeMatch[3].toUpperCase() === 'PM' ? 12 : 0);
+    if (monthNumber !== undefined && zoneOffsets[zone] !== undefined) {
+      const scheduledAt = new Date(Date.UTC(
+        Number(scheduleDateMatch[3]), monthNumber, Number(scheduleDateMatch[2]),
+        hour24, Number(arriveTimeMatch[2]),
+      ) - zoneOffsets[zone] * 60 * 60 * 1000);
+      if (!Number.isNaN(scheduledAt.getTime())) parsed.scheduledAt = scheduledAt;
+    }
+  }
+
+  const locationMatch = visibleText.match(/\bLocation\s*(?:\(GPS Required\))?\s*:?[^\n]*\n\s*(\d{1,6}\s+[^\n]+)\n\s*([A-Za-z][A-Za-z .'-]*,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?)/i);
+  if (locationMatch) parsed.location = `${locationMatch[1].trim()}, ${locationMatch[2].trim()}`;
+
+  const blendedHeaderMatch = visibleText.match(/\bPay\s+Blended\b/i);
+  if (blendedHeaderMatch) {
+    const laborIndex = visibleText.toLowerCase().indexOf('labor', blendedHeaderMatch.index ?? 0);
+    const laborText = laborIndex >= 0 ? visibleText.slice(laborIndex, laborIndex + 1200) : '';
+    const paySections = laborText.split(/\bThen pay Additional Hours\b/i);
+    const baseRateMatch = paySections[0].match(/\bRate\b[\s\S]{0,120}?\$([\d,]+(?:\.\d{1,2})?)/i);
+    const baseHoursMatch = paySections[0].match(/\bFirst Hours\b\s*(\d+(?:\.\d+)?)/i);
+    const additionalRateMatch = paySections[1]?.match(/\bRate\b[\s\S]{0,120}?\$([\d,]+(?:\.\d{1,2})?)/i);
+    const additionalCapMatch = paySections[1]?.match(/\bAdditional Hour\b\s*(\d+(?:\.\d+)?)\s*\bMax\b/i);
+    if (baseRateMatch && baseHoursMatch && additionalRateMatch && additionalCapMatch) {
+      const baseAmount = Number(baseRateMatch[1].replace(/,/g, ''));
+      const baseHours = Number(baseHoursMatch[1]);
+      const additionalRate = Number(additionalRateMatch[1].replace(/,/g, ''));
+      const additionalHoursCap = Number(additionalCapMatch[1]);
+      if ([baseAmount, baseHours, additionalRate, additionalHoursCap].every(Number.isFinite)) {
+        parsed.payType = 'BLENDED';
+        parsed.payBaseAmount = baseAmount;
+        parsed.payBaseHours = baseHours;
+        parsed.payHourlyRate = additionalRate;
+        parsed.payHoursCap = additionalHoursCap;
+        parsed.grossPay = Math.round((baseAmount + additionalRate * additionalHoursCap + Number.EPSILON) * 100) / 100;
+      }
+    }
+  }
+
+  if (parsed.scheduledAt) parsed.scoreReasons = parsed.scoreReasons.filter((reason) => reason !== 'missing scheduled date');
+  if (parsed.grossPay !== null && parsed.estimatedHours !== null) {
+    parsed.scoreReasons = parsed.scoreReasons.filter((reason) => reason !== 'missing pay or estimated hours');
+  }
   const clientName = fieldNationClientNameFromText(visibleText);
   const sha256 = createHash('sha256').update(visibleText).digest('hex');
   const canonicalSourceUrl = `https://app.fieldnation.com/workorders/${sourceReference}`;
