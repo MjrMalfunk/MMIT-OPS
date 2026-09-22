@@ -219,7 +219,17 @@ async function resolveFieldNationClientId(tx: Prisma.TransactionClient, clientNa
   if (!normalized) return null;
   const candidates = await tx.client.findMany({ select: { id: true, name: true } });
   const matches = candidates.filter((client) => normalizeFieldNationClientName(client.name) === normalized);
-  return matches.length === 1 ? matches[0].id : null;
+  if (matches.length === 1) return matches[0].id;
+
+  // Do not guess when multiple internal clients normalize to the same name.
+  // With no match, preserve the buyer shown by FieldNation as a V2 prospect
+  // so the converted work order has an accountable client association.
+  if (matches.length > 1 || !clientName) return null;
+  const created = await tx.client.create({
+    data: { name: clientName.trim(), status: ClientStatus.PROSPECT },
+    select: { id: true },
+  });
+  return created.id;
 }
 function firstField(text: string, labels: string[]): string | null {
   const labelPattern = labels.map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
