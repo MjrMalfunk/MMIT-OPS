@@ -1589,9 +1589,44 @@ app.post('/api/v1/fieldnation/captures', requireRoles(OpsUserRole.OWNER, OpsUser
       const parsedDataRecord = rawParsedData && typeof rawParsedData === 'object' && !Array.isArray(rawParsedData)
         ? rawParsedData as Record<string, unknown>
         : {};
+      const hasVerifiedReview = Boolean(parsedDataRecord.review && typeof parsedDataRecord.review === 'object'
+        && !Array.isArray(parsedDataRecord.review));
+      const refreshCaptureFields = parsedDataRecord.captureOnly === true && !hasVerifiedReview && !existing.workOrder;
+      const capturedTitle = parsed.title?.trim().slice(0, 255) || pageTitle?.trim().slice(0, 255) || null;
+      const updatedParsedData = {
+        ...parsedDataRecord,
+        ...(refreshCaptureFields ? {
+          scoreReasons: parsed.scoreReasons.filter((reason) => reason !== 'missing source reference'),
+          payType: parsed.payType,
+          payBaseAmount: parsed.payBaseAmount,
+          payBaseHours: parsed.payBaseHours,
+          payHourlyRate: parsed.payHourlyRate,
+          payHoursCap: parsed.payHoursCap,
+          clientName,
+        } : {}),
+        capture,
+      };
       saved = await tx.fieldNationImport.update({
         where: { id: existing.id },
-        data: { parsedData: { ...parsedDataRecord, capture } as Prisma.InputJsonValue },
+        data: {
+          ...(refreshCaptureFields ? {
+            title: capturedTitle,
+            location: parsed.location?.trim().slice(0, 255) ?? null,
+            scheduledAt: parsed.scheduledAt,
+            grossPay: parsed.grossPay,
+            payType: parsed.payType,
+            payBaseAmount: parsed.payBaseAmount,
+            payBaseHours: parsed.payBaseHours,
+            payHourlyRate: parsed.payHourlyRate,
+            payHoursCap: parsed.payHoursCap,
+            estimatedHours: parsed.estimatedHours,
+            mileage: parsed.mileage,
+            score: parsed.score,
+            status: capturedTitle && parsed.grossPay ? FieldNationImportStatus.PARSED : FieldNationImportStatus.REVIEW_REQUIRED,
+            rawText: visibleText,
+          } : {}),
+          parsedData: updatedParsedData as Prisma.InputJsonValue,
+        },
         include: { workOrder: true },
       });
     } else {
