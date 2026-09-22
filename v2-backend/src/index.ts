@@ -50,7 +50,7 @@ const prisma = new PrismaClient();
 
 // Middleware for parsing JSON data and enabling Cross-Origin requests
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '4mb' }));
 app.use('/ops', express.static(resolve(process.cwd(), 'public')));
 
 // Foundational base route to verify our server is alive and kicking
@@ -1440,6 +1440,164 @@ app.post('/api/v1/fieldnation/imports/:id/capture', requireRoles(OpsUserRole.OWN
   if (outcome.kind === 'reference_mismatch') { res.status(409).json({ error: 'The capture reference does not match this FieldNation import.' }); return; }
   if (outcome.kind === 'page_mismatch') { res.status(409).json({ error: 'The captured FieldNation page appears to be for a different work order.' }); return; }
   res.json({ data: serializeFieldNationImport(outcome.import) });
+});
+
+app.post('/api/v1/fieldnation/captures', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
+  const body = requestBody(req);
+  if (!body) {
+    res.status(400).json({ error: 'A JSON FieldNation page capture is required.' });
+    return;
+  }
+
+  const sourceReference = typeof body.sourceReference === 'string' ? body.sourceReference.trim() : '';
+  const sourceUrl = typeof body.sourceUrl === 'string' ? body.sourceUrl.trim() : '';
+  const pageTitle = body.pageTitle === undefined || body.pageTitle === null ? null : parseNullableText(body.pageTitle, 500);
+  const visibleText = typeof body.visibleText === 'string' ? body.visibleText : '';
+  const capturedAt = parseOptionalTimestamp(body.capturedAt);
+  if (!/^\d{4,32}$/.test(sourceReference) || !sourceUrl || pageTitle === undefined || !visibleText.trim()
+    || Buffer.byteLength(visibleText, 'utf8') > 2_000_000 || capturedAt === undefined || capturedAt === null) {
+    res.status(400).json({ error: 'A work-order number, valid FieldNation URL, non-empty visibleText (up to 2 MB), and capturedAt are required.' });
+    return;
+  }
+  if (!Array.isArray(body.links) || body.links.length > 750) {
+    res.status(400).json({ error: 'links must be an array containing no more than 750 visible links.' });
+    return;
+  }
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(sourceUrl);
+  } catch {
+    res.status(400).json({ error: 'sourceUrl must be a valid URL.' });
+    return;
+  }
+  if (parsedUrl.protocol !== 'https:' || parsedUrl.hostname !== 'app.fieldnation.com'
+    || parsedUrl.pathname !== `/workorders/${sourceReference}`) {
+    res.status(400).json({ error: 'Capture must come from the exact FieldNation work-order page matching its URL number.' });
+    return;
+  }
+
+  const safeLinks: Array<{ text: string; url: string }> = [];
+  for (const candidate of body.links) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+    const record = candidate as Record<string, unknown>;
+    if (typeof record.url !== 'string' || record.url.length > 2048) continue;
+    try {
+      const linkUrl = new URL(record.url);
+      if (linkUrl.protocol !== 'http:' && linkUrl.protocol !== 'https:') continue;
+      safeLinks.push({ text: typeof record.text === 'string' ? record.text.slice(0, 500) : '', url: linkUrl.toString() });
+    } catch {
+      // Ignore malformed or non-web links from the visible-page capture.
+    }
+  }
+
+  const parsed = parseFieldNationMessage(visibleText);
+  if (parsed.sourceReference && parsed.sourceReference !== sourceReference) {
+    res.status(409).json({ error: 'The captured page text contains a different work-order number than its URL.' });
+    return;
+  }
+  const clientName = fieldNationClientNameFromText(visibleText);
+  const sha256 = createHash('sha256').update(visibleText).digest('hex');
+  const canonicalSourceUrl = `https://app.fieldnation.com/workorders/${sourceReference}`;
+  const capture = {
+    version: 1,
+    capturedAt: capturedAt.toISOString(),
+    sourceUrl: canonicalSourceUrl,
+    pageTitle,
+    visibleText,
+    links: safeLinks,
+    sha256,
+    parsed: {
+      sourceReference,
+      title: parsed.title?.trim().slice(0, 255) ?? null,
+      location: parsed.location?.trim().slice(0, 255) ?? null,
+      scheduledAt: parsed.scheduledAt?.toISOString() ?? null,
+      grossPay: parsed.grossPay,
+      payType: parsed.payType,
+      payBaseAmount: parsed.payBaseAmount,
+      payBaseHours: parsed.payBaseHours,
+      payHourlyRate: parsed.payHourlyRate,
+      payHoursCap: parsed.payHoursCap,
+      estimatedHours: parsed.estimatedHours,
+      mileage: parsed.mileage,
+      score: parsed.score,
+      scoreReasons: parsed.scoreReasons.filter((reason) => reason !== 'missing source reference'),
+      clientName,
+    },
+  };
+
+  const outcome = await prisma.$transaction(async (tx) => {
+    const existing = await tx.fieldNationImport.findFirst({
+      where: { sourceReference },
+      include: { workOrder: true },
+      orderBy: { id: 'desc' },
+    });
+    let saved: Prisma.FieldNationImportGetPayload<{ include: { workOrder: true } }>;
+    if (existing) {
+      const rawParsedData = existing.parsedData;
+      const parsedDataRecord = rawParsedData && typeof rawParsedData === 'object' && !Array.isArray(rawParsedData)
+        ? rawParsedData as Record<string, unknown>
+        : {};
+      saved = await tx.fieldNationImport.update({
+        where: { id: existing.id },
+        data: { parsedData: { ...parsedDataRecord, capture } as Prisma.InputJsonValue },
+        include: { workOrder: true },
+      });
+    } else {
+      const title = parsed.title?.trim().slice(0, 255) || pageTitle?.trim().slice(0, 255) || null;
+      const parsedData = {
+        captureOnly: true,
+        scoreReasons: parsed.scoreReasons.filter((reason) => reason !== 'missing source reference'),
+        payType: parsed.payType,
+        payBaseAmount: parsed.payBaseAmount,
+        payBaseHours: parsed.payBaseHours,
+        payHourlyRate: parsed.payHourlyRate,
+        payHoursCap: parsed.payHoursCap,
+        clientName,
+        capture,
+      };
+      saved = await tx.fieldNationImport.create({
+        data: {
+          messageId: `fn-page-capture-${sourceReference}`,
+          sender: 'FieldNation page capture',
+          subject: pageTitle?.trim().slice(0, 255) || null,
+          receivedAt: null,
+          rawText: visibleText,
+          status: title && parsed.grossPay ? FieldNationImportStatus.PARSED : FieldNationImportStatus.REVIEW_REQUIRED,
+          sourceReference,
+          title,
+          location: parsed.location?.trim().slice(0, 255) ?? null,
+          scheduledAt: parsed.scheduledAt,
+          grossPay: parsed.grossPay,
+          payType: parsed.payType,
+          payBaseAmount: parsed.payBaseAmount,
+          payBaseHours: parsed.payBaseHours,
+          payHourlyRate: parsed.payHourlyRate,
+          payHoursCap: parsed.payHoursCap,
+          estimatedHours: parsed.estimatedHours,
+          mileage: parsed.mileage,
+          score: parsed.score,
+          parsedData: parsedData as Prisma.InputJsonValue,
+          createdById: req.auth!.userId,
+        },
+        include: { workOrder: true },
+      });
+    }
+
+    await writeAuditEvent(tx, req.auth!, 'fieldnation.import_captured', 'fieldnation_import', saved.id.toString(), {
+      sourceReference,
+      sourceUrl: canonicalSourceUrl,
+      capturedAt: capturedAt.toISOString(),
+      pageTitle,
+      visibleTextBytes: Buffer.byteLength(visibleText, 'utf8'),
+      linkCount: safeLinks.length,
+      sha256,
+      captureMode: existing ? 'attached' : 'created',
+    });
+    return { import: saved, created: !existing };
+  });
+
+  res.json({ data: serializeFieldNationImport(outcome.import), created: outcome.created });
 });
 
 app.patch('/api/v1/fieldnation/imports/:id/review', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {

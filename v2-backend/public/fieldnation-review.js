@@ -32,6 +32,9 @@
     .fieldnation-capture-state{margin:9px 0;color:#b8f2da}
     .fieldnation-capture-bookmark{display:inline-block;padding:9px 12px;border-radius:8px;background:#5f9df4;color:#061426;font-weight:700;text-decoration:none;cursor:grab}
     .fieldnation-capture-meta{display:block;margin-top:8px;color:#9db0c8;font-size:12px}
+    .fieldnation-capture-tools{margin:0 0 14px;padding:13px 14px;border:1px solid #29415f;background:#0a192c;border-radius:10px}
+    .fieldnation-capture-tools h3{margin:0 0 5px;font-size:16px}
+    .fieldnation-capture-tools p{color:#9db0c8;margin:0 0 10px}
     @media(max-width:800px){.fieldnation-review-grid,.fieldnation-review-form-grid{grid-template-columns:repeat(2,1fr)}}
     @media(max-width:520px){.fieldnation-review-grid,.fieldnation-review-form-grid{grid-template-columns:1fr}}
   `;
@@ -142,17 +145,34 @@
       : null;
   }
 
-  function captureBookmarklet(id, sourceReference) {
+  function captureBookmarklet(expectedReference) {
     const receiver = new URL(window.location.href);
     receiver.search = '';
     receiver.hash = '';
     receiver.searchParams.set('fnCapture', '1');
-    receiver.searchParams.set('importId', String(id));
-    receiver.searchParams.set('sourceReference', String(sourceReference));
     const receiverUrl = receiver.toString();
     const opsOrigin = window.location.origin;
-    const script = `(function(){var receiver=window.open(${JSON.stringify(receiverUrl)},'mmitFnCapture','popup,width=620,height=520');if(!receiver){alert('Allow popups for OPS, then run Capture again.');return;}var sent=false;function send(){if(sent)return;sent=true;var links=Array.from(document.querySelectorAll('a[href]')).filter(function(a){return a.getClientRects().length>0;}).slice(0,750).map(function(a){return{text:(a.innerText||a.textContent||'').trim().slice(0,500),url:a.href};});receiver.postMessage({type:'mmit-fn-capture-payload',importId:${JSON.stringify(String(id))},sourceReference:${JSON.stringify(String(sourceReference))},sourceUrl:location.href,pageTitle:document.title||'',visibleText:(document.body&&document.body.innerText)||'',capturedAt:new Date().toISOString(),links:links},${JSON.stringify(opsOrigin)});window.removeEventListener('message',ready);}function ready(event){if(event.origin!==${JSON.stringify(opsOrigin)}||event.source!==receiver||!event.data||event.data.type!=='mmit-fn-capture-ready')return;send();}window.addEventListener('message',ready);setTimeout(send,2500);}())`;
+    const script = `(function(){if(location.origin!=='https://app.fieldnation.com'){alert('Open a FieldNation work-order page before using this bookmark.');return;}var match=location.pathname.match(/^\\/workorders\\/(\\d+)(?:\\/|$)/);if(!match){alert('This page URL does not look like a FieldNation work order.');return;}var sourceReference=match[1];var expected=${JSON.stringify(expectedReference ? String(expectedReference) : '')};if(expected&&expected!==sourceReference){alert('This bookmark was made for work order '+expected+'. The current page is '+sourceReference+'.');return;}var receiver=null;var sent=false;function send(event){if(sent||event.origin!==${JSON.stringify(opsOrigin)}||event.source!==receiver||!event.data||event.data.type!=='mmit-fn-capture-ready'||event.data.sourceReference!==sourceReference)return;sent=true;window.clearTimeout(timer);window.removeEventListener('message',ready);var links=Array.from(document.querySelectorAll('a[href]')).filter(function(a){return a.getClientRects().length>0;}).slice(0,750).map(function(a){return{text:(a.innerText||a.textContent||'').trim().slice(0,500),url:a.href};});receiver.postMessage({type:'mmit-fn-capture-payload',sourceReference:sourceReference,sourceUrl:location.href,pageTitle:document.title||'',visibleText:(document.body&&document.body.innerText)||'',capturedAt:new Date().toISOString(),links:links},${JSON.stringify(opsOrigin)});}function ready(event){send(event);}window.addEventListener('message',ready);var receiverUrl=new URL(${JSON.stringify(receiverUrl)});receiverUrl.searchParams.set('sourceReference',sourceReference);receiver=window.open(receiverUrl.toString(),'mmitFnCapture','popup,width=620,height=520');if(!receiver){window.removeEventListener('message',ready);alert('Allow popups for OPS, then click the bookmark again.');return;}var timer=window.setTimeout(function(){window.removeEventListener('message',ready);alert('The OPS capture window did not respond. Confirm OPS is signed in, then try again.');},15000);}())`;
     return `javascript:${encodeURIComponent(script)}`;
+  }
+
+  function renderDashboardCaptureTool() {
+    const imports = document.getElementById('imports');
+    const section = imports && imports.closest('section');
+    if (!imports || !section) return;
+    let tool = document.getElementById('fieldNationCaptureTools');
+    if (!tool) {
+      tool = document.createElement('div');
+      tool.id = 'fieldNationCaptureTools';
+      imports.insertAdjacentElement('beforebegin', tool);
+    }
+    tool.className = 'fieldnation-capture-tools';
+    tool.innerHTML = `
+      <h3>Capture a FieldNation work order</h3>
+      <p>Drag this bookmark to your bookmarks bar once. On any FieldNation work-order page, click it to create or update the V2 intake record from rendered page text and visible links. It never sends FieldNation credentials or cookies.</p>
+      <a class="fieldnation-capture-bookmark" href="${html(captureBookmarklet())}" onclick="return false">Capture current FN W/O</a>
+      <small class="fieldnation-capture-meta">Drag the button to your bookmarks bar. Click it only while viewing a FieldNation work-order page.</small>
+    `;
   }
 
   function reasonsFor(item) {
@@ -252,6 +272,7 @@
       const item = response && response.data ? response.data : response;
       const sourceReference = importValue(item, 'sourceReference');
       const workOrderId = importValue(item, 'workOrderId');
+      const captureOnly = Boolean(item && item.parsedData && item.parsedData.captureOnly === true);
       const reasons = reasonsFor(item);
       const review = reviewObject(item);
       const remainingReasons = Array.isArray(review && review.remainingReasons)
@@ -268,7 +289,7 @@
           <h3>FieldNation source packet</h3>
           <p>Drag the capture button to your bookmarks bar. Open this exact W/O in FieldNation, then click it. OPS receives only rendered page text and visible HTTP(S) links—never your FieldNation credentials or cookies.</p>
           ${capture ? `<div class="fieldnation-capture-state">Captured ${html(dateTime(capture.capturedAt))} · integrity checked (${html(String(capture.sha256 || '').slice(0, 12))}…)</div>` : '<div class="fieldnation-capture-state">Capture available</div>'}
-          <a class="fieldnation-capture-bookmark" href="${html(captureBookmarklet(id, sourceReference))}" onclick="return false">Capture FN W/O ${html(sourceReference)}</a>
+          <a class="fieldnation-capture-bookmark" href="${html(captureBookmarklet(sourceReference))}" onclick="return false">Capture FN W/O ${html(sourceReference)}</a>
           ${workOrderUrl ? `<a class="secondary" href="${html(workOrderUrl)}" target="_blank" rel="noopener noreferrer">Open FieldNation W/O</a>` : ''}
           <small class="fieldnation-capture-meta">Drag the capture button—do not click it on this OPS page.</small>
         </div>` : '';
@@ -284,12 +305,12 @@
           <div><small>Source reference</small><strong>${html(sourceReference)}</strong></div>
           <div><small>Location</small><strong>${html(importValue(item, 'location'))}</strong></div>
           <div><small>FieldNation client</small><strong>${html(clientName)}</strong></div>
-          <div><small>Message ID</small><strong>${html(importValue(item, 'messageId'))}</strong></div>
+          <div><small>${captureOnly ? 'Source' : 'Message ID'}</small><strong>${html(captureOnly ? 'FieldNation page capture' : importValue(item, 'messageId'))}</strong></div>
           <div><small>Received</small><strong>${html(dateTime(importValue(item, 'receivedAt')))}</strong></div>
         </div>
         ${remainingReasons.length ? `<div class="fieldnation-review-requirements"><strong>Requirements remaining before conversion</strong><ul>${remainingReasons.map((reason) => `<li>${html(reason)}</li>`).join('')}</ul></div>` : editable ? '<div class="fieldnation-review-requirements ready"><strong>Ready for explicit conversion.</strong></div>' : ''}
         ${reasons.length ? `<div class="fieldnation-review-reasons"><strong>Score and review reasons</strong><ul>${reasons.map((reason) => `<li>${html(reason)}</li>`).join('')}</ul></div>` : ''}
-        <div class="fieldnation-review-note">The original message is retained by V2 for auditability and intentionally stays out of the dashboard list.</div>
+        <div class="fieldnation-review-note">${captureOnly ? 'This intake record was created from the FieldNation page capture; its rendered text and visible links are retained with an integrity hash.' : 'The original message is retained by V2 for auditability and intentionally stays out of the dashboard list.'}</div>
         ${captureCard}
         ${editable ? `
           <form class="fieldnation-review-form" data-fieldnation-review-form>
@@ -347,4 +368,6 @@
         .catch(() => {});
     } catch {}
   });
+
+  renderDashboardCaptureTool();
 }());
