@@ -1531,8 +1531,8 @@ app.post('/api/v1/fieldnation/captures', requireRoles(OpsUserRole.OWNER, OpsUser
   const estimateMatch = visibleText.match(/\bEstimated\s+(\d+(?:\.\d+)?)\s+hours?\s+to complete\b/i);
   parsed.estimatedHours = estimateMatch ? estimateMatch[1] : null;
 
-  const scheduleDateMatch = visibleText.match(/\b(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)[a-z]*,\s*([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4})\b/i);
-  const arriveTimeMatch = visibleText.match(/\bArrive at\s+(\d{1,2}):(\d{2})\s*(AM|PM)\s*\((EST|EDT|CST|CDT|MST|MDT|PST|PDT)\)/i);
+  const scheduleDateMatch = visibleText.match(/\b(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)[a-z]*,?\s*([A-Za-z]{3,9})\s+(\d{1,2}),?\s*(\d{4})\b/i);
+  const arriveTimeMatch = visibleText.match(/\b(?:Arrive at|Arrive between)\s+(\d{1,2}):(\d{2})\s*(AM|PM)(?:\s*(?:-|–|to)\s*\d{1,2}:\d{2}\s*(?:AM|PM))?\s*\((EST|EDT|CST|CDT|MST|MDT|PST|PDT)\)/i);
   if (scheduleDateMatch && arriveTimeMatch) {
     const monthNumbers: Record<string, number> = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
     const zoneOffsets: Record<string, number> = { EST: -5, EDT: -4, CST: -6, CDT: -5, MST: -7, MDT: -6, PST: -8, PDT: -7 };
@@ -1549,8 +1549,13 @@ app.post('/api/v1/fieldnation/captures', requireRoles(OpsUserRole.OWNER, OpsUser
     }
   }
 
+  const workOrderSiteLocationMatch = visibleText.match(/\bWork order site\s+\d+(?:\.\d+)?\s+mi\s+from work order\s+([A-Za-z][A-Za-z .'-]*,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?(?:\s+US)?)/i);
   const locationMatch = visibleText.match(/\bLocation\s*(?:\(GPS Required\))?\s*:?[^\n]*\n\s*(\d{1,6}\s+[^\n]+)\n\s*([A-Za-z][A-Za-z .'-]*,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?)/i);
-  if (locationMatch) parsed.location = `${locationMatch[1].trim()}, ${locationMatch[2].trim()}`;
+  if (workOrderSiteLocationMatch) {
+    parsed.location = workOrderSiteLocationMatch[1].trim();
+  } else if (locationMatch) {
+    parsed.location = `${locationMatch[1].trim()}, ${locationMatch[2].trim()}`;
+  }
 
   const blendedHeaderMatch = visibleText.match(/\bPay\s+Blended\b/i);
   if (blendedHeaderMatch) {
@@ -1560,7 +1565,7 @@ app.post('/api/v1/fieldnation/captures', requireRoles(OpsUserRole.OWNER, OpsUser
     const baseRateMatch = paySections[0].match(/\bRate\b[\s\S]{0,120}?\$([\d,]+(?:\.\d{1,2})?)/i);
     const baseHoursMatch = paySections[0].match(/\bFirst Hours\b\s*(\d+(?:\.\d+)?)/i);
     const additionalRateMatch = paySections[1]?.match(/\bRate\b[\s\S]{0,120}?\$([\d,]+(?:\.\d{1,2})?)/i);
-    const additionalCapMatch = paySections[1]?.match(/\bAdditional Hour\b\s*(\d+(?:\.\d+)?)\s*\bMax\b/i);
+    const additionalCapMatch = paySections[1]?.match(/\bAdditional Hours?\b\s*(\d+(?:\.\d+)?)\s*\bMax\b/i);
     if (baseRateMatch && baseHoursMatch && additionalRateMatch && additionalCapMatch) {
       const baseAmount = Number(baseRateMatch[1].replace(/,/g, ''));
       const baseHours = Number(baseHoursMatch[1]);
