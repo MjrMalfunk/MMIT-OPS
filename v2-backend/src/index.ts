@@ -1495,7 +1495,7 @@ app.post('/api/v1/fieldnation/captures', requireRoles(OpsUserRole.OWNER, OpsUser
   // Page captures need explicit FieldNation labels; free-form message parsing
   // can mistake unrelated page numbers for the estimated duration.
   const estimateMatch = visibleText.match(/\bEstimated\s+(\d+(?:\.\d+)?)\s+hours?\s+to complete\b/i);
-  parsed.estimatedHours = estimateMatch ? Number(estimateMatch[1]) : null;
+  parsed.estimatedHours = estimateMatch ? estimateMatch[1] : null;
 
   const scheduleDateMatch = visibleText.match(/\b(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)[a-z]*,\s*([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4})\b/i);
   const arriveTimeMatch = visibleText.match(/\bArrive at\s+(\d{1,2}):(\d{2})\s*(AM|PM)\s*\((EST|EDT|CST|CDT|MST|MDT|PST|PDT)\)/i);
@@ -1534,11 +1534,11 @@ app.post('/api/v1/fieldnation/captures', requireRoles(OpsUserRole.OWNER, OpsUser
       const additionalHoursCap = Number(additionalCapMatch[1]);
       if ([baseAmount, baseHours, additionalRate, additionalHoursCap].every(Number.isFinite)) {
         parsed.payType = 'BLENDED';
-        parsed.payBaseAmount = baseAmount;
-        parsed.payBaseHours = baseHours;
-        parsed.payHourlyRate = additionalRate;
-        parsed.payHoursCap = additionalHoursCap;
-        parsed.grossPay = Math.round((baseAmount + additionalRate * additionalHoursCap + Number.EPSILON) * 100) / 100;
+        parsed.payBaseAmount = baseRateMatch[1].replace(/,/g, '');
+        parsed.payBaseHours = baseHoursMatch[1];
+        parsed.payHourlyRate = additionalRateMatch[1].replace(/,/g, '');
+        parsed.payHoursCap = additionalCapMatch[1];
+        parsed.grossPay = (Math.round((baseAmount + additionalRate * additionalHoursCap + Number.EPSILON) * 100) / 100).toFixed(2);
       }
     }
   }
