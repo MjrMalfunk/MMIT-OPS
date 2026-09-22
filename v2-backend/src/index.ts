@@ -244,9 +244,17 @@ function parseFieldNationMessage(rawText: string): FieldNationParsed {
   const payText = firstField(text, ['gross pay', 'total pay', 'estimated pay', 'pay']);
   const hoursText = firstField(text, ['estimated hours', 'scheduled hours', 'hours']);
   const mileageText = firstField(text, ['mileage', 'miles', 'distance']);
+  const notificationDistanceText = text.match(/\b(\d+(?:\.\d+)?)\s*(?:miles?|mi\.?)\s+away\b/i)?.[1]
+    ?? text.match(/\(\s*(\d+(?:\.\d+)?)\s*(?:miles?|mi\.?)\s*\)/i)?.[1]
   let grossPay = firstMoneyValue(payText);
   let estimatedHours = firstMoneyValue(hoursText);
-  const mileage = mileageText?.replace(/[^0-9.]/g, '') || null;
+  const labeledMileage = mileageText?.replace(/[^0-9.]/g, '') || null;
+  const notificationDistance = notificationDistanceText ? Number(notificationDistanceText) : null;
+  // FieldNation notification distance is one-way. The review and score use the
+  // estimated round trip, which is what the work order will actually require.
+  const mileage = notificationDistance !== null && Number.isFinite(notificationDistance)
+    ? decimalText(notificationDistance * 2)
+    : labeledMileage;
   const scheduledText = firstField(text, ['scheduled start', 'scheduled date', 'appointment']);
   const parsedScheduled = scheduledText ? new Date(scheduledText) : null;
   const scheduledAt = parsedScheduled && !Number.isNaN(parsedScheduled.getTime()) ? parsedScheduled : null;
@@ -271,7 +279,9 @@ function parseFieldNationMessage(rawText: string): FieldNationParsed {
       payHourlyRate = Number(hourlyRate).toFixed(2);
       payHoursCap = Number(hoursCap).toFixed(2);
       grossPay = decimalText(Number(payBaseAmount) + Number(payHourlyRate) * Number(payHoursCap));
-      estimatedHours = decimalText(Number(payBaseHours) + Number(payHoursCap));
+      // Additional blended hours require approval. The included base hours are
+      // the expected duration used for the initial decision score.
+      estimatedHours = decimalText(Number(payBaseHours));
     }
   } else if (payTypeText.includes('HOURLY') || hourlyMatch) {
     payType = WorkOrderPayType.HOURLY;
@@ -287,14 +297,28 @@ function parseFieldNationMessage(rawText: string): FieldNationParsed {
   const pay = grossPay ? Number(grossPay) : 0;
   const hours = estimatedHours ? Number(estimatedHours) : 0;
   const miles = mileage ? Number(mileage) : 0;
-  if (pay > 0 && hours > 0) {
-    const hourly = pay / hours;
+  const baseAmount = payBaseAmount ? Number(payBaseAmount) : 0;
+  const baseHours = payBaseHours ? Number(payBaseHours) : 0;
+  const hourlyRate = payHourlyRate ? Number(payHourlyRate) : 0;
+  const hoursCap = payHoursCap ? Number(payHoursCap) : 0;
+  let expectedPay = pay;
+  if (payType === WorkOrderPayType.BLENDED && baseAmount > 0 && baseHours > 0) {
+    const expectedAdditionalHours = Math.max(0, Math.min(hours - baseHours, hoursCap));
+    expectedPay = baseAmount + (hourlyRate > 0 ? hourlyRate * expectedAdditionalHours : 0);
+  } else if (payType === WorkOrderPayType.HOURLY && hourlyRate > 0 && hours > 0) {
+    expectedPay = hourlyRate * hours;
+  }
+  const estimatedDriveHours = miles > 0 ? miles / 45 : 0;
+  const decisionHours = hours + estimatedDriveHours;
+  if (expectedPay > 0 && decisionHours > 0) {
+    const hourly = expectedPay / decisionHours;
     score += Math.min(30, Math.max(-20, (hourly - 25) * 1.2));
-    scoreReasons.push(`estimated gross hourly rate $${hourly.toFixed(2)}`);
+    scoreReasons.push(`${estimatedDriveHours > 0 ? 'estimated gross door-to-door rate' : 'estimated gross hourly rate'} $${hourly.toFixed(2)}`);
   } else scoreReasons.push('missing pay or estimated hours');
   if (miles > 0) {
     score -= Math.min(20, miles / 10);
-    scoreReasons.push(`${miles.toFixed(1)} estimated miles`);
+    scoreReasons.push(`${miles.toFixed(1)} estimated round-trip miles`);
+    scoreReasons.push(`${Math.round(estimatedDriveHours * 60)} estimated round-trip drive minutes at 45 mph`);
   }
   if (!sourceReference) scoreReasons.push('missing source reference');
   if (!scheduledAt) scoreReasons.push('missing scheduled date');
