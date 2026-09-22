@@ -1492,10 +1492,6 @@ app.post('/api/v1/fieldnation/captures', requireRoles(OpsUserRole.OWNER, OpsUser
   }
 
   const parsed = parseFieldNationMessage(visibleText);
-  if (parsed.sourceReference && parsed.sourceReference !== sourceReference) {
-    res.status(409).json({ error: 'The captured page text contains a different work-order number than its URL.' });
-    return;
-  }
   const clientName = fieldNationClientNameFromText(visibleText);
   const sha256 = createHash('sha256').update(visibleText).digest('hex');
   const canonicalSourceUrl = `https://app.fieldnation.com/workorders/${sourceReference}`;
