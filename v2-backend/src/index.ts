@@ -1555,6 +1555,12 @@ app.post('/api/v1/fieldnation/captures', requireRoles(OpsUserRole.OWNER, OpsUser
   }
 
   const workOrderSiteLocationMatch = visibleText.match(/\bWork order site\s+\d+(?:\.\d+)?\s+mi\s+from work order\s+([A-Za-z][A-Za-z .'-]*,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?(?:\s+US)?)/i);
+  const workOrderSiteDistanceMatch = visibleText.match(/\bWork order site\s+(\d+(?:\.\d+)?)\s+mi\s+from work order\b/i);
+  if (workOrderSiteDistanceMatch) {
+    const oneWayMiles = Number(workOrderSiteDistanceMatch[1]);
+    if (Number.isFinite(oneWayMiles)) parsed.mileage = (oneWayMiles * 2).toFixed(2);
+  }
+
   const locationMatch = visibleText.match(/\bLocation\s*(?:\(GPS Required\))?\s*:?[^\n]*\n\s*(\d{1,6}\s+[^\n]+)\n\s*([A-Za-z][A-Za-z .'-]*,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?)/i);
   if (workOrderSiteLocationMatch) {
     parsed.location = workOrderSiteLocationMatch[1].trim();
