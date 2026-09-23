@@ -1532,17 +1532,22 @@ app.post('/api/v1/fieldnation/captures', requireRoles(OpsUserRole.OWNER, OpsUser
   parsed.estimatedHours = estimateMatch ? estimateMatch[1] : null;
 
   const scheduleDateMatch = visibleText.match(/\b(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)[a-z]*,?\s*([A-Za-z]{3,9})\s+(\d{1,2}),?\s*(\d{4})\b/i);
+  const numericScheduleDateMatch = visibleText.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/);
   const arriveTimeMatch = visibleText.match(/\b(?:Arrive at|Arrive between)\s+(\d{1,2}):(\d{2})\s*(AM|PM)(?:\s*(?:-|–|to)\s*\d{1,2}:\d{2}\s*(?:AM|PM))?\s*\((EST|EDT|CST|CDT|MST|MDT|PST|PDT)\)/i);
-  if (scheduleDateMatch && arriveTimeMatch) {
+  if ((scheduleDateMatch || numericScheduleDateMatch) && arriveTimeMatch) {
     const monthNumbers: Record<string, number> = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
     const zoneOffsets: Record<string, number> = { EST: -5, EDT: -4, CST: -6, CDT: -5, MST: -7, MDT: -6, PST: -8, PDT: -7 };
-    const monthNumber = monthNumbers[scheduleDateMatch[1].slice(0, 3).toLowerCase()];
+    const monthNumber = scheduleDateMatch
+      ? monthNumbers[scheduleDateMatch[1].slice(0, 3).toLowerCase()]
+      : Number(numericScheduleDateMatch![1]) - 1;
+    const dateYear = scheduleDateMatch ? Number(scheduleDateMatch[3]) : Number(numericScheduleDateMatch![3]);
+    const dateDay = scheduleDateMatch ? Number(scheduleDateMatch[2]) : Number(numericScheduleDateMatch![2]);
     const zone = arriveTimeMatch[4].toUpperCase();
     const hour12 = Number(arriveTimeMatch[1]) % 12;
     const hour24 = hour12 + (arriveTimeMatch[3].toUpperCase() === 'PM' ? 12 : 0);
     if (monthNumber !== undefined && zoneOffsets[zone] !== undefined) {
       const scheduledAt = new Date(Date.UTC(
-        Number(scheduleDateMatch[3]), monthNumber, Number(scheduleDateMatch[2]),
+        dateYear, monthNumber, dateDay,
         hour24, Number(arriveTimeMatch[2]),
       ) - zoneOffsets[zone] * 60 * 60 * 1000);
       if (!Number.isNaN(scheduledAt.getTime())) parsed.scheduledAt = scheduledAt;
