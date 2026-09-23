@@ -11,7 +11,17 @@
       document.getElementById('imports')?.closest('section')?.after(panel);
       panel.querySelector('#fnScanMailbox').onclick = scan;
     }
-    const queue = rows.filter(meta).filter(item => meta(item).decision !== 'IGNORED');
+    // Mail folders also contain follow-up/message notifications. Keep those
+    // in the regular intake list, but only show actionable opportunity events
+    // here. Collapse repeated notices for the same W/O to the newest row.
+    const actionable = rows.filter(meta).filter(item => ['AVAILABLE', 'ROUTED', 'ASSIGNED'].includes(meta(item).status)).filter(item => meta(item).decision !== 'IGNORED');
+    const seen = new Set();
+    const queue = actionable.filter(item => {
+      const key = item.sourceReference || item.id;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
     const body = panel.querySelector('#fnQueueBody');
     if (!queue.length) { body.innerHTML = '<div class="empty">No imported FieldNation opportunities yet.</div>'; return; }
     body.innerHTML = '<table><thead><tr><th>Score</th><th>Recommendation</th><th>Status</th><th>W/O</th><th>Buyer / title</th><th>Location</th><th>Schedule</th><th>Pay</th><th>Real profit</th><th>Actions</th></tr></thead><tbody>' + queue.map(item => {
