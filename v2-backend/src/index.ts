@@ -40,6 +40,7 @@ import {
   verifyTotp,
 } from './auth.js';
 import { canonicalJson, parseTrackerPacket, TrackerPacketValidationError } from './tracker-import.js';
+import { parseFieldNationOpportunityEmail, readFieldNationMailbox } from './fieldnation-opportunity.js';
 
 // Load environment variables (db passwords, ports, secrets) securely
 dotenv.config();
@@ -1328,6 +1329,90 @@ app.post('/api/v1/fieldnation/imports', requireRoles(OpsUserRole.OWNER, OpsUserR
     return imported;
   });
   res.status(201).json({ data: serializeFieldNationImport(created), duplicate: false });
+});
+
+
+app.post('/api/v1/fieldnation/mailbox/scan', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
+  const env = process.env;
+  const password = env.FIELDNATION_IMAP_PASSWORD?.trim();
+  const user = env.FIELDNATION_IMAP_USERNAME?.trim();
+  if (!user || !password) {
+    res.status(400).json({ error: 'FIELDNATION_IMAP_USERNAME and FIELDNATION_IMAP_PASSWORD must be configured on the API service.' });
+    return;
+  }
+  const requestedLimit = Number(req.body?.limit ?? 25);
+  const requestedLookback = Number(req.body?.lookbackDays ?? env.FIELDNATION_IMAP_LOOKBACK_DAYS ?? 14);
+  if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 100 || !Number.isInteger(requestedLookback) || requestedLookback < 1 || requestedLookback > 90) {
+    res.status(400).json({ error: 'limit must be 1-100 and lookbackDays must be 1-90.' });
+    return;
+  }
+  const messages = await readFieldNationMailbox({
+    host: env.FIELDNATION_IMAP_HOST?.trim() || 'server242.web-hosting.com',
+    port: Number(env.FIELDNATION_IMAP_PORT ?? 993),
+    secure: String(env.FIELDNATION_IMAP_SECURE ?? 'true').toLowerCase() !== 'false',
+    user,
+    password,
+    folder: env.FIELDNATION_IMAP_FOLDER?.trim() || 'INBOX.Field Nation',
+    lookbackDays: requestedLookback,
+    limit: requestedLimit,
+  });
+  const stats = { found: messages.length, imported: 0, duplicates: 0, reviewRequired: 0, errors: [] as string[] };
+  for (const message of messages) {
+    try {
+      const existing = await prisma.fieldNationImport.findUnique({ where: { messageId: message.messageId } });
+      if (existing) { stats.duplicates += 1; continue; }
+      const parsed = parseFieldNationOpportunityEmail({
+        subject: message.subject ?? '', sender: message.sender ?? '', rawText: message.rawText, receivedAt: message.receivedAt,
+        oaiApplies: String(env.FIELDNATION_PROFIT_OAI_APPLIES ?? 'false').toLowerCase() === 'true',
+      });
+      const status = parsed.sourceReference && parsed.title && parsed.grossPay ? FieldNationImportStatus.PARSED : FieldNationImportStatus.REVIEW_REQUIRED;
+      await prisma.$transaction(async (tx) => {
+        const imported = await tx.fieldNationImport.create({
+          data: {
+            messageId: message.messageId, sender: message.sender, subject: message.subject, receivedAt: message.receivedAt,
+            rawText: message.rawText, status, sourceReference: parsed.sourceReference, title: parsed.title, location: parsed.location,
+            scheduledAt: parsed.scheduledAt, grossPay: parsed.grossPay, payType: parsed.payType as WorkOrderPayType,
+            payBaseAmount: parsed.payBaseAmount, payBaseHours: parsed.payBaseHours, payHourlyRate: parsed.payHourlyRate,
+            payHoursCap: parsed.payHoursCap, estimatedHours: parsed.estimatedHours, mileage: parsed.mileageOneWay, score: parsed.score,
+            parsedData: {
+              scoreReasons: parsed.scoreReasons, payType: parsed.payType, payBaseAmount: parsed.payBaseAmount, payBaseHours: parsed.payBaseHours,
+              payHourlyRate: parsed.payHourlyRate, payHoursCap: parsed.payHoursCap,
+              opportunity: { source: 'FIELDNATION_IMAP', status: parsed.opportunityStatus, decision: 'REVIEW', buyerName: parsed.buyerName,
+                distanceKind: 'ONE_WAY', recommendation: parsed.recommendation, profitability: parsed.profitability },
+            } as Prisma.InputJsonValue,
+            createdById: req.auth!.userId,
+          },
+          include: { workOrder: true },
+        });
+        await writeAuditEvent(tx, req.auth!, 'fieldnation.mailbox_imported', 'fieldnation_import', imported.id.toString(), {
+          messageId: imported.messageId, sourceReference: imported.sourceReference, score: imported.score?.toFixed(2) ?? null,
+          opportunityStatus: parsed.opportunityStatus, recommendation: parsed.recommendation,
+        });
+      });
+      stats.imported += 1;
+      if (status === FieldNationImportStatus.REVIEW_REQUIRED) stats.reviewRequired += 1;
+    } catch (error) {
+      stats.errors.push(error instanceof Error ? error.message : 'An unknown message-import error occurred.');
+    }
+  }
+  res.json({ data: stats });
+});
+
+app.patch('/api/v1/fieldnation/imports/:id/opportunity-decision', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
+  const decision = req.body?.decision;
+  if (!['REVIEW', 'WATCHING', 'IGNORED'].includes(decision)) { res.status(400).json({ error: 'decision must be REVIEW, WATCHING, or IGNORED.' }); return; }
+  const id = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  if (id === null) { res.status(400).json({ error: 'Invalid FieldNation import id.' }); return; }
+  const existing = await prisma.fieldNationImport.findUnique({ where: { id } });
+  if (!existing) { res.status(404).json({ error: 'FieldNation import not found.' }); return; }
+  const record = existing.parsedData && typeof existing.parsedData === 'object' && !Array.isArray(existing.parsedData) ? existing.parsedData as Record<string, unknown> : {};
+  const priorOpportunity = record.opportunity && typeof record.opportunity === 'object' && !Array.isArray(record.opportunity) ? record.opportunity as Record<string, unknown> : {};
+  const updated = await prisma.$transaction(async (tx) => {
+    const item = await tx.fieldNationImport.update({ where: { id }, data: { parsedData: { ...record, opportunity: { ...priorOpportunity, decision } } as Prisma.InputJsonValue }, include: { workOrder: true } });
+    await writeAuditEvent(tx, req.auth!, 'fieldnation.opportunity_decision', 'fieldnation_import', item.id.toString(), { decision });
+    return item;
+  });
+  res.json({ data: serializeFieldNationImport(updated) });
 });
 
 app.get('/api/v1/fieldnation/imports', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR, OpsUserRole.VIEWER), async (req: Request, res: Response) => {
