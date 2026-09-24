@@ -45,30 +45,95 @@ function firstMatch(text: string, expressions: RegExp[]): string | null {
   return null;
 }
 
+function cleanCandidate(value: string | null): string | null {
+  if (!value) return null;
+  const cleaned = value
+    .replace(/<https?:\/\/[^>]+>/gi, ' ')
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/&(?:nbsp|amp);/gi, ' ')
+    .replace(/[\u201c\u201d]/g, '')
+    .replace(/^\s*["']+|["']+\s*$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!cleaned || /^(?:fieldnation|toplogo\.png|view (?:work )?order|view message|unsubscribe)$/i.test(cleaned)) {
+    return null;
+  }
+
+  return cleaned;
+}
+
+function estimatedHoursFromText(text: string): string | null {
+  const value = firstMatch(text, [
+    /\bestimated\s+(?:time|duration|hours?)\s*:?\s*([\d.]+)\s*(?:hours?|hrs?)\b/i,
+    /\bestimated\s+([\d.]+)\s*(?:hours?|hrs?)\s+(?:to\s+)?complete\b/i,
+    /\b([\d.]+)\s*(?:hours?|hrs?)\s+(?:estimated|to\s+complete)\b/i,
+    /\b(?:onsite|on-site|service)\s+time\s*:?[ ]*([\d.]+)\s*(?:hours?|hrs?)\b/i,
+  ]);
+  const parsed = value === null ? null : Number(value);
+  return parsed !== null && Number.isFinite(parsed) ? asHours(parsed) : null;
+}
+
 function parsePay(text: string) {
   const normalized = text.replace(/\s+/g, ' ');
-  const blended = normalized.match(/(?:pays?\s*)?\$?\s*([\d,.]+)\s*(?:\/|for(?:\s+the)?\s+|\s+(?=(?:first|1st)\b))\s*(?:(?:first|1st)\s*)?([\d.]+)\s*(?:hours?|hrs?)\b([\s\S]{0,240}?)(?:then|after(?:wards)?|thereafter)[\s\S]{0,120}?(?:at\s*)?\$?\s*([\d,.]+)\s*(?:\/\s*(?:hour|hr)|per\s+(?:hour|hr))/i);
-  if (blended) {
-    const base = Number(blended[1].replace(/,/g, ''));
-    const baseHours = Number(blended[2]);
-    const tail = `${blended[3]} ${normalized.slice((blended.index ?? 0) + blended[0].length)}`;
-    const cap = firstMatch(tail, [/(?:max(?:imum)?(?:\s+of)?|up\s+to)\s*([\d.]+)\s*(?:additional\s*)?(?:hours?|hrs?)/i]);
-    const rate = Number(blended[4].replace(/,/g, ''));
-    if (Number.isFinite(base) && Number.isFinite(baseHours) && Number.isFinite(rate) && cap && Number.isFinite(Number(cap))) {
-      const hoursCap = Number(cap);
-      return { payType: 'BLENDED' as const, payBaseAmount: asMoney(base), payBaseHours: asHours(baseHours), payHourlyRate: asMoney(rate), payHoursCap: asHours(hoursCap), grossPay: asMoney(base + rate * hoursCap), estimatedHours: asHours(baseHours + hoursCap) };
+  const estimatedHoursText = estimatedHoursFromText(normalized);
+  const block = normalized.match(/(?:pays?\s*)?\$?\s*([\d,.]+)\s*(?:\/|for(?:\s+the)?\s+|\s+(?=(?:first|1st)\b))\s*(?:(?:first|1st)\s*)?([\d.]+)\s*(?:hours?|hrs?)\b/i);
+  const hasBlendedTerms = /\b(?:pay|payment)\s+(?:type\s+)?blended\b/i.test(normalized)
+    || /\bthen\s+pay\s+additional\s+hours?\b/i.test(normalized)
+    || Boolean(block && /(?:then|after(?:wards)?|thereafter)/i.test(normalized.slice((block.index ?? 0) + block[0].length)));
+
+  if (hasBlendedTerms) {
+    const baseAmountText = block?.[1] ?? firstMatch(normalized, [
+      /\b(?:first|base|included)\s+(?:rate|amount|pay)\s*:?\s*\$?([\d,.]+)/i,
+      /\brate\s*:?\s*\$?([\d,.]+)\s+(?:first|base|included)\s+hours?\b/i,
+      /\b(?:first|base|included)\s+hours?\s*:?\s*\$?([\d,.]+)/i,
+    ]);
+    const baseHoursText = block?.[2] ?? firstMatch(normalized, [
+      /\b(?:first|base|included)\s+hours?\s*:?\s*([\d.]+)/i,
+      /\brate\s*:?\s*\$?[\d,.]+\s+(?:first|base|included)\s+hours?\s*:?\s*([\d.]+)/i,
+    ]);
+    const additionalRateText = firstMatch(normalized, [
+      /(?:then\s+pay\s+)?(?:additional|extra)\s+hours?\s+(?:rate\s*:?\s*)?\$?([\d,.]+)\s*(?:\/\s*(?:hour|hr)|per\s+(?:hour|hr))?/i,
+      /\brate\s*:?\s*\$?([\d,.]+)\s*(?:\/\s*(?:hour|hr)|per\s+(?:hour|hr))\s+(?:additional|extra)\s+hours?/i,
+    ]);
+    const additionalHoursText = firstMatch(normalized, [
+      /(?:additional|extra)\s+hours?\s*:?\s*([\d.]+)\s*(?:max|maximum)?/i,
+      /(?:max(?:imum)?(?:\s+of)?|up\s+to)\s*([\d.]+)\s*(?:additional|extra)\s+hours?/i,
+    ]);
+    const grossText = firstMatch(normalized, [
+      /\b(?:labor|total\s+estimate|advertised(?:\/max)?\s+pay|max(?:imum)?\s+pay|gross\s+pay|total\s+pay)\s*:?\s*\$?\s*([\d,.]+)/i,
+      /\bpay\s*:?\s*\$?\s*([\d,.]+)\b/i,
+    ]);
+    const base = baseAmountText === null ? null : Number(baseAmountText.replace(/,/g, ''));
+    const baseHours = baseHoursText === null ? null : Number(baseHoursText);
+    const rate = additionalRateText === null ? null : Number(additionalRateText.replace(/,/g, ''));
+    const hoursCap = additionalHoursText === null ? null : Number(additionalHoursText);
+    if (base !== null && baseHours !== null && rate !== null && hoursCap !== null
+      && Number.isFinite(base) && Number.isFinite(baseHours) && Number.isFinite(rate) && Number.isFinite(hoursCap)) {
+      const gross = grossText === null ? base + rate * hoursCap : Number(grossText.replace(/,/g, ''));
+      return { payType: 'BLENDED' as const, payBaseAmount: asMoney(base), payBaseHours: asHours(baseHours), payHourlyRate: asMoney(rate), payHoursCap: asHours(hoursCap), grossPay: Number.isFinite(gross) ? asMoney(gross) : asMoney(base + rate * hoursCap), estimatedHours: asHours(baseHours + hoursCap) };
     }
   }
-  const hourlyRateText = firstMatch(normalized, [/Hourly\s+Rate\s*:\s*\$?([\d,.]+)\s*\/\s*(?:hour|hr)/i, /\$?\s*([\d,.]+)\s*(?:\/\s*(?:hour|hr)|per\s+(?:hour|hr))/i]);
-  const maxHoursText = firstMatch(normalized, [/\(([\d.]+)\s+hours?\s+max\)/i, /(?:max(?:imum)?(?:\s+of)?|up\s+to)\s*([\d.]+)\s*(?:hours?|hrs?)/i]);
+
+  const hourlyRateText = firstMatch(normalized, [
+    /(?:hourly\s+rate|rate)\s*:?\s*\$?([\d,.]+)\s*(?:\/\s*(?:hour|hr)|per\s+(?:hour|hr)|an?\s+hour)/i,
+    /\$?\s*([\d,.]+)\s*(?:\/\s*(?:hour|hr)|per\s+(?:hour|hr))/i,
+  ]);
+  const maxHoursText = firstMatch(normalized, [
+    /\(([\d.]+)\s+hours?\s+max\)/i,
+    /(?:max(?:imum)?(?:\s+of)?|up\s+to)\s*([\d.]+)\s*(?:hours?|hrs?)/i,
+  ]);
   if (hourlyRateText) {
     const rate = Number(hourlyRateText.replace(/,/g, ''));
     const maxHours = maxHoursText ? Number(maxHoursText) : null;
-    if (Number.isFinite(rate)) return { payType: 'HOURLY' as const, payBaseAmount: null, payBaseHours: null, payHourlyRate: asMoney(rate), payHoursCap: asHours(maxHours), grossPay: maxHours !== null && Number.isFinite(maxHours) ? asMoney(rate * maxHours) : null, estimatedHours: asHours(maxHours) };
+    if (Number.isFinite(rate)) return { payType: 'HOURLY' as const, payBaseAmount: null, payBaseHours: null, payHourlyRate: asMoney(rate), payHoursCap: asHours(maxHours), grossPay: maxHours !== null && Number.isFinite(maxHours) ? asMoney(rate * maxHours) : null, estimatedHours: asHours(maxHours) ?? estimatedHoursText };
   }
-  const grossText = firstMatch(normalized, [/\b(?:Pay|Fixed Rate|To be paid|Total Pay)\s*:?\s*\$\s*([\d,.]+)/i, /\$\s*([\d,.]+)\b/]);
+  const grossText = firstMatch(normalized, [
+    /\b(?:advertised(?:\/max)?\s+pay|max(?:imum)?\s+pay|pay|fixed\s+(?:amount|rate)|to\s+be\s+paid|total\s+pay)\s*:?\s*\$\s*([\d,.]+)/i,
+    /\$\s*([\d,.]+)\b/,
+  ]);
   const gross = grossText ? Number(grossText.replace(/,/g, '')) : null;
-  return { payType: 'FIXED' as const, payBaseAmount: asMoney(gross), payBaseHours: null, payHourlyRate: null, payHoursCap: null, grossPay: asMoney(gross), estimatedHours: maxHoursText ? asHours(Number(maxHoursText)) : null };
+  return { payType: 'FIXED' as const, payBaseAmount: asMoney(gross), payBaseHours: null, payHourlyRate: null, payHoursCap: null, grossPay: asMoney(gross), estimatedHours: maxHoursText ? asHours(Number(maxHoursText)) : estimatedHoursText };
 }
 
 function dateFromEmail(text: string, receivedAt: Date | null): Date | null {
@@ -113,11 +178,27 @@ export function parseFieldNationOpportunityEmail(input: { subject: string; sende
   const haystack = `${subject}\n${body}`;
   const opportunityStatus = /assigned\s+to\s+someone\s+else/i.test(haystack) ? 'DECLINED' : /assigned\s+to\s+you/i.test(haystack) ? 'ASSIGNED' : /\bRouted WO\b|routed\s+work\s+order|dispatch\s+request/i.test(haystack) ? 'ROUTED' : /\bNew Work\b|\[Available Work Order\]|\bAvailable Work Order\b/i.test(haystack) ? 'AVAILABLE' : 'MESSAGE';
   const sourceReference = firstMatch(haystack, [/Work\s*Order\s*ID\s*:\s*#?\s*(\d{5,})/i, /Work\s*Order\s*#?\s*(\d{5,})/i, /WO\s*#\s*(\d{5,})/i, /\/workorders\/(\d{5,})\b/i]);
-  const buyerName = firstMatch(subject, [/^(.+?)\s+Routed WO:/i]) ?? firstMatch(input.sender, [/^(.+?)\s+\(Field Nation\)/i]) ?? firstMatch(`\n${body}`, [/\n([A-Za-z0-9 &.,'\-]+)\s*\/\s*\d+(?:\.\d+)?\b/]) ?? 'FieldNation';
-  let title = firstMatch(body, [/Service\s+Title\s*:\s*(.+)/i, /^\s*New Message:\s*WO\s*#?\d+\s*\n+(.+)/im, /^\s*(DISPATCH REQUEST\s*-\s*[^\n]+)/im]);
-  if (!title) title = firstMatch(subject, [/^(?:New Work|Routed WO):\s*(.+)$/i]);
+  const buyerName = cleanCandidate(firstMatch(subject, [/^(.+?)\s*[-–|]?\s*Routed WO:/i]))
+    ?? cleanCandidate(firstMatch(input.sender, [/^(.+?)\s+\(Field Nation\)/i]))
+    ?? cleanCandidate(firstMatch(`\n${body}`, [/\n([A-Za-z0-9 &.,'\-]+)\s*\/\s*\d+(?:\.\d+)?\b/]))
+    ?? 'FieldNation';
+  let title = cleanCandidate(firstMatch(body, [
+    /(?:Service|Work Order|Job|Opportunity)\s+Title\s*:\s*(.+)/i,
+    /^\s*New Message:\s*WO\s*#?\d+\s*\n+(.+)/im,
+    /^\s*(DISPATCH REQUEST\s*-\s*[^\n]+)/im,
+  ]));
+  if (!title) title = cleanCandidate(firstMatch(subject, [
+    /(?:New Work|Routed WO|Available Work Order|Work Order|WO)\s*#?\d*\s*[:\-–]\s*(.+)$/i,
+    /^\d{5,}\s*[:\-–]\s*(.+)$/i,
+  ]));
   if (!title) {
-    title = body.split('\n').map(line => line.trim()).find(line => line.length >= 8 && !/^(Pay|Schedule|Status|Location|View Work Order|View Message|Service Details|Work Order ID)\b/i.test(line) && !/^[A-Za-z .'-]+,\s*[A-Z]{2}\s*\d{5}\b/i.test(line) && !/Hourly Rate|\$\d+|\d+\s+hours?\s+max/i.test(line)) ?? null;
+    const candidate = body.split('\n').map(line => cleanCandidate(line)).find(line => line !== null
+      && line.length >= 8
+      && !/^(?:hello|hi|good morning)\b.*(?:tech|technician|assist|available|complete this wo)/i.test(line)
+      && !/^(Pay|Schedule|Status|Location|View Work Order|View Message|Service Details|Work Order ID)\b/i.test(line)
+      && !/^[A-Za-z .'-]+,\s*[A-Z]{2}\s*\d{5}\b/i.test(line)
+      && !/Hourly Rate|\$\d+|\d+\s+hours?\s+max/i.test(line));
+    title = candidate ?? null;
   }
   const place = firstMatch(haystack, [/Service\s+Location\s*:\s*([A-Za-z .'-]+,\s*[A-Z]{2}\s*\d{5}(?:-\d{4})?)/i, /\b([A-Za-z .'-]+,\s*[A-Z]{2}\s*\d{5}(?:-\d{4})?)\s*\(\s*[\d.]+\s*(?:mi|miles)/i]);
   const distance = firstMatch(haystack, [/\b(?:Location\s+)?[A-Za-z .'-]+,\s*[A-Z]{2}\s*\d{5}(?:-\d{4})?\s*\(\s*([\d.]+)\s*(?:mi|miles)(?:\s+away)?\s*\)/i, /\(([\d.]+)\s*(?:mi|miles)(?:\s+away)?\)/i]);
@@ -147,7 +228,7 @@ export function parseFieldNationOpportunityEmail(input: { subject: string; sende
   if (Number(profit.counteroffer_increase) > 0) scoreReasons.push(`+0 counter about $${Number(profit.counteroffer_gross).toFixed(2)} gross to target $${Number(profit.target_hourly).toFixed(2)}/hr`);
   score = Math.max(0, Math.min(100, Math.round(score)));
   const recommendation = score >= 80 ? 'Request this' : score >= 65 ? 'Worth reviewing' : score >= 45 ? 'Maybe if schedule is open' : 'Skip';
-  return { sourceReference, title: title?.replace(/\s+/g, ' ').trim() || null, buyerName, opportunityStatus, location: place, scheduledAt, grossPay: pay.grossPay, estimatedHours: pay.estimatedHours, mileageOneWay, payType: pay.payType, payBaseAmount: pay.payBaseAmount, payBaseHours: pay.payBaseHours, payHourlyRate: pay.payHourlyRate, payHoursCap: pay.payHoursCap, score: String(score), recommendation, scoreReasons, profitability: profit };
+  return { sourceReference, title: cleanCandidate(title), buyerName, opportunityStatus, location: cleanCandidate(place), scheduledAt, grossPay: pay.grossPay, estimatedHours: pay.estimatedHours, mileageOneWay, payType: pay.payType, payBaseAmount: pay.payBaseAmount, payBaseHours: pay.payBaseHours, payHourlyRate: pay.payHourlyRate, payHoursCap: pay.payHoursCap, score: String(score), recommendation, scoreReasons, profitability: profit };
 }
 
 export async function readFieldNationMailbox(options: { host: string; port: number; secure: boolean; user: string; password: string; folder: string; lookbackDays: number; limit: number }): Promise<FieldNationMailboxMessage[]> {

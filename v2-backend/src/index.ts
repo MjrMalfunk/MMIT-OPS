@@ -1398,6 +1398,86 @@ app.post('/api/v1/fieldnation/mailbox/scan', requireRoles(OpsUserRole.OWNER, Ops
   res.json({ data: stats });
 });
 
+app.post('/api/v1/fieldnation/mailbox/reparse', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
+  const stored = await prisma.fieldNationImport.findMany({ orderBy: { id: 'asc' } });
+  const stats = { scanned: 0, refreshed: 0, skipped: 0, errors: [] as string[] };
+  const oaiApplies = String(process.env.FIELDNATION_PROFIT_OAI_APPLIES ?? 'false').toLowerCase() === 'true';
+
+  for (const existing of stored) {
+    const currentData = existing.parsedData && typeof existing.parsedData === 'object' && !Array.isArray(existing.parsedData)
+      ? existing.parsedData as Record<string, unknown>
+      : {};
+    const currentOpportunity = currentData.opportunity && typeof currentData.opportunity === 'object' && !Array.isArray(currentData.opportunity)
+      ? currentData.opportunity as Record<string, unknown>
+      : {};
+    if (currentOpportunity.source !== 'FIELDNATION_IMAP') {
+      stats.skipped += 1;
+      continue;
+    }
+    stats.scanned += 1;
+    try {
+      const parsed = parseFieldNationOpportunityEmail({
+        subject: existing.subject ?? '',
+        sender: existing.sender ?? '',
+        rawText: existing.rawText,
+        receivedAt: existing.receivedAt,
+        oaiApplies,
+      });
+      const status = parsed.sourceReference && parsed.title && parsed.grossPay ? FieldNationImportStatus.PARSED : FieldNationImportStatus.REVIEW_REQUIRED;
+      const updated = await prisma.$transaction(async (tx) => {
+        const item = await tx.fieldNationImport.update({
+          where: { id: existing.id },
+          data: {
+            status,
+            sourceReference: parsed.sourceReference,
+            title: parsed.title,
+            location: parsed.location,
+            scheduledAt: parsed.scheduledAt,
+            grossPay: parsed.grossPay,
+            payType: parsed.payType as WorkOrderPayType,
+            payBaseAmount: parsed.payBaseAmount,
+            payBaseHours: parsed.payBaseHours,
+            payHourlyRate: parsed.payHourlyRate,
+            payHoursCap: parsed.payHoursCap,
+            estimatedHours: parsed.estimatedHours,
+            mileage: parsed.mileageOneWay,
+            score: parsed.score,
+            parsedData: {
+              ...currentData,
+              scoreReasons: parsed.scoreReasons,
+              payType: parsed.payType,
+              payBaseAmount: parsed.payBaseAmount,
+              payBaseHours: parsed.payBaseHours,
+              payHourlyRate: parsed.payHourlyRate,
+              payHoursCap: parsed.payHoursCap,
+              opportunity: {
+                ...currentOpportunity,
+                source: 'FIELDNATION_IMAP',
+                status: parsed.opportunityStatus,
+                buyerName: parsed.buyerName,
+                distanceKind: 'ONE_WAY',
+                recommendation: parsed.recommendation,
+                profitability: parsed.profitability,
+              },
+            } as Prisma.InputJsonValue,
+          },
+          include: { workOrder: true },
+        });
+        await writeAuditEvent(tx, req.auth!, 'fieldnation.mailbox_reparsed', 'fieldnation_import', item.id.toString(), {
+          sourceReference: item.sourceReference,
+          score: item.score?.toFixed(2) ?? null,
+          parser: 'opportunity-v2',
+        });
+        return item;
+      });
+      if (updated) stats.refreshed += 1;
+    } catch (error) {
+      stats.errors.push(`${existing.id}: ${error instanceof Error ? error.message : 'An unknown parser-refresh error occurred.'}`);
+    }
+  }
+  res.json({ data: stats });
+});
+
 app.patch('/api/v1/fieldnation/imports/:id/opportunity-decision', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
   const decision = req.body?.decision;
   if (!['REVIEW', 'WATCHING', 'IGNORED'].includes(decision)) { res.status(400).json({ error: 'decision must be REVIEW, WATCHING, or IGNORED.' }); return; }

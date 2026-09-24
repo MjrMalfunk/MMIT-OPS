@@ -42,9 +42,10 @@
     let panel = document.getElementById('fnOpportunityQueue');
     if (!panel) {
       panel = document.createElement('section'); panel.id = 'fnOpportunityQueue'; panel.className = 'card'; panel.style.marginTop = '18px';
-      panel.innerHTML = '<div class="actions" style="justify-content:space-between;align-items:center"><div><h2 style="margin-bottom:3px">FieldNation opportunity queue</h2><small class="muted">Read-only scan of the existing FieldNation mail folder.</small></div><button id="fnScanMailbox" type="button">Import opportunity email</button></div><div id="fnQueueBody" style="margin-top:14px"></div>';
+      panel.innerHTML = '<div class="actions" style="justify-content:space-between;align-items:center"><div><h2 style="margin-bottom:3px">FieldNation opportunity queue</h2><small class="muted">Read-only scan of the existing FieldNation mail folder.</small></div><div class="actions" style="justify-content:flex-end"><button id="fnRefreshParser" class="secondary" type="button">Refresh parsed data</button><button id="fnScanMailbox" type="button">Import opportunity email</button></div></div><div id="fnQueueBody" style="margin-top:14px"></div>';
       document.getElementById('imports')?.closest('section')?.after(panel);
       panel.querySelector('#fnScanMailbox').onclick = scan;
+      panel.querySelector('#fnRefreshParser').onclick = refreshParser;
     }
     ensureStyles();
     // Mail folders also contain follow-up/message notifications. Keep those
@@ -72,6 +73,7 @@
     body.querySelectorAll('[data-fn-request]').forEach(button => button.onclick = async () => { if (!confirm('Create a REQUESTED-stage work order only? This does not accept or schedule the FieldNation job.')) return; try { await window.api(`/api/v1/fieldnation/imports/${button.dataset.fnRequest}/convert`, { method: 'POST' }); await window.load(); } catch (error) { alert(error.message); } });
     body.querySelectorAll('[data-fn-watch],[data-fn-ignore]').forEach(button => button.onclick = async () => { const decision = button.dataset.fnWatch ? 'WATCHING' : 'IGNORED'; try { await window.api(`/api/v1/fieldnation/imports/${button.dataset.fnWatch || button.dataset.fnIgnore}/opportunity-decision`, { method: 'PATCH', body: JSON.stringify({ decision }) }); await window.load(); } catch (error) { alert(error.message); } });
   }
+  async function refreshParser() { const button = document.getElementById('fnRefreshParser'); button.disabled = true; button.textContent = 'Refreshing…'; try { const result = await window.api('/api/v1/fieldnation/mailbox/reparse', { method: 'POST' }); const stats = result.data; alert(`Parser refresh complete: ${stats.refreshed} email opportunities refreshed.${stats.errors.length ? ` ${stats.errors.length} error(s); see API logs.` : ''}`); await window.load(); } catch (error) { alert(error.message); } finally { button.disabled = false; button.textContent = 'Refresh parsed data'; } }
   async function scan() { const button = document.getElementById('fnScanMailbox'); button.disabled = true; button.textContent = 'Importing…'; try { const result = await window.api('/api/v1/fieldnation/mailbox/scan', { method: 'POST', body: JSON.stringify({ limit: 25 }) }); const stats = result.data; alert(`Mailbox scan complete: ${stats.imported} imported, ${stats.duplicates} already known.${stats.errors.length ? ` ${stats.errors.length} error(s); see API logs.` : ''}`); await window.load(); } catch (error) { alert(error.message); } finally { button.disabled = false; button.textContent = 'Import opportunity email'; } }
   if (typeof original === 'function') window.renderImports = rows => { original(rows); mount(rows); };
 })();
