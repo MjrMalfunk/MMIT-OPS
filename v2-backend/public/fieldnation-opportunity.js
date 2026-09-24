@@ -14,7 +14,12 @@
     // Mail folders also contain follow-up/message notifications. Keep those
     // in the regular intake list, but only show actionable opportunity events
     // here. Collapse repeated notices for the same W/O to the newest row.
-    const actionable = rows.filter(meta).filter(item => ['AVAILABLE', 'ROUTED', 'ASSIGNED'].includes(meta(item).status)).filter(item => meta(item).decision !== 'IGNORED');
+    const looksLikeFollowUp = item => {
+      const subject = String(item.subject || '');
+      const title = String(item.title || '');
+      return /\bnew message\b|still need(?: a)? tech|anyone assist|technician that can complete|available to assist|we are in need of a technician|good morning.*available/i.test(`${subject} ${title}`);
+    };
+    const actionable = rows.filter(meta).filter(item => ['AVAILABLE', 'ROUTED', 'ASSIGNED'].includes(meta(item).status)).filter(item => !looksLikeFollowUp(item)).filter(item => meta(item).decision !== 'IGNORED');
     const seen = new Set();
     const queue = actionable.filter(item => {
       const key = item.sourceReference || item.id;
