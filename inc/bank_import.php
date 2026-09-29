@@ -6,7 +6,8 @@ require_once __DIR__ . '/db.php';
 function accounting_bank_import_ready(): bool
 {
     return db_table_exists('bank_import_batch')
-        && db_table_exists('bank_import_transaction');
+        && db_table_exists('bank_import_transaction')
+        && db_table_exists('bank_import_transaction_split');
 }
 
 function accounting_bank_import_normalize_description(
@@ -48,6 +49,241 @@ function accounting_bank_import_parse_amount(string $raw): ?float
     }
 
     return $amount;
+}
+
+function accounting_bank_import_amount_cents(
+    string|int|float $amount
+): ?int {
+    $raw = is_float($amount)
+        ? number_format($amount, 2, '.', '')
+        : trim((string)$amount);
+
+    if (!preg_match('/^(-?)(\d+)(?:\.(\d{1,2}))?$/', $raw, $match)) {
+        return null;
+    }
+
+    $wholeDigits = ltrim($match[2], '0');
+
+    if (strlen($wholeDigits) > 10) {
+        return null;
+    }
+
+    $whole = (int)$match[2];
+    $fraction = (int)str_pad($match[3] ?? '', 2, '0');
+    $cents = ($whole * 100) + $fraction;
+
+    return ($match[1] ?? '') === '-' ? -$cents : $cents;
+}
+
+function accounting_bank_import_format_cents(int $cents): string
+{
+    $negative = $cents < 0;
+    $absolute = abs($cents);
+
+    return ($negative ? '-' : '')
+        . intdiv($absolute, 100)
+        . '.'
+        . str_pad((string)($absolute % 100), 2, '0', STR_PAD_LEFT);
+}
+
+function accounting_bank_import_normalize_split_allocations(
+    array $rawAllocations,
+    int $expectedCents
+): array {
+    if (count($rawAllocations) > 12) {
+        return [
+            'ok' => false,
+            'errors' => ['A transaction can have at most 12 split lines.'],
+            'allocations' => [],
+        ];
+    }
+
+    $allocations = [];
+    $errors = [];
+    $totalCents = 0;
+
+    foreach ($rawAllocations as $raw) {
+        if (!is_array($raw)) {
+            $errors[] = 'A split line is malformed.';
+            continue;
+        }
+
+        $accountRaw = trim((string)($raw['account_id'] ?? ''));
+        $amountRaw = trim((string)($raw['amount'] ?? ''));
+        $note = trim((string)($raw['note'] ?? ''));
+
+        if ($accountRaw === '' && $amountRaw === '' && $note === '') {
+            continue;
+        }
+
+        if (
+            $accountRaw === ''
+            || !preg_match('/^[1-9]\d*$/', $accountRaw)
+            || $amountRaw === ''
+        ) {
+            $errors[] = 'Each used split line needs an account and amount.';
+            continue;
+        }
+
+        $accountId = (int)$accountRaw;
+        $amountCents = accounting_bank_import_amount_cents($amountRaw);
+
+        if ($accountId <= 0 || $amountCents === null || $amountCents <= 0) {
+            $errors[] = 'Each split amount must be greater than zero.';
+            continue;
+        }
+
+        $noteLength = function_exists('mb_strlen')
+            ? mb_strlen($note, 'UTF-8')
+            : strlen($note);
+
+        if ($noteLength > 255) {
+            $errors[] = 'Split line notes must be 255 characters or less.';
+            continue;
+        }
+
+        $allocations[] = [
+            'account_id' => $accountId,
+            'amount_cents' => $amountCents,
+            'amount' => accounting_bank_import_format_cents($amountCents),
+            'note' => $note,
+        ];
+        $totalCents += $amountCents;
+    }
+
+    if (count($allocations) === 1) {
+        $errors[] = 'A split needs at least two account lines.';
+    }
+
+    if (
+        $allocations
+        && $totalCents !== $expectedCents
+    ) {
+        $errors[] = sprintf(
+            'Split lines total $%s; the transaction is $%s.',
+            accounting_bank_import_format_cents($totalCents),
+            accounting_bank_import_format_cents($expectedCents)
+        );
+    }
+
+    return [
+        'ok' => !$errors,
+        'errors' => array_values(array_unique($errors)),
+        'allocations' => $allocations,
+    ];
+}
+
+function accounting_bank_import_build_journal_lines(
+    array $transaction,
+    int $bankAccountId
+): array {
+    $signedCents = accounting_bank_import_amount_cents(
+        (string)($transaction['signed_amount'] ?? '')
+    );
+
+    if ($bankAccountId <= 0 || $signedCents === null || $signedCents === 0) {
+        throw new InvalidArgumentException('The bank transaction amount is invalid.');
+    }
+
+    $amountCents = abs($signedCents);
+    $description = trim((string)($transaction['description_raw'] ?? ''));
+    $defaultMemo = function_exists('mb_substr')
+        ? mb_substr($description, 0, 255)
+        : substr($description, 0, 255);
+    $splits = $transaction['split_allocations'] ?? [];
+    $offsets = [];
+
+    if (is_array($splits) && $splits) {
+        $splitTotalCents = 0;
+
+        foreach ($splits as $split) {
+            $accountId = (int)($split['account_id'] ?? 0);
+            $splitAmount = accounting_bank_import_amount_cents(
+                (string)($split['split_amount'] ?? $split['amount'] ?? '')
+            );
+
+            if (
+                $accountId <= 0
+                || $accountId === $bankAccountId
+                || $splitAmount === null
+                || $splitAmount <= 0
+            ) {
+                throw new InvalidArgumentException('A split line is invalid.');
+            }
+
+            $splitTotalCents += $splitAmount;
+            $splitMemo = trim((string)($split['split_note'] ?? $split['note'] ?? ''));
+            $splitMemo = $splitMemo !== '' ? $splitMemo : $defaultMemo;
+            $splitMemo = function_exists('mb_substr')
+                ? mb_substr($splitMemo, 0, 255)
+                : substr($splitMemo, 0, 255);
+
+            $offsets[] = [
+                'account_id' => $accountId,
+                'amount' => accounting_bank_import_format_cents($splitAmount),
+                'memo' => $splitMemo,
+            ];
+        }
+
+        if (count($offsets) < 2 || $splitTotalCents !== $amountCents) {
+            throw new InvalidArgumentException('Split lines do not equal the transaction amount.');
+        }
+    } else {
+        $offsetAccountId = (int)($transaction['selected_account_id'] ?? 0);
+
+        if ($offsetAccountId <= 0 || $offsetAccountId === $bankAccountId) {
+            throw new InvalidArgumentException('The offsetting account is invalid.');
+        }
+
+        $offsets[] = [
+            'account_id' => $offsetAccountId,
+            'amount' => accounting_bank_import_format_cents($amountCents),
+            'memo' => $defaultMemo,
+        ];
+    }
+
+    $lines = [];
+    $lineNumber = 1;
+
+    if ($signedCents > 0) {
+        $lines[] = [
+            'line_number' => $lineNumber++,
+            'account_id' => $bankAccountId,
+            'debit_amount' => accounting_bank_import_format_cents($amountCents),
+            'credit_amount' => '0.00',
+            'line_memo' => 'Bank deposit',
+        ];
+
+        foreach ($offsets as $offset) {
+            $lines[] = [
+                'line_number' => $lineNumber++,
+                'account_id' => $offset['account_id'],
+                'debit_amount' => '0.00',
+                'credit_amount' => $offset['amount'],
+                'line_memo' => $offset['memo'],
+            ];
+        }
+    } else {
+        foreach ($offsets as $offset) {
+            $lines[] = [
+                'line_number' => $lineNumber++,
+                'account_id' => $offset['account_id'],
+                'debit_amount' => $offset['amount'],
+                'credit_amount' => '0.00',
+                'line_memo' => $offset['memo'],
+            ];
+        }
+
+        $lines[] = [
+            'line_number' => $lineNumber,
+            'account_id' => $bankAccountId,
+            'debit_amount' => '0.00',
+            'credit_amount' => accounting_bank_import_format_cents($amountCents),
+            'line_memo' => 'Bank withdrawal',
+        ];
+    }
+
+    return $lines;
 }
 
 function accounting_bank_import_parse_date(string $raw): ?string
@@ -665,7 +901,8 @@ function accounting_bank_import_save_review(
     string $reviewStatus,
     string $settlementStatus,
     ?int $selectedAccountId,
-    string $notes
+    string $notes,
+    array $splitAllocations = []
 ): array {
     $classification = strtoupper(trim($classification));
     $reviewStatus = strtoupper(trim($reviewStatus));
@@ -679,8 +916,10 @@ function accounting_bank_import_save_review(
         ];
     }
 
-    $transaction = db()->prepare("
+    $pdo = db();
+    $transaction = $pdo->prepare("
         SELECT t.account_id,
+               t.signed_amount,
                b.status AS batch_status
         FROM bank_import_transaction t
         INNER JOIN bank_import_batch b
@@ -752,6 +991,86 @@ function accounting_bank_import_save_review(
         $reviewStatus = 'UNREVIEWED';
     }
 
+    $signedCents = accounting_bank_import_amount_cents(
+        (string)$transactionRow['signed_amount']
+    );
+
+    if ($signedCents === null || $signedCents === 0) {
+        return [
+            'ok' => false,
+            'errors' => ['The imported transaction has an invalid amount.'],
+        ];
+    }
+
+    $normalizedSplits =
+        accounting_bank_import_normalize_split_allocations(
+            $splitAllocations,
+            abs($signedCents)
+        );
+
+    if (empty($normalizedSplits['ok'])) {
+        return [
+            'ok' => false,
+            'errors' => $normalizedSplits['errors'],
+        ];
+    }
+
+    $splitAllocations = $normalizedSplits['allocations'];
+
+    if ($splitAllocations) {
+        if ($reviewStatus !== 'READY' || $settlementStatus !== 'POSTED') {
+            return [
+                'ok' => false,
+                'errors' => [
+                    'Split lines can be saved only for a Ready transaction '
+                    . 'that has posted at the bank.',
+                ],
+            ];
+        }
+
+        $classification = 'SPLIT_REQUIRED';
+        $selectedAccountId = null;
+    } elseif (
+        $classification === 'SPLIT_REQUIRED'
+        && $reviewStatus === 'READY'
+    ) {
+        return [
+            'ok' => false,
+            'errors' => [
+                'Add at least two split lines before marking this transaction Ready.',
+            ],
+        ];
+    }
+
+    foreach ($splitAllocations as $split) {
+        if ((int)$split['account_id'] === (int)$transactionRow['account_id']) {
+            return [
+                'ok' => false,
+                'errors' => [
+                    'A split line cannot use the bank account being imported.',
+                ],
+            ];
+        }
+
+        $splitAccount = $pdo->prepare("
+            SELECT account_id
+            FROM gl_account
+            WHERE account_id = ?
+              AND is_active = 1
+            LIMIT 1
+        ");
+        $splitAccount->execute([(int)$split['account_id']]);
+
+        if ($splitAccount->fetchColumn() === false) {
+            return [
+                'ok' => false,
+                'errors' => [
+                    'Every split line must use an active accounting account.',
+                ],
+            ];
+        }
+    }
+
     if ($selectedAccountId !== null) {
         $account = db()->prepare("
             SELECT account_id
@@ -785,6 +1104,7 @@ function accounting_bank_import_save_review(
     if (
         $reviewStatus === 'READY'
         && $selectedAccountId === null
+        && !$splitAllocations
     ) {
         return [
             'ok' => false,
@@ -795,43 +1115,111 @@ function accounting_bank_import_save_review(
         ];
     }
 
-    $statement = db()->prepare("
-        UPDATE bank_import_transaction t
-        INNER JOIN bank_import_batch b
-            ON b.batch_id = t.batch_id
-        SET t.classification = ?,
-            t.review_status = ?,
-            t.settlement_status = ?,
-            t.selected_account_id = ?,
-            t.notes = ?
-        WHERE t.bank_transaction_id = ?
-          AND t.batch_id = ?
-          AND b.status = 'PREVIEW'
-          AND t.review_status <> 'POSTED'
-          AND t.posted_journal_id IS NULL
-        LIMIT 1
-    ");
-    $statement->execute([
-        $classification,
-        $reviewStatus,
-        $settlementStatus,
-        $selectedAccountId,
-        $notes !== '' ? $notes : null,
-        $transactionId,
-        $batchId,
-    ]);
+    try {
+        $pdo->beginTransaction();
 
-    if ($statement->rowCount() !== 1) {
+        $statement = $pdo->prepare("
+            UPDATE bank_import_transaction t
+            INNER JOIN bank_import_batch b
+                ON b.batch_id = t.batch_id
+            SET t.classification = ?,
+                t.review_status = ?,
+                t.settlement_status = ?,
+                t.selected_account_id = ?,
+                t.notes = ?
+            WHERE t.bank_transaction_id = ?
+              AND t.batch_id = ?
+              AND b.status = 'PREVIEW'
+              AND t.review_status NOT IN ('POSTED', 'MATCHED')
+              AND t.posted_journal_id IS NULL
+            LIMIT 1
+        ");
+        $statement->execute([
+            $classification,
+            $reviewStatus,
+            $settlementStatus,
+            $selectedAccountId,
+            $notes !== '' ? $notes : null,
+            $transactionId,
+            $batchId,
+        ]);
+
+        $verify = $pdo->prepare("
+            SELECT t.bank_transaction_id
+            FROM bank_import_transaction t
+            INNER JOIN bank_import_batch b
+                ON b.batch_id = t.batch_id
+            WHERE t.bank_transaction_id = ?
+              AND t.batch_id = ?
+              AND b.status = 'PREVIEW'
+              AND t.review_status NOT IN ('POSTED', 'MATCHED')
+              AND t.posted_journal_id IS NULL
+            LIMIT 1
+            FOR UPDATE
+        ");
+        $verify->execute([$transactionId, $batchId]);
+
+        if ($verify->fetchColumn() === false) {
+            $pdo->rollBack();
+            return [
+                'ok' => false,
+                'errors' => [
+                    'The transaction was not updated. It may already '
+                    . 'be posted or may not belong to this batch.',
+                ],
+            ];
+        }
+
+        $deleteSplits = $pdo->prepare("
+            DELETE FROM bank_import_transaction_split
+            WHERE bank_transaction_id = ?
+        ");
+        $deleteSplits->execute([$transactionId]);
+
+        if ($splitAllocations) {
+            $insertSplit = $pdo->prepare("
+                INSERT INTO bank_import_transaction_split
+                    (bank_transaction_id, split_sequence, account_id,
+                     split_amount, split_note)
+                VALUES (?, ?, ?, ?, ?)
+            ");
+
+            foreach ($splitAllocations as $index => $split) {
+                $insertSplit->execute([
+                    $transactionId,
+                    $index + 1,
+                    $split['account_id'],
+                    $split['amount'],
+                    $split['note'] !== '' ? $split['note'] : null,
+                ]);
+            }
+        }
+
+        $pdo->commit();
+
+        return [
+            'ok' => true,
+            'classification' => $classification,
+            'selected_account_id' => $selectedAccountId,
+            'split_lines' => array_map(
+                static fn(array $split): array => [
+                    'account_id' => $split['account_id'],
+                    'amount' => $split['amount'],
+                    'note' => $split['note'],
+                ],
+                $splitAllocations
+            ),
+        ];
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+
         return [
             'ok' => false,
-            'errors' => [
-                'The transaction was not updated. It may already '
-                . 'be posted or may not belong to this batch.',
-            ],
+            'errors' => ['Unable to save the review: ' . $e->getMessage()],
         ];
     }
-
-    return ['ok' => true];
 }
 
 function accounting_bank_import_preflight(
@@ -885,6 +1273,35 @@ function accounting_bank_import_preflight(
     ");
     $transactionStatement->execute([$batchId]);
     $transactions = $transactionStatement->fetchAll(PDO::FETCH_ASSOC);
+
+    $splitStatement = $pdo->prepare("
+        SELECT s.bank_transaction_id,
+               s.split_sequence,
+               s.account_id,
+               s.split_amount,
+               s.split_note,
+               a.is_active AS split_account_active
+        FROM bank_import_transaction_split s
+        INNER JOIN bank_import_transaction t
+            ON t.bank_transaction_id = s.bank_transaction_id
+        LEFT JOIN gl_account a
+            ON a.account_id = s.account_id
+        WHERE t.batch_id = ?
+        ORDER BY s.bank_transaction_id, s.split_sequence{$lockSql}
+    ");
+    $splitStatement->execute([$batchId]);
+    $splitsByTransaction = [];
+
+    foreach ($splitStatement->fetchAll(PDO::FETCH_ASSOC) as $split) {
+        $splitsByTransaction[(int)$split['bank_transaction_id']][] = $split;
+    }
+
+    foreach ($transactions as $index => $transaction) {
+        $transactionId = (int)$transaction['bank_transaction_id'];
+        $transactions[$index]['split_allocations'] =
+            $splitsByTransaction[$transactionId] ?? [];
+    }
+
     $errors = [];
     $readyCount = 0;
     $ignoredCount = 0;
@@ -956,6 +1373,10 @@ function accounting_bank_import_preflight(
         }
 
         if ($reviewStatus === 'IGNORED') {
+            if (!empty($transaction['split_allocations'])) {
+                $errors[] = "Ignored transaction #{$transactionId} still has split lines.";
+            }
+
             ++$ignoredCount;
             continue;
         }
@@ -967,7 +1388,52 @@ function accounting_bank_import_preflight(
 
         ++$readyCount;
 
-        if (empty($transaction['selected_account_id'])) {
+        $allocations = $transaction['split_allocations'] ?? [];
+
+        if ($allocations) {
+            if ((string)$transaction['classification'] !== 'SPLIT_REQUIRED') {
+                $errors[] = "Transaction #{$transactionId} has split lines but is not marked Split required.";
+            }
+
+            if (count($allocations) < 2) {
+                $errors[] = "Transaction #{$transactionId} needs at least two split lines.";
+            }
+
+            $splitTotalCents = 0;
+
+            foreach ($allocations as $split) {
+                $splitAccountId = (int)$split['account_id'];
+                $splitCents = accounting_bank_import_amount_cents(
+                    (string)$split['split_amount']
+                );
+
+                if ($splitCents === null || $splitCents <= 0) {
+                    $errors[] = "Transaction #{$transactionId} has an invalid split amount.";
+                    continue;
+                }
+
+                $splitTotalCents += $splitCents;
+
+                if ($splitAccountId === (int)$batch['account_id']) {
+                    $errors[] = "Transaction #{$transactionId} uses the bank account as a split offset.";
+                } elseif ((int)($split['split_account_active'] ?? 0) !== 1) {
+                    $errors[] = "Transaction #{$transactionId} uses an inactive split account.";
+                }
+            }
+
+            $transactionCents = accounting_bank_import_amount_cents(
+                (string)$transaction['signed_amount']
+            );
+
+            if (
+                $transactionCents === null
+                || $splitTotalCents !== abs($transactionCents)
+            ) {
+                $errors[] = "Transaction #{$transactionId} split lines do not equal the bank amount.";
+            }
+        } elseif ((string)$transaction['classification'] === 'SPLIT_REQUIRED') {
+            $errors[] = "Transaction #{$transactionId} is marked Split required but has no split lines.";
+        } elseif (empty($transaction['selected_account_id'])) {
             $errors[] = "Transaction #{$transactionId} has no offsetting account.";
         } elseif (
             (int)$transaction['selected_account_id']
@@ -1119,9 +1585,6 @@ function accounting_bank_import_post_batch(
 
             $reference = sprintf('BANK-B%d-T%d', $batchId, $transactionId);
             $memo = trim((string)$transaction['description_raw']);
-            $lineMemo = function_exists('mb_substr')
-                ? mb_substr($memo, 0, 255)
-                : substr($memo, 0, 255);
             $journal->execute([
                 (string)$transaction['transaction_date'],
                 $transactionId,
@@ -1130,14 +1593,21 @@ function accounting_bank_import_post_batch(
                 $userId,
             ]);
             $journalId = (int)$pdo->lastInsertId();
-            $offsetAccountId = (int)$transaction['selected_account_id'];
 
-            if ($signedAmount > 0) {
-                $line->execute([$journalId, 1, $bankAccountId, $amount, 0, 'Bank deposit']);
-                $line->execute([$journalId, 2, $offsetAccountId, 0, $amount, $lineMemo]);
-            } else {
-                $line->execute([$journalId, 1, $offsetAccountId, $amount, 0, $lineMemo]);
-                $line->execute([$journalId, 2, $bankAccountId, 0, $amount, 'Bank withdrawal']);
+            foreach (
+                accounting_bank_import_build_journal_lines(
+                    $transaction,
+                    $bankAccountId
+                ) as $journalLine
+            ) {
+                $line->execute([
+                    $journalId,
+                    $journalLine['line_number'],
+                    $journalLine['account_id'],
+                    $journalLine['debit_amount'],
+                    $journalLine['credit_amount'],
+                    $journalLine['line_memo'],
+                ]);
             }
 
             $link->execute([$journalId, $transactionId, $batchId]);
@@ -1492,8 +1962,43 @@ function accounting_bank_import_transactions(int $batchId): array
         ORDER BY t.csv_row_number
     ");
     $statement->execute([$batchId]);
+    $transactions = $statement->fetchAll(PDO::FETCH_ASSOC);
 
-    return $statement->fetchAll();
+    if (!$transactions) {
+        return [];
+    }
+
+    $splitStatement = db()->prepare("
+        SELECT s.bank_transaction_id,
+               s.split_sequence,
+               s.account_id,
+               s.split_amount,
+               s.split_note,
+               a.account_code,
+               a.account_name,
+               a.account_type
+        FROM bank_import_transaction_split s
+        INNER JOIN bank_import_transaction t
+            ON t.bank_transaction_id = s.bank_transaction_id
+        INNER JOIN gl_account a
+            ON a.account_id = s.account_id
+        WHERE t.batch_id = ?
+        ORDER BY t.csv_row_number, s.split_sequence
+    ");
+    $splitStatement->execute([$batchId]);
+    $splitsByTransaction = [];
+
+    foreach ($splitStatement->fetchAll(PDO::FETCH_ASSOC) as $split) {
+        $splitsByTransaction[(int)$split['bank_transaction_id']][] = $split;
+    }
+
+    foreach ($transactions as $index => $transaction) {
+        $transactionId = (int)$transaction['bank_transaction_id'];
+        $transactions[$index]['split_allocations'] =
+            $splitsByTransaction[$transactionId] ?? [];
+    }
+
+    return $transactions;
 }
 
 function accounting_bank_import_discard_preview_batch(

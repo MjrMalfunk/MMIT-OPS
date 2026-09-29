@@ -86,6 +86,11 @@ if (
         $selectedReviewAccountRaw === ''
             ? null
             : (int)$selectedReviewAccountRaw;
+    $reviewSplitAllocations = is_array(
+        $_POST['split_allocations'] ?? null
+    )
+        ? $_POST['split_allocations']
+        : [];
 
     $result = accounting_bank_import_save_review(
         $transactionId,
@@ -94,7 +99,8 @@ if (
         (string)($_POST['review_status'] ?? ''),
         (string)($_POST['settlement_status'] ?? ''),
         $selectedReviewAccountId,
-        (string)($_POST['notes'] ?? '')
+        (string)($_POST['notes'] ?? ''),
+        $reviewSplitAllocations
     );
 
     if (empty($result['ok'])) {
@@ -110,6 +116,11 @@ if (
             [
                 'batch_id' => $batchId,
                 'bank_transaction_id' => $transactionId,
+                'classification' =>
+                    (string)($result['classification'] ?? ''),
+                'selected_account_id' =>
+                    $result['selected_account_id'] ?? null,
+                'split_lines' => $result['split_lines'] ?? [],
                 'review_status' =>
                     (string)($_POST['review_status'] ?? ''),
                 'settlement_status' =>
@@ -257,7 +268,8 @@ if (
         );
 
     if (!$ready) {
-        $errors[] = 'Bank import tables are not installed.';
+        $errors[] =
+            'Bank import tables or the transaction-split migration are not installed.';
     } elseif ($selectedAccountId <= 0) {
         $errors[] = 'Choose a bank account.';
     } elseif (
@@ -573,6 +585,30 @@ accounting_subnav('bank_import');
   gap:5px 14px;
   padding-top:2px;
 }
+.bank-import-review-splits{
+  grid-column:1 / -1;
+  display:grid;
+  gap:10px;
+  padding:13px;
+  border:1px solid rgba(96,165,250,.28);
+  border-radius:12px;
+  background:rgba(30,41,59,.34);
+}
+.bank-import-review-splits[hidden]{display:none!important}
+.bank-import-split-rows{display:grid;gap:9px}
+.bank-import-split-row{
+  display:grid;
+  grid-template-columns:minmax(200px,1.5fr) minmax(120px,.7fr) minmax(170px,1.2fr) auto;
+  gap:9px;
+  align-items:end;
+}
+.bank-import-split-row label{display:grid;gap:5px;min-width:0;color:#cbd5e1;font-size:12px;font-weight:700}
+.bank-import-split-row input,.bank-import-split-row select{width:100%;min-width:0;box-sizing:border-box;padding:9px 10px}
+.bank-import-split-remove{min-height:38px}
+.bank-import-split-total{display:flex;flex-wrap:wrap;gap:5px 16px;align-items:center;font-size:13px}
+.bank-import-split-error{color:#fecaca;font-weight:700}
+.bank-import-locked-splits{display:grid;gap:5px;padding-top:4px}
+.bank-import-locked-split{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline}
 .bank-import-review-locked{
   display:grid;
   gap:7px;
@@ -582,9 +618,11 @@ accounting_subnav('bank_import');
   .bank-import-review{
     grid-template-columns:repeat(2,minmax(0,1fr));
   }
-  .bank-import-review-notes{
+  .bank-import-review-notes,
+  .bank-import-review-splits{
     grid-column:1 / -1;
   }
+  .bank-import-split-row{grid-template-columns:repeat(2,minmax(0,1fr))}
   .bank-import-review-submit{
     grid-column:1 / -1;
   }
@@ -602,10 +640,12 @@ accounting_subnav('bank_import');
     padding:13px;
   }
   .bank-import-review-notes,
+  .bank-import-review-splits,
   .bank-import-review-submit,
   .bank-import-review-foot{
     grid-column:1;
   }
+  .bank-import-split-row{grid-template-columns:1fr}
 }
 @media(max-width:1000px){.bank-import-grid{grid-template-columns:1fr}.bank-import-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:650px){.bank-import-fields,.bank-import-summary{grid-template-columns:1fr}}
@@ -857,6 +897,16 @@ accounting_subnav('bank_import');
 
             $signedAmount =
                 (float)$transaction['signed_amount'];
+            $existingSplitAllocations =
+                $transaction['split_allocations'] ?? [];
+            $splitMode =
+                $currentTreatment === 'SPLIT_REQUIRED'
+                || !empty($existingSplitAllocations);
+            $splitRowsForForm = $existingSplitAllocations;
+
+            if ($splitMode && !$splitRowsForForm) {
+                $splitRowsForForm = [[], []];
+            }
             ?>
 
             <article class="bank-import-transaction">
@@ -897,7 +947,20 @@ accounting_subnav('bank_import');
                     <?= accounting_h((string)$transaction['review_status']) ?>
                   </div>
 
-                  <?php if (!empty($transaction['selected_account_code'])): ?>
+                  <?php if ($existingSplitAllocations): ?>
+                    <div class="bank-import-locked-splits">
+                      <strong>Split allocation</strong>
+                      <?php foreach ($existingSplitAllocations as $split): ?>
+                        <div class="bank-import-locked-split">
+                          <span>$<?= number_format((float)$split['split_amount'], 2) ?></span>
+                          <span><?= accounting_h((string)$split['account_code']) ?> · <?= accounting_h((string)$split['account_name']) ?></span>
+                          <?php if (!empty($split['split_note'])): ?>
+                            <span class="bank-import-meta">· <?= accounting_h((string)$split['split_note']) ?></span>
+                          <?php endif; ?>
+                        </div>
+                      <?php endforeach; ?>
+                    </div>
+                  <?php elseif (!empty($transaction['selected_account_code'])): ?>
                     <div>
                       <?= accounting_h((string)$transaction['selected_account_code']) ?>
                       ·
@@ -949,7 +1012,11 @@ accounting_subnav('bank_import');
 
                   <label>
                     Account
-                    <select name="selected_account_id">
+                    <select
+                      name="selected_account_id"
+                      data-split-single-account
+                      <?= $splitMode ? 'disabled' : '' ?>
+                    >
                       <option value="">Choose account</option>
 
                       <?php foreach ($reviewAccountOptions as $account): ?>
@@ -965,6 +1032,141 @@ accounting_subnav('bank_import');
                       <?php endforeach; ?>
                     </select>
                   </label>
+
+                  <div
+                    class="bank-import-review-splits"
+                    data-split-panel
+                    data-expected-cents="<?= abs((int)round($signedAmount * 100)) ?>"
+                    <?= $splitMode ? '' : 'hidden' ?>
+                  >
+                    <div>
+                      <strong>Split this transaction across accounts</strong>
+                      <div class="bank-import-meta">
+                        Enter positive amounts that add up to exactly
+                        $<?= number_format(abs($signedAmount), 2) ?>.
+                        Each line posts to its selected account.
+                      </div>
+                    </div>
+
+                    <div class="bank-import-split-rows" data-split-rows>
+                      <?php foreach ($splitRowsForForm as $splitIndex => $split): ?>
+                        <div class="bank-import-split-row" data-split-row>
+                          <label>
+                            Account
+                            <select
+                              class="bank-import-review-split-control"
+                              name="split_allocations[<?= (int)$splitIndex ?>][account_id]"
+                              required
+                              <?= $splitMode ? '' : 'disabled' ?>
+                            >
+                              <option value="">Choose account</option>
+                              <?php foreach ($reviewAccountOptions as $account): ?>
+                                <option
+                                  value="<?= (int)$account['account_id'] ?>"
+                                  <?= (int)($split['account_id'] ?? 0) === (int)$account['account_id'] ? 'selected' : '' ?>
+                                >
+                                  <?= accounting_h((string)$account['account_code']) ?>
+                                  · <?= accounting_h((string)$account['account_name']) ?>
+                                  (<?= accounting_h((string)$account['account_type']) ?>)
+                                </option>
+                              <?php endforeach; ?>
+                            </select>
+                          </label>
+                          <label>
+                            Amount
+                            <input
+                              class="bank-import-review-split-control"
+                              type="number"
+                              min="0.01"
+                              step="0.01"
+                              inputmode="decimal"
+                              name="split_allocations[<?= (int)$splitIndex ?>][amount]"
+                              value="<?= accounting_h((string)($split['split_amount'] ?? '')) ?>"
+                              required
+                              <?= $splitMode ? '' : 'disabled' ?>
+                            >
+                          </label>
+                          <label>
+                            Line note
+                            <input
+                              class="bank-import-review-split-control"
+                              type="text"
+                              maxlength="255"
+                              name="split_allocations[<?= (int)$splitIndex ?>][note]"
+                              value="<?= accounting_h((string)($split['split_note'] ?? '')) ?>"
+                              placeholder="Equipment, supplies, or category note"
+                              <?= $splitMode ? '' : 'disabled' ?>
+                            >
+                          </label>
+                          <button
+                            class="btn bank-import-split-remove"
+                            type="button"
+                            data-remove-split
+                          >Remove</button>
+                        </div>
+                      <?php endforeach; ?>
+                    </div>
+
+                    <template data-split-template>
+                      <div class="bank-import-split-row" data-split-row>
+                        <label>
+                          Account
+                          <select
+                            class="bank-import-review-split-control"
+                            data-name-template="split_allocations[__INDEX__][account_id]"
+                            required
+                          >
+                            <option value="">Choose account</option>
+                            <?php foreach ($reviewAccountOptions as $account): ?>
+                              <option value="<?= (int)$account['account_id'] ?>">
+                                <?= accounting_h((string)$account['account_code']) ?>
+                                · <?= accounting_h((string)$account['account_name']) ?>
+                                (<?= accounting_h((string)$account['account_type']) ?>)
+                              </option>
+                            <?php endforeach; ?>
+                          </select>
+                        </label>
+                        <label>
+                          Amount
+                          <input
+                            class="bank-import-review-split-control"
+                            type="number"
+                            min="0.01"
+                            step="0.01"
+                            inputmode="decimal"
+                            data-name-template="split_allocations[__INDEX__][amount]"
+                            required
+                          >
+                        </label>
+                        <label>
+                          Line note
+                          <input
+                            class="bank-import-review-split-control"
+                            type="text"
+                            maxlength="255"
+                            data-name-template="split_allocations[__INDEX__][note]"
+                            placeholder="Equipment, supplies, or category note"
+                          >
+                        </label>
+                        <button
+                          class="btn bank-import-split-remove"
+                          type="button"
+                          data-remove-split
+                        >Remove</button>
+                      </div>
+                    </template>
+
+                    <div class="bank-import-split-total">
+                      <strong data-split-total-text></strong>
+                      <span class="bank-import-meta" data-split-remaining></span>
+                    </div>
+                    <div class="bank-import-split-error" data-split-error aria-live="polite"></div>
+                    <div>
+                      <button class="btn" type="button" data-add-split>
+                        Add split line
+                      </button>
+                    </div>
+                  </div>
 
                   <label>
                     Review
@@ -1063,5 +1265,140 @@ accounting_subnav('bank_import');
     </div>
   </div>
 </div>
+
+<script>
+(() => {
+  const formatMoney = cents => new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD'
+  }).format(cents / 100);
+
+  const parseCents = value => {
+    const raw = String(value || '').trim();
+    if (!/^\d+(?:\.\d{1,2})?$/.test(raw)) return null;
+    const [whole, fraction = ''] = raw.split('.');
+    return (Number(whole) * 100) + Number((fraction + '00').slice(0, 2));
+  };
+
+  document.querySelectorAll('form.bank-import-review').forEach(form => {
+    const treatment = form.querySelector('[name="classification"]');
+    const reviewStatus = form.querySelector('[name="review_status"]');
+    const settlementStatus = form.querySelector('[name="settlement_status"]');
+    const singleAccount = form.querySelector('[data-split-single-account]');
+    const panel = form.querySelector('[data-split-panel]');
+    const rows = form.querySelector('[data-split-rows]');
+    const template = form.querySelector('template[data-split-template]');
+    const totalText = form.querySelector('[data-split-total-text]');
+    const remainingText = form.querySelector('[data-split-remaining]');
+    const errorText = form.querySelector('[data-split-error]');
+    const expectedCents = Number(panel?.dataset.expectedCents || 0);
+    let nextIndex = rows.querySelectorAll('[data-split-row]').length;
+
+    const isSplitMode = () =>
+      treatment.value === 'SPLIT_REQUIRED'
+      && reviewStatus.value !== 'IGNORED'
+      && settlementStatus.value === 'POSTED';
+
+    const addRow = () => {
+      if (rows.querySelectorAll('[data-split-row]').length >= 12) {
+        errorText.textContent = 'A transaction can have at most 12 split lines.';
+        return;
+      }
+
+      const fragment = template.content.cloneNode(true);
+      const index = nextIndex++;
+      fragment.querySelectorAll('[data-name-template]').forEach(field => {
+        field.name = field.dataset.nameTemplate.replace('__INDEX__', index);
+      });
+      rows.appendChild(fragment);
+      updateMode();
+    };
+
+    const updateTotals = () => {
+      const splitRows = [...rows.querySelectorAll('[data-split-row]')];
+      let sum = 0;
+      splitRows.forEach(row => {
+        const amount = row.querySelector('[name$="[amount]"]');
+        const cents = parseCents(amount?.value);
+        if (cents !== null) sum += cents;
+      });
+
+      const remaining = expectedCents - sum;
+      totalText.textContent = `Allocated ${formatMoney(sum)} of ${formatMoney(expectedCents)}`;
+      if (remaining > 0) {
+        remainingText.textContent = `${formatMoney(remaining)} remaining`;
+      } else if (remaining < 0) {
+        remainingText.textContent = `${formatMoney(Math.abs(remaining))} over`;
+      } else {
+        remainingText.textContent = 'Exact total';
+      }
+    };
+
+    const updateMode = () => {
+      const enabled = isSplitMode();
+      panel.hidden = !enabled;
+      singleAccount.disabled = enabled;
+      panel.querySelectorAll('.bank-import-review-split-control').forEach(field => {
+        field.disabled = !enabled;
+      });
+      errorText.textContent = '';
+      updateTotals();
+    };
+
+    treatment.addEventListener('change', () => {
+      if (
+        isSplitMode()
+        && rows.querySelectorAll('[data-split-row]').length === 0
+      ) {
+        addRow();
+        addRow();
+      }
+      updateMode();
+    });
+    reviewStatus.addEventListener('change', updateMode);
+    settlementStatus.addEventListener('change', updateMode);
+    rows.addEventListener('input', updateTotals);
+    rows.addEventListener('change', updateTotals);
+    rows.addEventListener('click', event => {
+      const removeButton = event.target.closest('[data-remove-split]');
+      if (removeButton) {
+        removeButton.closest('[data-split-row]').remove();
+        updateTotals();
+      }
+    });
+    form.querySelector('[data-add-split]').addEventListener('click', addRow);
+    form.addEventListener('submit', event => {
+      if (!isSplitMode()) return;
+
+      const splitRows = [...rows.querySelectorAll('[data-split-row]')];
+      const allLinesComplete = splitRows.every(row => {
+        const account = row.querySelector('select');
+        const amount = row.querySelector('[name$="[amount]"]');
+        const cents = parseCents(amount?.value);
+        return account?.value && cents !== null && cents > 0;
+      });
+      const sum = splitRows.reduce((total, row) => {
+        const cents = parseCents(row.querySelector('[name$="[amount]"]')?.value);
+        return total + (cents ?? 0);
+      }, 0);
+
+      if (
+        reviewStatus.value !== 'READY'
+        || settlementStatus.value !== 'POSTED'
+        || splitRows.length < 2
+        || !allLinesComplete
+        || sum !== expectedCents
+      ) {
+        event.preventDefault();
+        errorText.textContent = reviewStatus.value !== 'READY'
+          ? 'Set Review to Ready and Bank status to Posted before saving split lines.'
+          : 'Choose at least two accounts and enter positive amounts that total exactly to the bank transaction.';
+      }
+    });
+
+    updateMode();
+  });
+})();
+</script>
 
 <?php page_footer(); ?>
