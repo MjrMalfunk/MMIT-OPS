@@ -33,6 +33,46 @@ $statementType = strtoupper(trim((string)(
 
 if (
     $_SERVER['REQUEST_METHOD'] === 'POST'
+    && (string)($_POST['action'] ?? '') === 'discard_preview_batch'
+) {
+    $batchId = (int)($_POST['batch_id'] ?? 0);
+    $result = accounting_bank_import_discard_preview_batch($batchId);
+
+    if (empty($result['ok'])) {
+        $errors = array_merge(
+            $errors,
+            $result['errors'] ?? ['Unable to discard preview batch.']
+        );
+    } else {
+        audit_event(
+            $userId,
+            'BANK_IMPORT_BATCH_DISCARDED',
+            [
+                'batch_id' => $batchId,
+                'transaction_count' => (int)$result['transaction_count'],
+            ]
+        );
+
+        header(
+            'Location: '
+            . BASE_URL
+            . '/accounting/bank_import.php?'
+            . http_build_query([
+                'message' => sprintf(
+                    'Preview batch #%d discarded. %d draft transactions removed; nothing was posted.',
+                    $batchId,
+                    (int)$result['transaction_count']
+                ),
+            ]),
+            true,
+            302
+        );
+        exit;
+    }
+}
+
+if (
+    $_SERVER['REQUEST_METHOD'] === 'POST'
     && (string)($_POST['action'] ?? '')
         === 'update_transaction_review'
 ) {
@@ -659,6 +699,21 @@ accounting_subnav('bank_import');
             <?= accounting_h((string)$batch['statement_type']) ?>
             ·
             <?= accounting_h((string)$batch['status']) ?>
+            <?php if ((string)$batch['status'] === 'PREVIEW'): ?>
+              <form
+                method="post"
+                style="margin-top:10px;"
+                onsubmit="return confirm('Discard Batch #<?= (int)$batch['batch_id'] ?> and remove its draft transactions? This cannot be undone. No ledger entries have been posted.');"
+              >
+                <?= csrf_field() ?>
+                <input type="hidden" name="action" value="discard_preview_batch">
+                <input type="hidden" name="batch_id" value="<?= (int)$batch['batch_id'] ?>">
+                <button class="btn" type="submit">Discard preview batch</button>
+              </form>
+              <div class="bank-import-meta" style="max-width:260px;margin-top:5px;">
+                Available only before approval. Posted or matched transactions are protected.
+              </div>
+            <?php endif; ?>
           </div>
         </div>
 

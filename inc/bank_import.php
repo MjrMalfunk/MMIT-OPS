@@ -1495,3 +1495,100 @@ function accounting_bank_import_transactions(int $batchId): array
 
     return $statement->fetchAll();
 }
+
+function accounting_bank_import_discard_preview_batch(
+    int $batchId
+): array {
+    if ($batchId <= 0 || !accounting_bank_import_ready()) {
+        return ['ok' => false, 'errors' => ['Invalid bank import batch.']];
+    }
+
+    $pdo = db();
+
+    try {
+        $pdo->beginTransaction();
+
+        $batch = $pdo->prepare("
+            SELECT batch_id, status
+            FROM bank_import_batch
+            WHERE batch_id = ?
+            LIMIT 1
+            FOR UPDATE
+        ");
+        $batch->execute([$batchId]);
+        $batchRow = $batch->fetch(PDO::FETCH_ASSOC);
+
+        if (!$batchRow) {
+            $pdo->rollBack();
+            return ['ok' => false, 'errors' => ['Import batch not found.']];
+        }
+
+        if ((string)$batchRow['status'] !== 'PREVIEW') {
+            $pdo->rollBack();
+            return [
+                'ok' => false,
+                'errors' => ['Only an unapproved PREVIEW batch can be discarded.'],
+            ];
+        }
+
+        $transactionCheck = $pdo->prepare("
+            SELECT COUNT(*)
+            FROM bank_import_transaction
+            WHERE batch_id = ?
+              AND (
+                  posted_journal_id IS NOT NULL
+                  OR review_status IN ('POSTED', 'MATCHED')
+              )
+        ");
+        $transactionCheck->execute([$batchId]);
+
+        if ((int)$transactionCheck->fetchColumn() > 0) {
+            $pdo->rollBack();
+            return [
+                'ok' => false,
+                'errors' => [
+                    'This preview contains a matched or posted transaction and cannot be discarded.',
+                ],
+            ];
+        }
+
+        $count = $pdo->prepare(
+            'SELECT COUNT(*) FROM bank_import_transaction WHERE batch_id = ?'
+        );
+        $count->execute([$batchId]);
+        $transactionCount = (int)$count->fetchColumn();
+
+        $deleteTransactions = $pdo->prepare(
+            'DELETE FROM bank_import_transaction WHERE batch_id = ?'
+        );
+        $deleteTransactions->execute([$batchId]);
+
+        $deleteBatch = $pdo->prepare("
+            DELETE FROM bank_import_batch
+            WHERE batch_id = ?
+              AND status = 'PREVIEW'
+            LIMIT 1
+        ");
+        $deleteBatch->execute([$batchId]);
+
+        if ($deleteBatch->rowCount() !== 1) {
+            throw new RuntimeException('The preview batch changed before it could be discarded.');
+        }
+
+        $pdo->commit();
+
+        return [
+            'ok' => true,
+            'transaction_count' => $transactionCount,
+        ];
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+
+        return [
+            'ok' => false,
+            'errors' => ['Unable to discard the preview batch: ' . $e->getMessage()],
+        ];
+    }
+}
