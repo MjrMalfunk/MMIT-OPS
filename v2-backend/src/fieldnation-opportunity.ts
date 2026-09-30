@@ -141,9 +141,10 @@ function dateFromEmail(text: string, receivedAt: Date | null): Date | null {
   return parseFieldNationSchedule(text, receivedAt ?? new Date());
 }
 
-function profitability(gross: number, onsiteHours: number, oneWayMiles: number | null, oaiApplies: boolean) {
+export type OpportunityVehicleCost = { vehicleId: string; vehicleName: string; rate: number; complete: boolean; model: Record<string, unknown> };
+function profitability(gross: number, onsiteHours: number, oneWayMiles: number | null, oaiApplies: boolean, vehicle?: OpportunityVehicleCost) {
   const targetHourly = Number(process.env.FIELDNATION_PROFIT_TARGET_HOURLY ?? 35);
-  const mileageRate = Number(process.env.FIELDNATION_PROFIT_MILEAGE_RATE ?? 0.67);
+  const mileageRate = vehicle?.rate ?? Number(process.env.FIELDNATION_PROFIT_MILEAGE_RATE ?? 0.67);
   const averageMph = Number(process.env.FIELDNATION_PROFIT_AVERAGE_MPH ?? 55);
   const insuranceRate = Number(process.env.FIELDNATION_INSURANCE_FEE_RATE ?? 0.0195);
   const oaiRate = Number(process.env.FIELDNATION_OAI_FEE_RATE ?? 0.005);
@@ -159,10 +160,10 @@ function profitability(gross: number, onsiteHours: number, oneWayMiles: number |
   const effectiveHourly = totalHours > 0 ? Math.round(estimatedNet / totalHours * 100) / 100 : 0;
   const feeRate = .10 + insuranceRate + (oaiApplies ? oaiRate : 0);
   const grossToTarget = totalHours > 0 && feeRate < 1 ? Math.round(((targetHourly * totalHours + mileageCost) / (1 - feeRate)) * 100) / 100 : 0;
-  return { complete: gross > 0 && onsiteHours > 0 && roundTripMiles !== null, gross_known: gross > 0, onsite_known: onsiteHours > 0, travel_known: roundTripMiles !== null, target_hourly: targetHourly, mileage_rate: mileageRate, average_mph: averageMph, one_way_miles: oneWayMiles, round_trip_miles: roundTripMiles, drive_minutes: driveMinutes, onsite_hours: onsiteHours, total_hours: Math.round(totalHours * 100) / 100, gross, platform_fee: platformFee, insurance_fee: insuranceFee, oai_applies: oaiApplies, oai_fee: oaiFee, fees, mileage_cost: mileageCost, estimated_net: estimatedNet, effective_hourly: effectiveHourly, counteroffer_gross: Math.max(gross, grossToTarget), counteroffer_increase: Math.max(0, Math.round((grossToTarget - gross) * 100) / 100) };
+  return { complete: gross > 0 && onsiteHours > 0 && roundTripMiles !== null && (vehicle?.complete ?? true), vehicle_id: vehicle?.vehicleId ?? null, vehicle_name: vehicle?.vehicleName ?? null, vehicle_cost_source: vehicle ? "VEHICLE_PROFILE" : "CONFIGURED_FALLBACK", vehicle_cost_model: vehicle?.model ?? null, gross_known: gross > 0, onsite_known: onsiteHours > 0, travel_known: roundTripMiles !== null, target_hourly: targetHourly, mileage_rate: mileageRate, average_mph: averageMph, one_way_miles: oneWayMiles, round_trip_miles: roundTripMiles, drive_minutes: driveMinutes, onsite_hours: onsiteHours, total_hours: Math.round(totalHours * 100) / 100, gross, platform_fee: platformFee, insurance_fee: insuranceFee, oai_applies: oaiApplies, oai_fee: oaiFee, fees, mileage_cost: mileageCost, estimated_net: estimatedNet, effective_hourly: effectiveHourly, counteroffer_gross: Math.max(gross, grossToTarget), counteroffer_increase: Math.max(0, Math.round((grossToTarget - gross) * 100) / 100) };
 }
 
-export function parseFieldNationOpportunityEmail(input: { subject: string; sender: string; rawText: string; receivedAt: Date | null; oaiApplies?: boolean }): FieldNationOpportunity {
+export function parseFieldNationOpportunityEmail(input: { subject: string; sender: string; rawText: string; receivedAt: Date | null; oaiApplies?: boolean; vehicleCost?: OpportunityVehicleCost }): FieldNationOpportunity {
   const subject = clean(input.subject);
   const body = clean(input.rawText);
   const haystack = `${subject}\n${body}`;
@@ -197,7 +198,7 @@ export function parseFieldNationOpportunityEmail(input: { subject: string; sende
   const scheduledAt = dateFromEmail(haystack, input.receivedAt);
   const gross = Number(pay.grossPay ?? 0);
   const onsite = Number(pay.estimatedHours ?? 0);
-  const profit = profitability(gross, onsite, mileageOneWay === null ? null : Number(mileageOneWay), Boolean(input.oaiApplies));
+  const profit = profitability(gross, onsite, mileageOneWay === null ? null : Number(mileageOneWay), Boolean(input.oaiApplies), input.vehicleCost);
   let score = 0;
   const scoreReasons: string[] = [];
   if (!profit.gross_known || !profit.onsite_known) { score -= 8; scoreReasons.push('-8 profitability incomplete'); }
@@ -214,6 +215,7 @@ export function parseFieldNationOpportunityEmail(input: { subject: string; sende
   if (/pos|cabling|cable|hme|menu|switch|tv|mount|kiosk|pinpad|drive/i.test(title ?? '')) { score += 10; scoreReasons.push('+10 preferred field work type'); }
   else if (title) { score += 3; scoreReasons.push('+3 known scope'); } else { score -= 5; scoreReasons.push('-5 unclear scope'); }
   if (scheduledAt) { if (scheduledAt.getTime() < Date.now()) { score -= 25; scoreReasons.push('-25 stale/past schedule'); } else { score += 10; scoreReasons.push('+10 future schedule present'); } } else { score -= 4; scoreReasons.push('-4 schedule unknown'); }
+  scoreReasons.push(`+0 vehicle cost $${Number(profit.mileage_rate).toFixed(4)}/mi (${input.vehicleCost?.vehicleName ?? 'planning fallback'})`);
   scoreReasons.push(`+0 est net $${Number(profit.estimated_net).toFixed(2)} after $${Number(profit.fees).toFixed(2)} fees and $${Number(profit.mileage_cost).toFixed(2)} travel`);
   if (Number(profit.counteroffer_increase) > 0) scoreReasons.push(`+0 counter about $${Number(profit.counteroffer_gross).toFixed(2)} gross to target $${Number(profit.target_hourly).toFixed(2)}/hr`);
   score = Math.max(0, Math.min(100, Math.round(score)));

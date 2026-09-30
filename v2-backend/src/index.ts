@@ -1,3 +1,5 @@
+import { registerVehicleRoutes, scoringVehicle, serialized as vehicleJson } from './vehicles.js';
+import { estimatedRoundTrip } from './mileage.js';
 import { parseFieldNationSchedule } from './fieldnation-schedule.js';
 import express, { NextFunction, Request, RequestHandler, Response } from 'express';
 import cors from 'cors';
@@ -552,6 +554,7 @@ function serializeWorkOrder(workOrder: WorkOrderWithClient) {
     ...workOrder,
     id: workOrder.id.toString(),
     clientId: workOrder.clientId?.toString() ?? null,
+    vehicleId: workOrder.vehicleId?.toString() ?? null,
     grossPay: workOrder.grossPay?.toString() ?? null,
     payType: workOrder.payType,
     payBaseAmount: workOrder.payBaseAmount?.toString() ?? null,
@@ -562,6 +565,8 @@ function serializeWorkOrder(workOrder: WorkOrderWithClient) {
     payCalculatedAt: workOrder.payCalculatedAt,
     payCalculation: workOrder.payCalculation,
     mileage: workOrder.mileage?.toString() ?? null,
+    estimatedMileage: workOrder.estimatedMileage?.toString() ?? null,
+    mileageSource: workOrder.mileageSource,
     client: workOrder.client ? { ...workOrder.client, id: workOrder.client.id.toString() } : null,
   };
 }
@@ -830,6 +835,8 @@ function auditWorkOrderSnapshot(workOrder: {
   payCalculatedAt: Date | null;
   payCalculation: Prisma.JsonValue | null;
   mileage: Prisma.Decimal | null;
+  estimatedMileage: Prisma.Decimal | null;
+  mileageSource: string;
   driveMinutes: number;
   onsiteMinutes: number;
   adminMinutes: number;
@@ -853,6 +860,8 @@ function auditWorkOrderSnapshot(workOrder: {
     payCalculatedAt: workOrder.payCalculatedAt?.toISOString() ?? null,
     payCalculation: workOrder.payCalculation,
     mileage: workOrder.mileage?.toString() ?? null,
+    estimatedMileage: workOrder.estimatedMileage?.toString() ?? null,
+    mileageSource: workOrder.mileageSource,
     driveMinutes: workOrder.driveMinutes,
     onsiteMinutes: workOrder.onsiteMinutes,
     adminMinutes: workOrder.adminMinutes,
@@ -990,6 +999,8 @@ function requireRoles(...roles: OpsUserRole[]): RequestHandler {
     next();
   };
 }
+
+registerVehicleRoutes(app, prisma, requireAuth);
 
 async function writeAuditEvent(
   tx: Prisma.TransactionClient,
@@ -1356,6 +1367,7 @@ app.post('/api/v1/fieldnation/mailbox/scan', requireRoles(OpsUserRole.OWNER, Ops
     lookbackDays: requestedLookback,
     limit: requestedLimit,
   });
+  const vehicleCost = await scoringVehicle(prisma);
   const stats = { found: messages.length, imported: 0, duplicates: 0, reviewRequired: 0, errors: [] as string[] };
   for (const message of messages) {
     try {
@@ -1364,6 +1376,7 @@ app.post('/api/v1/fieldnation/mailbox/scan', requireRoles(OpsUserRole.OWNER, Ops
       const parsed = parseFieldNationOpportunityEmail({
         subject: message.subject ?? '', sender: message.sender ?? '', rawText: message.rawText, receivedAt: message.receivedAt,
         oaiApplies: String(env.FIELDNATION_PROFIT_OAI_APPLIES ?? 'false').toLowerCase() === 'true',
+        vehicleCost,
       });
       const status = parsed.sourceReference && parsed.title && parsed.grossPay ? FieldNationImportStatus.PARSED : FieldNationImportStatus.REVIEW_REQUIRED;
       await prisma.$transaction(async (tx) => {
@@ -1401,6 +1414,7 @@ app.post('/api/v1/fieldnation/mailbox/scan', requireRoles(OpsUserRole.OWNER, Ops
 app.post('/api/v1/fieldnation/mailbox/reparse', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
   const stored = await prisma.fieldNationImport.findMany({ orderBy: { id: 'asc' } });
   const stats = { scanned: 0, refreshed: 0, skipped: 0, errors: [] as string[] };
+  const vehicleCost = await scoringVehicle(prisma);
   const oaiApplies = String(process.env.FIELDNATION_PROFIT_OAI_APPLIES ?? 'false').toLowerCase() === 'true';
 
   for (const existing of stored) {
@@ -1422,6 +1436,7 @@ app.post('/api/v1/fieldnation/mailbox/reparse', requireRoles(OpsUserRole.OWNER, 
         rawText: existing.rawText,
         receivedAt: existing.receivedAt,
         oaiApplies,
+        vehicleCost,
       });
       const status = parsed.sourceReference && parsed.title && parsed.grossPay ? FieldNationImportStatus.PARSED : FieldNationImportStatus.REVIEW_REQUIRED;
       const updated = await prisma.$transaction(async (tx) => {
@@ -2119,6 +2134,7 @@ app.post('/api/v1/fieldnation/imports/:id/convert', requireRoles(OpsUserRole.OWN
   if (!item) { res.status(404).json({ error: 'FieldNation import not found.' }); return; }
   if (item.workOrderId) { res.status(409).json({ error: 'This import has already been converted.', workOrderId: item.workOrderId.toString() }); return; }
   if (!item.sourceReference) { res.status(409).json({ error: 'This import needs a source reference before conversion.' }); return; }
+  const selectedVehicle = await scoringVehicle(prisma);
   const workOrder = await prisma.$transaction(async (tx) => {
     const created = await tx.workOrder.create({ data: {
       source: WorkOrderSource.FIELD_NATION,
@@ -2133,7 +2149,11 @@ app.post('/api/v1/fieldnation/imports/:id/convert', requireRoles(OpsUserRole.OWN
       payBaseHours: item.payBaseHours,
       payHourlyRate: item.payHourlyRate,
       payHoursCap: item.payHoursCap,
-      mileage: item.mileage,
+      estimatedMileage: estimatedRoundTrip(item.mileage?.toString() ?? null, item.parsedData),
+      mileage: null,
+      mileageSource: "UNVERIFIED",
+      vehicleId: selectedVehicle ? BigInt(selectedVehicle.vehicleId) : null,
+      vehicleCostSnapshot: selectedVehicle ? vehicleJson(selectedVehicle.model) : Prisma.DbNull,
       notes: `Imported from FieldNation email ${item.messageId}.${item.location ? ` Location: ${item.location}.` : ''}`,
     } });
     await tx.fieldNationImport.update({ where: { id }, data: { status: FieldNationImportStatus.CONVERTED, workOrderId: created.id } });
@@ -3098,6 +3118,11 @@ app.patch('/api/v1/work-orders/:id', requireRoles(OpsUserRole.OWNER, OpsUserRole
     data[field] = value;
     changedFields.push(field);
   }
+  // An edit invalidates the tracker provenance, even when the number is unchanged.
+  if (hasOwn(body, 'mileage')) {
+    data.mileageSource = 'MANUAL_UNVERIFIED';
+    changedFields.push('mileageSource');
+  }
   for (const field of ['driveMinutes', 'onsiteMinutes', 'adminMinutes'] as const) {
     if (!hasOwn(body, field)) continue;
     const value = parseOptionalMinutes(body[field]);
@@ -3335,6 +3360,7 @@ app.post('/api/v1/work-orders/:id/tracker-import', requireRoles(OpsUserRole.OWNE
         checkInAt: parsed.checkInAt,
         checkOutAt: parsed.checkOutAt,
         mileage: parsed.mileage.toFixed(2),
+        mileageSource: "ODOMETER",
         driveMinutes: parsed.metrics.totals.drive,
         onsiteMinutes: parsed.metrics.totals.onsite,
         adminMinutes: before.adminMinutes + parsed.metrics.totals.admin,
@@ -3344,10 +3370,18 @@ app.post('/api/v1/work-orders/:id/tracker-import', requireRoles(OpsUserRole.OWNE
       },
       include: { client: true },
     });
+    if (before.vehicleId !== null) {
+      await tx.$queryRaw`SELECT id FROM Vehicle WHERE id = ${before.vehicleId} FOR UPDATE`;
+      const vehicle = await tx.vehicle.findUnique({ where: { id: before.vehicleId } });
+      if (vehicle && (vehicle.currentOdometer === null || vehicle.currentOdometer.lt(parsed.metrics.endOdometer))) {
+        await tx.vehicle.update({ where: { id: vehicle.id }, data: { currentOdometer: parsed.metrics.endOdometer.toFixed(2) } });
+        await writeAuditEvent(tx, req.auth!, 'vehicle.odometer_from_tracker', 'vehicle', vehicle.id.toString(), { workOrderId: before.id.toString(), before: vehicle.currentOdometer?.toString() ?? null, after: parsed.metrics.endOdometer.toFixed(2), shiftId: parsed.shiftId });
+      }
+    }
     await writeAuditEvent(tx, req.auth!, 'work_order.tracker_imported', 'work_order', updated.id.toString(), {
       before: auditWorkOrderSnapshot(before),
       after: auditWorkOrderSnapshot(updated),
-      changedFields: ['status', 'checkInAt', 'checkOutAt', 'mileage', 'driveMinutes', 'onsiteMinutes', 'adminMinutes', 'actualGrossPay', 'payCalculatedAt', 'payCalculation'],
+      changedFields: ['status', 'checkInAt', 'checkOutAt', 'mileage', 'mileageSource', 'driveMinutes', 'onsiteMinutes', 'adminMinutes', 'actualGrossPay', 'payCalculatedAt', 'payCalculation'],
       trackerImport: { id: trackerImport.id, shiftId: parsed.shiftId, contentSha256 },
       metrics: parsed.metrics,
     } as unknown as Prisma.InputJsonValue);

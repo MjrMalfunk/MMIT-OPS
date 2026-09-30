@@ -1,0 +1,14 @@
+/* Scoped vehicle workspace; retain the existing OPS theme and responsive breakpoints. */
+#vehicleWorkspace .vehicle-heading{justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px}
+#vehicleWorkspace .vehicle-heading h2{margin:0}
+.vehicle-list,.vehicle-record{margin-top:18px}
+.vehicle-tabs{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0}
+.vehicle-archived{display:block;margin-bottom:15px;color:var(--muted)}
+.vehicle-breakdown{margin:0}.vehicle-breakdown>div{display:flex;justify-content:space-between;gap:20px;padding:10px 0;border-bottom:1px solid var(--line)}.vehicle-breakdown dd{margin:0;white-space:nowrap}
+.vehicle-notes{white-space:pre-wrap;overflow-wrap:anywhere}.vehicle-maintenance{padding:8px 0;border-bottom:1px solid var(--line)}.vehicle-maintenance h3{font-size:16px}
+.vehicle-link{display:inline-block;color:var(--blue);padding:8px 0;margin-right:15px;overflow-wrap:anywhere}
+.vehicle-dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:16px;width:min(850px,95vw);max-height:90vh;padding:24px}.vehicle-dialog::backdrop{background:#000b}
+.vehicle-form-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:15px}.vehicle-dialog label{display:flex;flex-direction:column;gap:5px;color:var(--muted)}.vehicle-dialog input,.vehicle-dialog select,.vehicle-dialog textarea,.vehicle-assignment select{background:#08172a;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px;font:inherit;min-width:0;width:100%}.vehicle-dialog input[type=checkbox]{width:auto}.vehicle-dialog .vehicle-checkbox,.vehicle-service-list label{flex-direction:row;align-items:center}.vehicle-dialog .vehicle-service-list{margin:18px 0;padding:12px;border:1px solid var(--line)}.vehicle-service-list label{padding:6px 0}.vehicle-assignment{margin-top:12px;display:grid;gap:10px;grid-template-columns:minmax(0,1fr)}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
+@media(min-width:650px){.vehicle-form-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.vehicle-form-wide{grid-column:1/-1}}
+@media(max-width:500px){#vehicleWorkspace .grid{grid-template-columns:minmax(0,1fr)}#vehicleWorkspace .detail-grid{grid-template-columns:minmax(0,1fr)}}

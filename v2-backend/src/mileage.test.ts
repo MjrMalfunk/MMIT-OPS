@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import { estimatedRoundTrip } from './mileage.js';
+const oneWay = { opportunity: { distanceKind: 'ONE_WAY' } };
+assert.equal(estimatedRoundTrip('57', oneWay), '114.00');
+assert.equal(estimatedRoundTrip('12.35', oneWay), '24.70');
+assert.equal(estimatedRoundTrip('0', oneWay), '0.00');
+assert.equal(estimatedRoundTrip('132', {}), null);
+assert.equal(estimatedRoundTrip('42', { opportunity: { distanceKind: 'UNSPECIFIED' } }), null);
+assert.equal(estimatedRoundTrip('145', { opportunity: { distanceKind: 'ROUND_TRIP' } }), '145.00');
+assert.equal(estimatedRoundTrip(null, oneWay), null);
+assert.equal(estimatedRoundTrip('-1', oneWay), null);
+assert.equal(estimatedRoundTrip('1.234', oneWay), null);
+assert.equal(estimatedRoundTrip('50000000', oneWay), null);
+assert.equal(estimatedRoundTrip('57', null), null);
+assert.equal(estimatedRoundTrip('57', []), null);
+console.log('PASS: 12 mileage estimate checks');
