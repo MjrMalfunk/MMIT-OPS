@@ -13,7 +13,10 @@ csrf_check();
 $userId = (int)(current_user()['user_id'] ?? 0);
 $ready = accounting_bank_import_ready();
 $errors = [];
-$message = trim((string)($_GET['message'] ?? ''));
+// A previous redirect message must not describe the current form submission.
+$message = ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST'
+    ? ''
+    : trim((string)($_GET['message'] ?? ''));
 $batchId = (int)($_GET['batch_id'] ?? 0);
 $accountOptions = accounting_bank_reconciliation_account_options();
 $reviewAccountOptions =
@@ -30,6 +33,46 @@ if ($selectedAccountId <= 0 && $accountOptions) {
 $statementType = strtoupper(trim((string)(
     $_POST['statement_type'] ?? 'CLOSED'
 )));
+
+if (
+    $_SERVER['REQUEST_METHOD'] === 'POST'
+    && (string)($_POST['action'] ?? '') === 'discard_preview_batch'
+) {
+    $batchId = (int)($_POST['batch_id'] ?? 0);
+    $result = accounting_bank_import_discard_preview_batch($batchId);
+
+    if (empty($result['ok'])) {
+        $errors = array_merge(
+            $errors,
+            $result['errors'] ?? ['Unable to discard preview batch.']
+        );
+    } else {
+        audit_event(
+            $userId,
+            'BANK_IMPORT_BATCH_DISCARDED',
+            [
+                'batch_id' => $batchId,
+                'transaction_count' => (int)$result['transaction_count'],
+            ]
+        );
+
+        header(
+            'Location: '
+            . BASE_URL
+            . '/accounting/bank_import.php?'
+            . http_build_query([
+                'message' => sprintf(
+                    'Preview batch #%d discarded. %d draft transactions removed; nothing was posted.',
+                    $batchId,
+                    (int)$result['transaction_count']
+                ),
+            ]),
+            true,
+            302
+        );
+        exit;
+    }
+}
 
 if (
     $_SERVER['REQUEST_METHOD'] === 'POST'
@@ -54,7 +97,9 @@ if (
         (string)($_POST['review_status'] ?? ''),
         (string)($_POST['settlement_status'] ?? ''),
         $selectedReviewAccountId,
-        (string)($_POST['notes'] ?? '')
+        (string)($_POST['notes'] ?? ''),
+        is_array($_POST['splits'] ?? null) ? $_POST['splits'] : [],
+        (string)($_POST['allocation_mode'] ?? 'SINGLE')
     );
 
     if (empty($result['ok'])) {
@@ -362,6 +407,15 @@ $batch = $batchId > 0
 $transactions = $batch
     ? accounting_bank_import_transactions($batchId)
     : [];
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'update_transaction_review' && $errors) {
+    foreach ($transactions as &$transaction) {
+        if ((int)$transaction['bank_transaction_id'] === (int)($_POST['bank_transaction_id'] ?? 0)) {
+            $transaction['split_form_rows'] = is_array($_POST['splits'] ?? null) ? $_POST['splits'] : [];
+            $transaction['allocation_mode_input'] = (string)($_POST['allocation_mode'] ?? 'SINGLE');
+        }
+    }
+    unset($transaction);
+}
 $batches = accounting_bank_import_list_batches(20);
 $batchPreflight = null;
 
@@ -570,6 +624,16 @@ accounting_subnav('bank_import');
 @media(max-width:1000px){.bank-import-grid{grid-template-columns:1fr}.bank-import-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:650px){.bank-import-fields,.bank-import-summary{grid-template-columns:1fr}}
 @media(max-width:650px){.bank-import-post-confirm{grid-template-columns:1fr}}
+
+/* Split controls need explicit sizing within the transaction card. */
+.bank-import-review [hidden]{display:none !important}
+.bank-import-review [data-split-editor]{margin:0;padding:12px;border:1px solid #475569;border-radius:10px}
+.bank-import-review [data-split-row]{display:grid !important;grid-template-columns:minmax(0,1fr);gap:12px;align-items:end}
+.bank-import-review [data-split-row] input,.bank-import-review [data-split-row] select{width:100%;min-width:0;box-sizing:border-box;padding:9px 10px;color:#f8fafc;background-color:#0f172a;font-size:14px}
+.bank-import-review [data-split-row] option{color:#f8fafc;background-color:#0f172a}
+.bank-import-review [data-split-row] .btn{width:auto;min-height:40px}
+.bank-import-review [data-split-row] .btn:disabled{opacity:.5;color:#cbd5e1}
+@media(min-width:768px){.bank-import-review [data-split-row]{grid-template-columns:minmax(0,2fr) minmax(100px,.8fr) minmax(0,1.5fr) auto}}
 </style>
 
 <?php if ($message !== ''): ?>
@@ -659,6 +723,21 @@ accounting_subnav('bank_import');
             <?= accounting_h((string)$batch['statement_type']) ?>
             ·
             <?= accounting_h((string)$batch['status']) ?>
+            <?php if ((string)$batch['status'] === 'PREVIEW'): ?>
+              <form
+                method="post"
+                style="margin-top:10px;"
+                onsubmit="return confirm('Discard Batch #<?= (int)$batch['batch_id'] ?> and remove its draft transactions? This cannot be undone. No ledger entries have been posted.');"
+              >
+                <?= csrf_field() ?>
+                <input type="hidden" name="action" value="discard_preview_batch">
+                <input type="hidden" name="batch_id" value="<?= (int)$batch['batch_id'] ?>">
+                <button class="btn" type="submit">Discard preview batch</button>
+              </form>
+              <div class="bank-import-meta" style="max-width:260px;margin-top:5px;">
+                Available only before approval. Posted or matched transactions are protected.
+              </div>
+            <?php endif; ?>
           </div>
         </div>
 
@@ -842,7 +921,15 @@ accounting_subnav('bank_import');
                     <?= accounting_h((string)$transaction['review_status']) ?>
                   </div>
 
-                  <?php if (!empty($transaction['selected_account_code'])): ?>
+                  <?php if (!empty($transaction['splits'])): ?>
+                    <ul>
+                      <?php foreach ($transaction['splits'] as $split): ?>
+                        <li><?= accounting_h($split['account_code'] . ' / ' . $split['account_name']) ?>
+                          - $<?= accounting_h((string)$split['split_amount']) ?>
+                          <?= accounting_h((string)($split['memo'] ?? '')) ?></li>
+                      <?php endforeach; ?>
+                    </ul>
+                  <?php elseif (!empty($transaction['selected_account_code'])): ?>
                     <div>
                       <?= accounting_h((string)$transaction['selected_account_code']) ?>
                       ·
@@ -892,7 +979,45 @@ accounting_subnav('bank_import');
                     </select>
                   </label>
 
+                  <?php
+                    $splitMode = ($transaction['allocation_mode_input'] ?? (!empty($transaction['splits']) ? 'SPLIT' : 'SINGLE')) === 'SPLIT';
+                    $splitRows = $transaction['split_form_rows'] ?? $transaction['splits'] ?? [];
+                    if (!$splitRows) {
+                        $splitRows = array_fill(0, 2, ['account_id' => '', 'split_amount' => '', 'memo' => '']);
+                    }
+                  ?>
                   <label>
+                    Accounting allocation
+                    <select name="allocation_mode" data-allocation-mode>
+                      <option value="SINGLE" <?= !$splitMode ? 'selected' : '' ?>>Single account</option>
+                      <option value="SPLIT" <?= $splitMode ? 'selected' : '' ?> <?= !accounting_bank_import_splits_ready() ? 'disabled' : '' ?>>Split transaction</option>
+                    </select>
+                  </label>
+                  <fieldset data-split-editor data-total="<?= accounting_h((string)$transaction['signed_amount']) ?>" style="grid-column:1/-1;min-width:0;" <?= !$splitMode ? 'hidden disabled' : '' ?>>
+                    <legend>Split allocations</legend>
+                    <div data-split-rows>
+                      <?php foreach (array_values($splitRows) as $splitIndex => $split): ?>
+                        <?php if (!is_array($split)) { continue; } ?>
+                        <div data-split-row style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px;">
+                          <label>Account
+                            <select name="splits[<?= $splitIndex ?>][account_id]" required>
+                              <option value="">Choose account</option>
+                              <?php foreach ($reviewAccountOptions as $account): ?>
+                                <?php if ((int)$account['account_id'] === (int)$transaction['account_id']) { continue; } ?>
+                                <option value="<?= (int)$account['account_id'] ?>" <?= (string)$account['account_id'] === (string)($split['account_id'] ?? '') ? 'selected' : '' ?>><?= accounting_h($account['account_code'] . ' / ' . $account['account_name']) ?></option>
+                              <?php endforeach; ?>
+                            </select>
+                          </label>
+                          <label>Amount <input name="splits[<?= $splitIndex ?>][split_amount]" type="text" inputmode="decimal" pattern="[0-9]+(\.[0-9]{1,2})?" required value="<?= accounting_h(is_scalar($split['split_amount'] ?? '') ? (string)($split['split_amount'] ?? '') : '') ?>"></label>
+                          <label>Memo <input name="splits[<?= $splitIndex ?>][memo]" maxlength="255" value="<?= accounting_h(is_scalar($split['memo'] ?? '') ? (string)($split['memo'] ?? '') : '') ?>"></label>
+                          <button class="btn" type="button" data-remove-split>Remove allocation</button>
+                        </div>
+                      <?php endforeach; ?>
+                    </div>
+                    <button class="btn" type="button" data-add-split>Add allocation</button>
+                    <p data-split-total role="status" aria-live="polite">Allocations must equal the transaction exactly. Enter positive amounts.</p>
+                  </fieldset>
+                  <label data-single-account <?= $splitMode ? 'hidden' : '' ?>>
                     Account
                     <select name="selected_account_id">
                       <option value="">Choose account</option>
@@ -1009,4 +1134,50 @@ accounting_subnav('bank_import');
   </div>
 </div>
 
+<script>
+(() => {
+  const cents = value => {
+    const match = /^(-?)(\d{1,10})(?:\.(\d{1,2}))?$/.exec(value.trim());
+    return match ? (match[1] ? -1 : 1) * (Number(match[2]) * 100 + Number((match[3] || '').padEnd(2, '0'))) : null;
+  };
+  const money = value => (value < 0 ? '-' : '') + Math.floor(Math.abs(value) / 100) + '.' + String(Math.abs(value) % 100).padStart(2, '0');
+  document.querySelectorAll('[data-allocation-mode]').forEach(mode => {
+    const form = mode.form;
+    const editor = form.querySelector('[data-split-editor]');
+    const container = editor.querySelector('[data-split-rows]');
+    const single = form.querySelector('[data-single-account]');
+    const summary = editor.querySelector('[data-split-total]');
+    const update = () => {
+      const split = mode.value === 'SPLIT';
+      editor.hidden = !split; editor.disabled = !split;
+      single.hidden = split; single.querySelector('select').disabled = split;
+      let total = 0, valid = true;
+      const rows = [...container.querySelectorAll('[data-split-row]')];
+      rows.forEach((row, index) => {
+        row.querySelectorAll('[name]').forEach(input => input.name = input.name.replace(/splits\[\d+\]/, `splits[${index}]`));
+        const value = cents(row.querySelector('[name$="[split_amount]"]').value);
+        valid = valid && value !== null && value > 0;
+        total += value || 0;
+        row.querySelector('[data-remove-split]').disabled = rows.length <= 2;
+      });
+      editor.querySelector('[data-add-split]').disabled = rows.length >= 50;
+      const target = Math.abs(cents(editor.dataset.total));
+      summary.textContent = valid ? `Split total: $${money(total)} / Remaining: $${money(target - total)}` : 'Enter positive amounts with at most two decimal places.';
+    };
+    mode.addEventListener('change', update);
+    editor.addEventListener('input', update);
+    editor.addEventListener('click', event => {
+      if (event.target.closest('[data-add-split]')) {
+        const row = container.querySelector('[data-split-row]').cloneNode(true);
+        row.querySelectorAll('input,select').forEach(input => input.value = '');
+        container.append(row); update(); row.querySelector('select').focus();
+      } else if (event.target.closest('[data-remove-split]')) {
+        event.target.closest('[data-split-row]').remove(); update();
+        editor.querySelector('[data-add-split]').focus();
+      }
+    });
+    update();
+  });
+})();
+</script>
 <?php page_footer(); ?>

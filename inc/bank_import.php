@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/bank_import_splits.php';
 
 function accounting_bank_import_ready(): bool
 {
@@ -658,14 +659,15 @@ function accounting_bank_import_sequence_errors(
     return $errors;
 }
 
-function accounting_bank_import_save_review(
+function accounting_bank_import_save_review_single(
     int $transactionId,
     int $batchId,
     string $classification,
     string $reviewStatus,
     string $settlementStatus,
     ?int $selectedAccountId,
-    string $notes
+    string $notes,
+    bool $hasSplits = false
 ): array {
     $classification = strtoupper(trim($classification));
     $reviewStatus = strtoupper(trim($reviewStatus));
@@ -785,6 +787,7 @@ function accounting_bank_import_save_review(
     if (
         $reviewStatus === 'READY'
         && $selectedAccountId === null
+        && !$hasSplits
     ) {
         return [
             'ok' => false,
@@ -796,19 +799,12 @@ function accounting_bank_import_save_review(
     }
 
     $statement = db()->prepare("
-        UPDATE bank_import_transaction t
-        INNER JOIN bank_import_batch b
-            ON b.batch_id = t.batch_id
-        SET t.classification = ?,
-            t.review_status = ?,
-            t.settlement_status = ?,
-            t.selected_account_id = ?,
-            t.notes = ?
-        WHERE t.bank_transaction_id = ?
-          AND t.batch_id = ?
-          AND b.status = 'PREVIEW'
-          AND t.review_status <> 'POSTED'
-          AND t.posted_journal_id IS NULL
+        UPDATE bank_import_transaction
+        SET classification = ?, review_status = ?, settlement_status = ?,
+            selected_account_id = ?, notes = ?
+        WHERE bank_transaction_id = ? AND batch_id = ?
+          AND review_status NOT IN ('POSTED', 'MATCHED')
+          AND posted_journal_id IS NULL
         LIMIT 1
     ");
     $statement->execute([
@@ -820,16 +816,6 @@ function accounting_bank_import_save_review(
         $transactionId,
         $batchId,
     ]);
-
-    if ($statement->rowCount() !== 1) {
-        return [
-            'ok' => false,
-            'errors' => [
-                'The transaction was not updated. It may already '
-                . 'be posted or may not belong to this batch.',
-            ],
-        ];
-    }
 
     return ['ok' => true];
 }
@@ -885,6 +871,11 @@ function accounting_bank_import_preflight(
     ");
     $transactionStatement->execute([$batchId]);
     $transactions = $transactionStatement->fetchAll(PDO::FETCH_ASSOC);
+    $splitMap = accounting_bank_import_split_map($pdo, $batchId, $lockRows);
+    foreach ($transactions as &$transaction) {
+        $transaction['splits'] = $splitMap[(int)$transaction['bank_transaction_id']] ?? [];
+    }
+    unset($transaction);
     $errors = [];
     $readyCount = 0;
     $ignoredCount = 0;
@@ -967,7 +958,21 @@ function accounting_bank_import_preflight(
 
         ++$readyCount;
 
-        if (empty($transaction['selected_account_id'])) {
+        if ($transaction['splits']) {
+            try {
+                accounting_bank_import_validate_splits($transaction['splits'], (string)$transaction['signed_amount'], (int)$batch['account_id']);
+                if (!empty($transaction['selected_account_id'])) {
+                    throw new InvalidArgumentException('A split transaction cannot also have a single offsetting account.');
+                }
+                foreach ($transaction['splits'] as $split) {
+                    if ((int)$split['is_active'] !== 1) {
+                        throw new InvalidArgumentException('A split uses an inactive account.');
+                    }
+                }
+            } catch (Throwable $e) {
+                $errors[] = "Transaction #{$transactionId}: " . $e->getMessage();
+            }
+        } elseif (empty($transaction['selected_account_id'])) {
             $errors[] = "Transaction #{$transactionId} has no offsetting account.";
         } elseif (
             (int)$transaction['selected_account_id']
@@ -1130,14 +1135,9 @@ function accounting_bank_import_post_batch(
                 $userId,
             ]);
             $journalId = (int)$pdo->lastInsertId();
-            $offsetAccountId = (int)$transaction['selected_account_id'];
-
-            if ($signedAmount > 0) {
-                $line->execute([$journalId, 1, $bankAccountId, $amount, 0, 'Bank deposit']);
-                $line->execute([$journalId, 2, $offsetAccountId, 0, $amount, $lineMemo]);
-            } else {
-                $line->execute([$journalId, 1, $offsetAccountId, $amount, 0, $lineMemo]);
-                $line->execute([$journalId, 2, $bankAccountId, 0, $amount, 'Bank withdrawal']);
+            $allocationLines = accounting_bank_import_allocation_lines($transaction, $bankAccountId, $lineMemo);
+            foreach ($allocationLines as $index => $allocationLine) {
+                $line->execute(array_merge([$journalId, $index + 1], $allocationLine));
             }
 
             $link->execute([$journalId, $transactionId, $batchId]);
@@ -1493,5 +1493,108 @@ function accounting_bank_import_transactions(int $batchId): array
     ");
     $statement->execute([$batchId]);
 
-    return $statement->fetchAll();
+    $transactions = $statement->fetchAll();
+    $splitMap = accounting_bank_import_split_map(db(), $batchId);
+    foreach ($transactions as &$transaction) {
+        $transaction['splits'] = $splitMap[(int)$transaction['bank_transaction_id']] ?? [];
+    }
+    unset($transaction);
+    return $transactions;
+}
+
+function accounting_bank_import_discard_preview_batch(
+    int $batchId
+): array {
+    if ($batchId <= 0 || !accounting_bank_import_ready()) {
+        return ['ok' => false, 'errors' => ['Invalid bank import batch.']];
+    }
+
+    $pdo = db();
+
+    try {
+        $pdo->beginTransaction();
+
+        $batch = $pdo->prepare("
+            SELECT batch_id, status
+            FROM bank_import_batch
+            WHERE batch_id = ?
+            LIMIT 1
+            FOR UPDATE
+        ");
+        $batch->execute([$batchId]);
+        $batchRow = $batch->fetch(PDO::FETCH_ASSOC);
+
+        if (!$batchRow) {
+            $pdo->rollBack();
+            return ['ok' => false, 'errors' => ['Import batch not found.']];
+        }
+
+        if ((string)$batchRow['status'] !== 'PREVIEW') {
+            $pdo->rollBack();
+            return [
+                'ok' => false,
+                'errors' => ['Only an unapproved PREVIEW batch can be discarded.'],
+            ];
+        }
+
+        $transactionCheck = $pdo->prepare("
+            SELECT COUNT(*)
+            FROM bank_import_transaction
+            WHERE batch_id = ?
+              AND (
+                  posted_journal_id IS NOT NULL
+                  OR review_status IN ('POSTED', 'MATCHED')
+              )
+        ");
+        $transactionCheck->execute([$batchId]);
+
+        if ((int)$transactionCheck->fetchColumn() > 0) {
+            $pdo->rollBack();
+            return [
+                'ok' => false,
+                'errors' => [
+                    'This preview contains a matched or posted transaction and cannot be discarded.',
+                ],
+            ];
+        }
+
+        $count = $pdo->prepare(
+            'SELECT COUNT(*) FROM bank_import_transaction WHERE batch_id = ?'
+        );
+        $count->execute([$batchId]);
+        $transactionCount = (int)$count->fetchColumn();
+
+        $deleteTransactions = $pdo->prepare(
+            'DELETE FROM bank_import_transaction WHERE batch_id = ?'
+        );
+        $deleteTransactions->execute([$batchId]);
+
+        $deleteBatch = $pdo->prepare("
+            DELETE FROM bank_import_batch
+            WHERE batch_id = ?
+              AND status = 'PREVIEW'
+            LIMIT 1
+        ");
+        $deleteBatch->execute([$batchId]);
+
+        if ($deleteBatch->rowCount() !== 1) {
+            throw new RuntimeException('The preview batch changed before it could be discarded.');
+        }
+
+        $pdo->commit();
+
+        return [
+            'ok' => true,
+            'transaction_count' => $transactionCount,
+        ];
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+
+        return [
+            'ok' => false,
+            'errors' => ['Unable to discard the preview batch: ' . $e->getMessage()],
+        ];
+    }
 }
