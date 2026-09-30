@@ -1,3 +1,4 @@
+import { parseFieldNationSchedule } from './fieldnation-schedule.js';
 import express, { NextFunction, Request, RequestHandler, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -267,8 +268,7 @@ function parseFieldNationMessage(rawText: string): FieldNationParsed {
     ? decimalText(notificationDistance * 2)
     : labeledMileage;
   const scheduledText = firstField(text, ['scheduled start', 'scheduled date', 'appointment']);
-  const parsedScheduled = scheduledText ? new Date(scheduledText) : null;
-  const scheduledAt = parsedScheduled && !Number.isNaN(parsedScheduled.getTime()) ? parsedScheduled : null;
+  const scheduledAt = scheduledText ? parseFieldNationSchedule(scheduledText) : null;
   const payTypeText = firstField(text, ['pay type', 'compensation type'])?.toUpperCase() ?? '';
   const blendedMatch = text.match(/\$?\s*(\d+(?:\.\d{1,2})?)\s*(?:for|includes?)\s*(\d+(?:\.\d{1,2})?)\s*(?:hours?|hrs?).*?(?:up to|max(?:imum)?(?: of)?)\s*(\d+(?:\.\d{1,2})?)\s*(?:hours?|hrs?)?\s*(?:at|@)\s*\$?\s*(\d+(?:\.\d{1,2})?)\s*(?:\/\s*(?:hr|hour)|per\s*(?:hr|hour))/i);
   const hourlyMatch = text.match(/\$?\s*(\d+(?:\.\d{1,2})?)\s*(?:\/\s*(?:hr|hour)|per\s*(?:hr|hour))/i);

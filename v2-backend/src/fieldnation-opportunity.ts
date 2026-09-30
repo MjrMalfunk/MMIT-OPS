@@ -1,3 +1,4 @@
+import { parseFieldNationSchedule } from './fieldnation-schedule.js';
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 
@@ -137,18 +138,7 @@ function parsePay(text: string) {
 }
 
 function dateFromEmail(text: string, receivedAt: Date | null): Date | null {
-  const year = receivedAt?.getUTCFullYear() ?? new Date().getUTCFullYear();
-  const range = text.match(/(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s*([A-Za-z]{3,9})\s+(\d{1,2}),?\s*(?:@\s*)?(\d{1,2}(?::\d{2})?\s*(?:AM|PM))/i)
-    ?? text.match(/\b([A-Za-z]{3,9})\s+(\d{1,2})\s+(\d{1,2}:\d{2}\s*(?:AM|PM))/i);
-  if (!range) return null;
-  const month = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'].indexOf(range[1].slice(0, 3).toLowerCase());
-  const day = Number(range[2]);
-  const time = range[3].match(/(\d{1,2})(?::(\d{2}))?\s*(AM|PM)/i);
-  if (month < 0 || !time) return null;
-  let hour = Number(time[1]) % 12;
-  if (time[3].toUpperCase() === 'PM') hour += 12;
-  const local = new Date(year, month, day, hour, Number(time[2] ?? '0'));
-  return Number.isNaN(local.getTime()) ? null : local;
+  return parseFieldNationSchedule(text, receivedAt ?? new Date());
 }
 
 function profitability(gross: number, onsiteHours: number, oneWayMiles: number | null, oaiApplies: boolean) {
