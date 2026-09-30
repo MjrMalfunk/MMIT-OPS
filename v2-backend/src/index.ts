@@ -2253,15 +2253,25 @@ app.patch('/api/v1/work-orders/:id', requireRoles(OpsUserRole.OWNER, OpsUserRole
       return { kind: 'locked' as const };
     }
 
+    const payoutInputsChanged = changedFields.some((field) => ["grossPay", "checkInAt", "checkOutAt", "onsiteMinutes"].includes(field));
+    const calculation = before.status === WorkOrderStatus.COMPLETED && payoutInputsChanged ? calculateWorkOrderPayout({ ...before, grossPay: hasOwn(body, "grossPay") ? (data.grossPay === null ? null : new Prisma.Decimal(String(data.grossPay))) : before.grossPay, checkInAt: hasOwn(body, "checkInAt") ? checkInAt! : before.checkInAt, checkOutAt: hasOwn(body, "checkOutAt") ? checkOutAt! : before.checkOutAt, onsiteMinutes: hasOwn(body, "onsiteMinutes") ? Number(data.onsiteMinutes) : before.onsiteMinutes }) : null;
+    if (calculation && "error" in calculation) return { kind: "invalid_calculation" as const, error: calculation.error };
+
     const updated = await tx.workOrder.update({
       where: { id },
-      data,
+      data: {
+        ...data,
+        ...(calculation && !("error" in calculation) ? { actualGrossPay: calculation.amount, payCalculatedAt: new Date(), payCalculation: calculation.details } : {}),
+      },
       include: { client: true },
     });
     await writeAuditEvent(tx, req.auth!, 'work_order.updated', 'work_order', updated.id.toString(), {
       before: auditWorkOrderSnapshot(before),
       after: auditWorkOrderSnapshot(updated),
-      changedFields,
+      changedFields: [
+        ...changedFields,
+        ...(calculation && !("error" in calculation) ? ["actualGrossPay", "payCalculatedAt", "payCalculation"] : []),
+      ],
     });
     return { kind: 'updated' as const, workOrder: updated };
   });
@@ -2276,6 +2286,10 @@ app.patch('/api/v1/work-orders/:id', requireRoles(OpsUserRole.OWNER, OpsUserRole
   }
   if (outcome.kind === 'locked') {
     res.status(409).json({ error: 'Invoiced or paid work orders allow notes only. Use a later adjustment workflow for operational or financial corrections.' });
+    return;
+  }
+  if (outcome.kind === 'invalid_calculation') {
+    res.status(400).json({ error: outcome.error });
     return;
   }
   res.json({ data: serializeWorkOrder(outcome.workOrder) });
