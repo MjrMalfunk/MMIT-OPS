@@ -71,6 +71,13 @@ export type ParsedTrackerPacket = {
   mileage: number;
   rawPacket: JsonObject;
   metrics: TrackerMetrics;
+  materialUsage: TrackerMaterialUsage[];
+};
+
+export type TrackerMaterialUsage = {
+  sku: string;
+  quantity: number;
+  notes: string | null;
 };
 
 function invalid(message: string): never {
@@ -105,6 +112,23 @@ function closingNote(value: unknown): string | null {
   const trimmed = value.trim();
   if (trimmed.length > 10_000 || trimmed.includes('\0')) invalid('Closing note is too long or contains invalid text.');
   return trimmed || null;
+}
+
+function materialUsage(value: unknown): TrackerMaterialUsage[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 50) invalid('Materials must be an array with at most 50 entries.');
+  const seenSkus = new Set<string>();
+  return value.map((rawItem, index) => {
+    const item = objectValue(rawItem, `materials[${index}]`);
+    if (typeof item.sku !== 'string') invalid(`materials[${index}].sku must be text.`);
+    const sku = item.sku.trim().toUpperCase();
+    if (!sku || sku.length > 100 || /[\x00-\x1f\x7f]/.test(sku)) invalid(`Invalid materials[${index}].sku.`);
+    if (seenSkus.has(sku)) invalid(`Duplicate material SKU: ${sku}.`);
+    seenSkus.add(sku);
+    const quantity = boundedNumber(item.quantity, `materials[${index}].quantity`, 0.001, 10_000);
+    const notes = closingNote(item.notes);
+    return { sku, quantity: Number(quantity.toFixed(3)), notes };
+  });
 }
 
 /** Stable JSON is used for retry identity so property-order changes do not defeat idempotency. */
@@ -157,6 +181,7 @@ export function parseTrackerPacket(input: unknown): ParsedTrackerPacket {
   const serialized = canonicalJson(root);
   if (Buffer.byteLength(serialized, 'utf8') > MAX_PACKET_BYTES) invalid('Choose one JSON export no larger than 4 MiB.');
   if (root.schema !== 'mmit.work-tracker.v2') invalid('Expected an MMIT Work Tracker v0.2 export.');
+  const materialEntries = materialUsage(root.materials);
 
   const shift = objectValue(root.shift, 'shift');
   if (shift.platform !== 'FIELD_NATION') invalid('This import accepts Field Nation outings only.');
@@ -329,5 +354,6 @@ export function parseTrackerPacket(input: unknown): ParsedTrackerPacket {
     mileage,
     rawPacket: root,
     metrics,
+    materialUsage: materialEntries,
   };
 }

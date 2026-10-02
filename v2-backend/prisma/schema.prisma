@@ -79,6 +79,13 @@ enum WorkOrderMaterialSource {
   OTHER
 }
 
+enum InventoryMovementKind {
+  OPENING_BALANCE
+  RECEIPT
+  WORK_ORDER_USE
+  ADJUSTMENT
+}
+
 enum WorkOrderInvoiceStatus {
   DRAFT
   ISSUED
@@ -388,14 +395,51 @@ model WorkOrderMaterial {
   updatedAt     DateTime                 @updatedAt @db.DateTime(3)
   voidedAt      DateTime?                @db.DateTime(3)
   workOrderId   BigInt                   @db.UnsignedBigInt
+  inventoryItemId BigInt?                @db.UnsignedBigInt
   createdById   BigInt                   @db.UnsignedBigInt
   voidedById    BigInt?                  @db.UnsignedBigInt
   workOrder     WorkOrder                @relation(fields: [workOrderId], references: [id], onDelete: Restrict)
+  inventoryItem InventoryItem?           @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+  inventoryMovement InventoryMovement?
   createdBy     OpsUser                  @relation("WorkOrderMaterialCreator", fields: [createdById], references: [id], onDelete: Restrict)
   voidedBy      OpsUser?                 @relation("WorkOrderMaterialVoider", fields: [voidedById], references: [id], onDelete: Restrict)
 
   @@index([workOrderId, voidedAt, createdAt])
+  @@index([inventoryItemId])
   @@index([createdById, createdAt])
+}
+
+model InventoryItem {
+  id           BigInt               @id @default(autoincrement()) @db.UnsignedBigInt
+  sku          String               @unique @db.VarChar(100)
+  description  String               @db.VarChar(255)
+  unit         String               @db.VarChar(32)
+  quantityOnHand Decimal             @default(0) @db.Decimal(12, 3)
+  reorderPoint Decimal               @default(0) @db.Decimal(12, 3)
+  unitCost     Decimal               @default(0) @db.Decimal(10, 2)
+  active       Boolean              @default(true)
+  createdAt    DateTime             @default(now()) @db.DateTime(3)
+  updatedAt    DateTime             @updatedAt @db.DateTime(3)
+  materials    WorkOrderMaterial[]
+  movements    InventoryMovement[]
+
+  @@index([active, sku])
+}
+
+model InventoryMovement {
+  id                  BigInt                @id @default(autoincrement()) @db.UnsignedBigInt
+  kind                InventoryMovementKind
+  quantityDelta       Decimal               @db.Decimal(12, 3)
+  unitCostSnapshot    Decimal               @db.Decimal(10, 2)
+  notes               String?               @db.Text
+  occurredAt          DateTime              @default(now()) @db.DateTime(3)
+  createdAt           DateTime              @default(now()) @db.DateTime(3)
+  inventoryItemId     BigInt                @db.UnsignedBigInt
+  workOrderMaterialId BigInt?               @unique @db.UnsignedBigInt
+  inventoryItem       InventoryItem         @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+  workOrderMaterial   WorkOrderMaterial?    @relation(fields: [workOrderMaterialId], references: [id], onDelete: Restrict)
+
+  @@index([inventoryItemId, occurredAt])
 }
 
 model WorkOrderInvoice {

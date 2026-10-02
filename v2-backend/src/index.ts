@@ -11,6 +11,7 @@ import {
   AccountingJournalSourceType,
   InvoicePaymentMethod,
   InvoicePaymentStatus,
+  InventoryMovementKind,
   PaymentReconciliationStatus,
   ClientStatus,
   FieldNationImportStatus,
@@ -446,6 +447,20 @@ function parsePositiveQuantity(value: unknown): string | undefined {
   return Number.isFinite(parsed) && parsed > 0 && parsed <= 1_000_000 ? normalized : undefined;
 }
 
+function parseSignedQuantity(value: unknown): string | undefined {
+  if (typeof value !== 'number' && typeof value !== 'string') return undefined;
+  const normalized = String(value).trim();
+  if (!/^-?\d+(\.\d{1,3})?$/.test(normalized)) return undefined;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) && parsed !== 0 && Math.abs(parsed) <= 1_000_000 ? normalized : undefined;
+}
+
+function parseInventorySku(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const sku = value.trim().toUpperCase();
+  return /^[A-Z0-9][A-Z0-9._-]{0,99}$/.test(sku) ? sku : undefined;
+}
+
 function parseOptionalTimestamp(value: unknown): Date | null | undefined {
   if (value === null || value === '') return null;
   if (typeof value !== 'string') return undefined;
@@ -542,6 +557,9 @@ type WorkOrderExpenseWithUsers = Prisma.WorkOrderExpenseGetPayload<{
 }>;
 type WorkOrderMaterialWithUsers = Prisma.WorkOrderMaterialGetPayload<{
   include: { createdBy: true; voidedBy: true };
+}>;
+type InventoryItemWithMovements = Prisma.InventoryItemGetPayload<{
+  include: { movements: { orderBy: { occurredAt: 'desc' } } };
 }>;
 type WorkOrderInvoiceWithPeople = Prisma.WorkOrderInvoiceGetPayload<{
   include: { lines: true; createdBy: true; issuedBy: true; voidedBy: true };
@@ -641,6 +659,7 @@ function serializeMaterial(material: WorkOrderMaterialWithUsers) {
     ...material,
     id: material.id.toString(),
     workOrderId: material.workOrderId.toString(),
+    inventoryItemId: material.inventoryItemId?.toString() ?? null,
     createdById: material.createdById.toString(),
     voidedById: material.voidedById?.toString() ?? null,
     quantity: material.quantity.toString(),
@@ -650,6 +669,30 @@ function serializeMaterial(material: WorkOrderMaterialWithUsers) {
     voidedBy: material.voidedBy
       ? { id: material.voidedBy.id.toString(), email: material.voidedBy.email, displayName: material.voidedBy.displayName }
       : null,
+  };
+}
+
+function serializeInventoryItem(item: InventoryItemWithMovements) {
+  return {
+    id: item.id.toString(),
+    sku: item.sku,
+    description: item.description,
+    unit: item.unit,
+    quantityOnHand: item.quantityOnHand.toFixed(3),
+    reorderPoint: item.reorderPoint.toFixed(3),
+    unitCost: item.unitCost.toFixed(2),
+    active: item.active,
+    lowStock: item.quantityOnHand.lte(item.reorderPoint),
+    updatedAt: item.updatedAt,
+    movements: item.movements.map((movement) => ({
+      id: movement.id.toString(),
+      kind: movement.kind,
+      quantityDelta: movement.quantityDelta.toFixed(3),
+      unitCostSnapshot: movement.unitCostSnapshot.toFixed(2),
+      notes: movement.notes,
+      occurredAt: movement.occurredAt,
+      workOrderMaterialId: movement.workOrderMaterialId?.toString() ?? null,
+    })),
   };
 }
 
@@ -2539,6 +2582,67 @@ app.get('/api/v1/work-orders/:id/profitability', async (req: Request, res: Respo
   });
 });
 
+app.get('/api/v1/inventory', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (_req: Request, res: Response) => {
+  const items = await prisma.inventoryItem.findMany({
+    include: { movements: { orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }], take: 10 } },
+    orderBy: { sku: 'asc' },
+  });
+  res.json({ data: items.map(serializeInventoryItem) });
+});
+
+app.post('/api/v1/inventory', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
+  const body = requestBody(req);
+  const sku = body ? parseInventorySku(body.sku) : undefined;
+  const description = body ? parseNullableText(body.description, 255) : undefined;
+  const unit = body ? parseNullableText(body.unit, 32) : undefined;
+  const quantityOnHand = body ? parsePositiveQuantity(body.quantityOnHand) : undefined;
+  const reorderPoint = body ? parseOptionalMoney(body.reorderPoint) : undefined;
+  const unitCost = body ? parseOptionalMoney(body.unitCost) : undefined;
+  const notes = body && hasOwn(body, 'notes') ? parseNullableText(body.notes, 10_000) : null;
+  if (!body || !sku || !description || !unit || !quantityOnHand || reorderPoint === undefined || reorderPoint === null || unitCost === undefined || unitCost === null || notes === undefined) {
+    return void res.status(400).json({ error: 'Provide SKU, description, unit, positive starting quantity, non-negative reorder point, unit cost, and optional notes.' });
+  }
+  try {
+    const item = await prisma.$transaction(async (tx) => {
+      const created = await tx.inventoryItem.create({
+        data: { sku, description, unit, quantityOnHand, reorderPoint, unitCost },
+      });
+      await tx.inventoryMovement.create({
+        data: { inventoryItemId: created.id, kind: InventoryMovementKind.OPENING_BALANCE, quantityDelta: quantityOnHand, unitCostSnapshot: unitCost, notes },
+      });
+      await writeAuditEvent(tx, req.auth!, 'inventory.item_created', 'inventory_item', created.id.toString(), { sku, quantityOnHand, reorderPoint, unitCost });
+      return tx.inventoryItem.findUniqueOrThrow({ where: { id: created.id }, include: { movements: { orderBy: { occurredAt: 'desc' } } } });
+    });
+    res.status(201).json({ data: serializeInventoryItem(item) });
+  } catch (error: unknown) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002') return void res.status(409).json({ error: 'That SKU already exists in inventory.' });
+    throw error;
+  }
+});
+
+app.post('/api/v1/inventory/:id/adjustments', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
+  const id = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  const body = requestBody(req);
+  const quantityDelta = body ? parseSignedQuantity(body.quantityDelta) : undefined;
+  const notes = body ? parseNullableText(body.notes, 10_000) : undefined;
+  if (id === null || !body || !quantityDelta || !notes) return void res.status(400).json({ error: 'Provide a non-zero adjustment quantity and a reason.' });
+  const outcome = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM InventoryItem WHERE id = ${id} FOR UPDATE`;
+    const item = await tx.inventoryItem.findUnique({ where: { id } });
+    if (!item) return { kind: 'not_found' as const };
+    const nextQuantity = item.quantityOnHand.plus(quantityDelta);
+    if (nextQuantity.isNegative()) return { kind: 'insufficient' as const, available: item.quantityOnHand.toFixed(3) };
+    await tx.inventoryItem.update({ where: { id }, data: { quantityOnHand: nextQuantity.toFixed(3) } });
+    await tx.inventoryMovement.create({ data: { inventoryItemId: id, kind: InventoryMovementKind.ADJUSTMENT, quantityDelta, unitCostSnapshot: item.unitCost, notes } });
+    await writeAuditEvent(tx, req.auth!, 'inventory.adjusted', 'inventory_item', id.toString(), { sku: item.sku, quantityDelta, before: item.quantityOnHand.toFixed(3), after: nextQuantity.toFixed(3), notes });
+    const updated = await tx.inventoryItem.findUniqueOrThrow({ where: { id }, include: { movements: { orderBy: { occurredAt: 'desc' } } } });
+    return { kind: 'updated' as const, item: updated };
+  });
+  if (outcome.kind === 'not_found') return void res.status(404).json({ error: 'Inventory item not found.' });
+  if (outcome.kind === 'insufficient') return void res.status(409).json({ error: `Adjustment would make stock negative. Available: ${outcome.available}.` });
+  res.json({ data: serializeInventoryItem(outcome.item) });
+});
+
 app.get('/api/v1/work-orders/:id/costs', async (req: Request, res: Response) => {
   const workOrderId = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
   if (workOrderId === null) {
@@ -3376,6 +3480,24 @@ app.post('/api/v1/work-orders/:id/tracker-import', requireRoles(OpsUserRole.OWNE
     if (before.status === WorkOrderStatus.CANCELLED) return { kind: 'cancelled' as const };
     if (workOrderFinanciallyLocked(before.status)) return { kind: 'locked' as const };
 
+    const inventoryBySku = new Map<string, { id: bigint; sku: string; description: string; quantityOnHand: Prisma.Decimal; unitCost: Prisma.Decimal; active: boolean }>();
+    if (parsed.materialUsage.length > 0) {
+      const inventory = await tx.inventoryItem.findMany({ where: { sku: { in: parsed.materialUsage.map((item) => item.sku) } } });
+      for (const item of inventory) inventoryBySku.set(item.sku, item);
+      const unavailable = parsed.materialUsage.find((usage) => {
+        const item = inventoryBySku.get(usage.sku);
+        return !item || !item.active;
+      });
+      if (unavailable) return { kind: 'inventory_unavailable' as const, sku: unavailable.sku };
+
+      for (const item of inventory) await tx.$queryRaw`SELECT id FROM InventoryItem WHERE id = ${item.id} FOR UPDATE`;
+      const lockedInventory = await tx.inventoryItem.findMany({ where: { id: { in: inventory.map((item) => item.id) } } });
+      inventoryBySku.clear();
+      for (const item of lockedInventory) inventoryBySku.set(item.sku, item);
+      const short = parsed.materialUsage.find((usage) => inventoryBySku.get(usage.sku)!.quantityOnHand.lt(usage.quantity));
+      if (short) return { kind: 'inventory_short' as const, sku: short.sku, available: inventoryBySku.get(short.sku)!.quantityOnHand.toFixed(3) };
+    }
+
     const calculation = calculateWorkOrderPayout({
       ...before,
       checkInAt: parsed.checkInAt,
@@ -3406,6 +3528,36 @@ app.post('/api/v1/work-orders/:id/tracker-import', requireRoles(OpsUserRole.OWNE
         uploadedBy: { connect: { id: req.auth!.userId } },
       },
     });
+    const pulledMaterials = [] as Array<{ sku: string; quantity: string; workOrderMaterialId: string }>;
+    for (const usage of parsed.materialUsage) {
+      const item = inventoryBySku.get(usage.sku)!;
+      const material = await tx.workOrderMaterial.create({
+        data: {
+          workOrderId: id,
+          inventoryItemId: item.id,
+          source: WorkOrderMaterialSource.INVENTORY_PULL,
+          description: item.description,
+          sku: item.sku,
+          quantity: usage.quantity.toFixed(3),
+          unitCost: item.unitCost.toFixed(2),
+          notes: usage.notes,
+          createdById: req.auth!.userId,
+        },
+      });
+      const remaining = item.quantityOnHand.minus(usage.quantity);
+      await tx.inventoryItem.update({ where: { id: item.id }, data: { quantityOnHand: remaining.toFixed(3) } });
+      await tx.inventoryMovement.create({
+        data: {
+          inventoryItemId: item.id,
+          workOrderMaterialId: material.id,
+          kind: InventoryMovementKind.WORK_ORDER_USE,
+          quantityDelta: new Prisma.Decimal(usage.quantity).negated().toFixed(3),
+          unitCostSnapshot: item.unitCost.toFixed(2),
+          notes: usage.notes ?? `Imported from tracker outing ${parsed.shiftId}`,
+        },
+      });
+      pulledMaterials.push({ sku: item.sku, quantity: usage.quantity.toFixed(3), workOrderMaterialId: material.id.toString() });
+    }
     const updated = await tx.workOrder.update({
       where: { id },
       data: {
@@ -3436,6 +3588,7 @@ app.post('/api/v1/work-orders/:id/tracker-import', requireRoles(OpsUserRole.OWNE
       after: auditWorkOrderSnapshot(updated),
       changedFields: ['status', 'checkInAt', 'checkOutAt', 'mileage', 'mileageSource', 'driveMinutes', 'onsiteMinutes', 'adminMinutes', 'actualGrossPay', 'payCalculatedAt', 'payCalculation'],
       trackerImport: { id: trackerImport.id, shiftId: parsed.shiftId, contentSha256 },
+      inventoryPulls: pulledMaterials,
       metrics: parsed.metrics,
     } as unknown as Prisma.InputJsonValue);
     return { kind: 'applied' as const, workOrder: updated, trackerImport };
@@ -3446,6 +3599,8 @@ app.post('/api/v1/work-orders/:id/tracker-import', requireRoles(OpsUserRole.OWNE
   if (outcome.kind === 'duplicate') return void res.status(409).json({ error: 'This outing or work order already has a tracker import.', existingShiftId: outcome.existingShiftId, existingWorkOrderId: outcome.existingWorkOrderId });
   if (outcome.kind === 'cancelled') return void res.status(409).json({ error: 'Cancelled work orders cannot receive tracker data.' });
   if (outcome.kind === 'locked') return void res.status(409).json({ error: 'Invoiced or paid work orders require a later accounting adjustment workflow.' });
+  if (outcome.kind === 'inventory_unavailable') return void res.status(409).json({ error: `Inventory SKU ${outcome.sku} is missing or inactive. Add or activate it before importing this outing.` });
+  if (outcome.kind === 'inventory_short') return void res.status(409).json({ error: `Inventory SKU ${outcome.sku} does not have enough stock. Available: ${outcome.available}.` });
   if (outcome.kind === 'invalid_calculation') return void res.status(400).json({ error: outcome.error });
   const data = {
     workOrder: serializeWorkOrder(outcome.workOrder),
