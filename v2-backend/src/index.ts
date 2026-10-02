@@ -2215,6 +2215,7 @@ function nextAuthError(error: unknown, res: Response): void {
 app.use('/api/v1/clients', requireAuth);
 app.use('/api/v1/work-orders', requireAuth);
 app.use('/api/v1/accounting', requireAuth);
+app.use('/api/v1/inventory', requireAuth);
 
 app.get('/api/v1/accounting/journals', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN), async (req: Request, res: Response) => {
   const rawLimit = req.query.limit;
