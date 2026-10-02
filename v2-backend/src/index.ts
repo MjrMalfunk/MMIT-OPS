@@ -44,6 +44,7 @@ import {
 } from './auth.js';
 import { canonicalJson, parseTrackerPacket, TrackerPacketValidationError } from './tracker-import.js';
 import { parseFieldNationOpportunityEmail, readFieldNationMailbox } from './fieldnation-opportunity.js';
+import { calculateWorkOrderProfitability } from './work-order-profitability.js';
 
 // Load environment variables (db passwords, ports, secrets) securely
 dotenv.config();
@@ -2484,6 +2485,56 @@ app.get('/api/v1/work-orders/:id', async (req: Request, res: Response) => {
     return;
   }
   res.json({ data: serializeWorkOrder(workOrder) });
+});
+
+app.get('/api/v1/work-orders/:id/profitability', async (req: Request, res: Response) => {
+  const workOrderId = typeof req.params.id === 'string' ? parseId(req.params.id) : null;
+  if (workOrderId === null) {
+    res.status(400).json({ error: 'id must be a positive integer.' });
+    return;
+  }
+  const workOrder = await prisma.workOrder.findUnique({
+    where: { id: workOrderId },
+    include: {
+      vehicle: { select: { id: true, name: true } },
+      trackerImport: { select: { startedAt: true, completedAt: true } },
+    },
+  });
+  if (!workOrder) {
+    res.status(404).json({ error: 'Work order not found.' });
+    return;
+  }
+  const [expenses, materials] = await Promise.all([
+    prisma.workOrderExpense.findMany({ where: { workOrderId, voidedAt: null }, select: { costAmount: true } }),
+    prisma.workOrderMaterial.findMany({ where: { workOrderId, voidedAt: null }, select: { quantity: true, unitCost: true } }),
+  ]);
+  const expenseCost = expenses.reduce((total, item) => total.plus(item.costAmount), new Prisma.Decimal(0));
+  const materialCost = materials.reduce((total, item) => total.plus(item.quantity.mul(item.unitCost)), new Prisma.Decimal(0));
+  const directCost = expenseCost.plus(materialCost);
+  const profitability = calculateWorkOrderProfitability({
+    actualGrossPay: workOrder.actualGrossPay,
+    mileage: workOrder.mileage,
+    mileageSource: workOrder.mileageSource,
+    vehicleCostSnapshot: workOrder.vehicleCostSnapshot,
+    directCost,
+    trackerStartedAt: workOrder.trackerImport?.startedAt ?? null,
+    trackerCompletedAt: workOrder.trackerImport?.completedAt ?? null,
+    driveMinutes: workOrder.driveMinutes,
+    onsiteMinutes: workOrder.onsiteMinutes,
+    adminMinutes: workOrder.adminMinutes,
+  });
+  res.json({
+    data: {
+      ...profitability,
+      vehicleId: workOrder.vehicle?.id.toString() ?? null,
+      vehicleName: workOrder.vehicle?.name ?? null,
+      directCosts: {
+        expenses: expenseCost.toFixed(2),
+        materials: materialCost.toFixed(2),
+        total: directCost.toFixed(2),
+      },
+    },
+  });
 });
 
 app.get('/api/v1/work-orders/:id/costs', async (req: Request, res: Response) => {
