@@ -20,6 +20,7 @@
   const miles = value => value == null ? 'Not recorded' : `${Number(value).toFixed(2)} mi`;
   const minutes = value => value == null ? 'Not recorded' : `${Math.round(Number(value))} min`;
   const mileageLabel = value => value === 'ODOMETER' ? 'Odometer-backed' : value === 'MANUAL_RECORDED' ? 'Recorded manually — review when needed' : 'Not recorded';
+  const rateLabel = value => `${(Number(value || 0) * 100).toFixed(2)}%`;
 
   async function request(path) {
     const response = await fetch(path, { headers: { Authorization: `Bearer ${localStorage.getItem('mmit_ops_v2_token') || ''}` } });
@@ -37,18 +38,31 @@
     const vehicleDetail = profit.vehicleCostPerMile == null
       ? 'Assign a complete vehicle cost model'
       : `${vehicleName || 'Assigned vehicle'} · $${Number(profit.vehicleCostPerMile).toFixed(4)}/mi snapshot`;
+    const fees = profit.fieldNationFeeEstimate;
+    const feeDetails = fees ? `
+        <div><small>FieldNation platform fee · ${html(rateLabel(fees.platformRate))}</small><strong>${html(money(fees.platformFee))}</strong></div>
+        <div><small>Insurance fee · ${html(rateLabel(fees.insuranceRate))}</small><strong>${html(money(fees.insuranceFee))}</strong></div>
+        <div><small>OAI fee · ${html(rateLabel(fees.oaiRate))}</small><strong>${html(fees.oaiApplies ? money(fees.oaiFee) : 'Not applied')}</strong></div>
+        <div><small>Total FieldNation fees · configured rates</small><strong>${html(money(fees.totalFee))}</strong></div>` : '';
+    const payoutLabel = profit.payoutBeforeFees ? 'Work-order pay before FieldNation fees' : 'Actual payout';
+    const profitDetail = fees ? 'After vehicle, estimated FieldNation fees, and direct costs' : 'After vehicle and direct costs';
+    const feeNote = 'FieldNation fees use the configured rates shown above; the settlement statement has not been imported.';
+    const note = fees
+      ? `${feeNote}${profit.complete ? '' : ` ${missing}`}`
+      : missing;
     return `<section class="work-order-profitability" aria-label="Actual job profitability">
       <div class="work-order-profitability-heading"><div><div class="label">Completed-work review</div><h3>Actual job profitability</h3></div><span class="pill ${profit.complete ? '' : 'warn'}">${html(readiness)}</span></div>
       <div class="work-order-profitability-grid">
-        <div><small>Actual payout</small><strong>${html(money(profit.actualPayout))}</strong></div>
+        <div><small>${html(payoutLabel)}</small><strong>${html(money(profit.actualPayout))}</strong></div>
         <div><small>Recorded mileage</small><strong>${html(miles(profit.recordedMileage))}</strong><small>${html(mileageLabel(profit.mileageEvidence))}</small></div>
         <div><small>Vehicle operating cost</small><strong>${html(money(profit.vehicleCost))}</strong><small>${html(vehicleDetail)}</small></div>
         <div><small>Direct job costs</small><strong>${html(money(profit.directCost))}</strong><small>Materials and recorded expenses</small></div>
-        <div><small>True profit</small><strong>${html(money(profit.trueProfit))}</strong><small>After vehicle and direct costs</small></div>
+        ${feeDetails}
+        <div><small>True profit</small><strong>${html(money(profit.trueProfit))}</strong><small>${html(profitDetail)}</small></div>
         <div><small>Door-to-door time</small><strong>${html(minutes(profit.totalMinutes))}</strong><small>${profit.timeSource === 'TRACKER_OUTING' ? 'Tracker outing' : 'Recorded work-order totals'}</small></div>
         <div><small>Profit / door-to-door hour</small><strong>${html(money(profit.profitPerDoorToDoorHour))}</strong><small>Uses the recorded total above</small></div>
       </div>
-      <p class="work-order-profitability-note ${profit.complete ? '' : 'work-order-profitability-warning'}">${html(missing)}</p>
+      <p class="work-order-profitability-note ${profit.complete && !fees ? '' : 'work-order-profitability-warning'}">${html(note)}</p>
     </section>`;
   }
 

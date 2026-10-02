@@ -2512,6 +2512,8 @@ app.get('/api/v1/work-orders/:id/profitability', async (req: Request, res: Respo
   const materialCost = materials.reduce((total, item) => total.plus(item.quantity.mul(item.unitCost)), new Prisma.Decimal(0));
   const directCost = expenseCost.plus(materialCost);
   const profitability = calculateWorkOrderProfitability({
+    source: workOrder.source,
+    oaiApplies: String(process.env.FIELDNATION_PROFIT_OAI_APPLIES ?? 'false').toLowerCase() === 'true',
     actualGrossPay: workOrder.actualGrossPay,
     mileage: workOrder.mileage,
     mileageSource: workOrder.mileageSource,

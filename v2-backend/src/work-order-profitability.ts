@@ -1,8 +1,12 @@
+import { calculateFieldNationFees } from './fieldnation-fees.js';
+
 // A completed job keeps the vehicle cost model that was assigned to it, so
 // later profile edits never rewrite the economics of historical work.
 export type DecimalLike = { toString(): string } | string | number | null | undefined;
 
 export type WorkOrderProfitabilityInput = {
+  source?: string;
+  oaiApplies?: boolean;
   actualGrossPay: DecimalLike;
   mileage: DecimalLike;
   mileageSource: string;
@@ -64,6 +68,9 @@ export function calculateWorkOrderProfitability(input: WorkOrderProfitabilityInp
   const trackerMinutes = trackedMinutes(input.trackerStartedAt, input.trackerCompletedAt);
   const recordedMinutes = workOrderMinutes(input);
   const totalMinutes = trackerMinutes ?? recordedMinutes;
+  const fieldNationFees = input.source === 'FIELD_NATION' && payout !== null
+    ? calculateFieldNationFees(payout, input.oaiApplies)
+    : null;
   const missing: string[] = [];
 
   if (payout === null) missing.push('actual payout');
@@ -76,7 +83,7 @@ export function calculateWorkOrderProfitability(input: WorkOrderProfitabilityInp
     : null;
   const complete = missing.length === 0;
   const trueProfit = complete && payout !== null && vehicleCost !== null
-    ? round(payout - vehicleCost - directCost)
+    ? round(payout - vehicleCost - directCost - (fieldNationFees?.totalFee ?? 0))
     : null;
   const profitPerHour = trueProfit !== null && totalMinutes !== null && totalMinutes > 0
     ? round(trueProfit / (totalMinutes / 60))
@@ -86,6 +93,18 @@ export function calculateWorkOrderProfitability(input: WorkOrderProfitabilityInp
     complete,
     missing,
     actualPayout: payout === null ? null : round(payout),
+    payoutBeforeFees: input.source === 'FIELD_NATION',
+    fieldNationFeeEstimate: fieldNationFees === null ? null : {
+      basis: 'CONFIGURED_RATE_ESTIMATE',
+      platformRate: fieldNationFees.platformRate,
+      platformFee: fieldNationFees.platformFee,
+      insuranceRate: fieldNationFees.insuranceRate,
+      insuranceFee: fieldNationFees.insuranceFee,
+      oaiRate: fieldNationFees.oaiRate,
+      oaiApplies: fieldNationFees.oaiApplies,
+      oaiFee: fieldNationFees.oaiFee,
+      totalFee: fieldNationFees.totalFee,
+    },
     recordedMileage: mileage === null ? null : round(mileage),
     mileageSource: input.mileageSource,
     mileageEvidence: input.mileageSource === 'ODOMETER'
@@ -97,6 +116,7 @@ export function calculateWorkOrderProfitability(input: WorkOrderProfitabilityInp
     vehicleCostModelVersion: typeof vehicle?.modelVersion === 'number' ? vehicle.modelVersion : null,
     directCost: round(directCost),
     trueProfit,
+    trueProfitIncludesFieldNationFeeEstimate: fieldNationFees !== null,
     totalMinutes: totalMinutes === null ? null : round(totalMinutes, 2),
     timeSource: trackerMinutes !== null ? 'TRACKER_OUTING' : recordedMinutes !== null ? 'WORK_ORDER_TOTALS' : 'NOT_RECORDED',
     profitPerDoorToDoorHour: profitPerHour,

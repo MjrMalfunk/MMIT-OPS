@@ -1,4 +1,5 @@
 import { parseFieldNationSchedule } from './fieldnation-schedule.js';
+import { calculateFieldNationFees, fieldNationFeeSchedule } from './fieldnation-fees.js';
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 
@@ -146,21 +147,18 @@ function profitability(gross: number, onsiteHours: number, oneWayMiles: number |
   const targetHourly = Number(process.env.FIELDNATION_PROFIT_TARGET_HOURLY ?? 35);
   const mileageRate = vehicle?.rate ?? Number(process.env.FIELDNATION_PROFIT_MILEAGE_RATE ?? 0.67);
   const averageMph = Number(process.env.FIELDNATION_PROFIT_AVERAGE_MPH ?? 55);
-  const insuranceRate = Number(process.env.FIELDNATION_INSURANCE_FEE_RATE ?? 0.0195);
-  const oaiRate = Number(process.env.FIELDNATION_OAI_FEE_RATE ?? 0.005);
   const roundTripMiles = oneWayMiles === null ? null : oneWayMiles * 2;
   const driveMinutes = roundTripMiles === null ? null : Math.round(roundTripMiles / Math.max(5, averageMph) * 60);
-  const platformFee = Math.round(gross * 0.10 * 100) / 100;
-  const insuranceFee = Math.round(gross * insuranceRate * 100) / 100;
-  const oaiFee = oaiApplies ? Math.round(gross * oaiRate * 100) / 100 : 0;
+  const feeSchedule = fieldNationFeeSchedule(oaiApplies);
+  const feeBreakdown = calculateFieldNationFees(gross, feeSchedule.oaiApplies);
+  const { platformFee, insuranceFee, oaiFee, totalFee: fees } = feeBreakdown;
   const mileageCost = roundTripMiles === null ? 0 : Math.round(roundTripMiles * mileageRate * 100) / 100;
-  const fees = Math.round((platformFee + insuranceFee + oaiFee) * 100) / 100;
   const estimatedNet = Math.round((gross - fees - mileageCost) * 100) / 100;
   const totalHours = onsiteHours + ((driveMinutes ?? 0) / 60);
   const effectiveHourly = totalHours > 0 ? Math.round(estimatedNet / totalHours * 100) / 100 : 0;
-  const feeRate = .10 + insuranceRate + (oaiApplies ? oaiRate : 0);
+  const feeRate = feeSchedule.platformRate + feeSchedule.insuranceRate + (feeSchedule.oaiApplies ? feeSchedule.oaiRate : 0);
   const grossToTarget = totalHours > 0 && feeRate < 1 ? Math.round(((targetHourly * totalHours + mileageCost) / (1 - feeRate)) * 100) / 100 : 0;
-  return { complete: gross > 0 && onsiteHours > 0 && roundTripMiles !== null && (vehicle?.complete ?? true), vehicle_id: vehicle?.vehicleId ?? null, vehicle_name: vehicle?.vehicleName ?? null, vehicle_cost_source: vehicle ? "VEHICLE_PROFILE" : "CONFIGURED_FALLBACK", vehicle_cost_model: vehicle?.model ?? null, gross_known: gross > 0, onsite_known: onsiteHours > 0, travel_known: roundTripMiles !== null, target_hourly: targetHourly, mileage_rate: mileageRate, average_mph: averageMph, one_way_miles: oneWayMiles, round_trip_miles: roundTripMiles, drive_minutes: driveMinutes, onsite_hours: onsiteHours, total_hours: Math.round(totalHours * 100) / 100, gross, platform_fee: platformFee, insurance_fee: insuranceFee, oai_applies: oaiApplies, oai_fee: oaiFee, fees, mileage_cost: mileageCost, estimated_net: estimatedNet, effective_hourly: effectiveHourly, counteroffer_gross: Math.max(gross, grossToTarget), counteroffer_increase: Math.max(0, Math.round((grossToTarget - gross) * 100) / 100) };
+  return { complete: gross > 0 && onsiteHours > 0 && roundTripMiles !== null && (vehicle?.complete ?? true), vehicle_id: vehicle?.vehicleId ?? null, vehicle_name: vehicle?.vehicleName ?? null, vehicle_cost_source: vehicle ? "VEHICLE_PROFILE" : "CONFIGURED_FALLBACK", vehicle_cost_model: vehicle?.model ?? null, gross_known: gross > 0, onsite_known: onsiteHours > 0, travel_known: roundTripMiles !== null, target_hourly: targetHourly, mileage_rate: mileageRate, average_mph: averageMph, one_way_miles: oneWayMiles, round_trip_miles: roundTripMiles, drive_minutes: driveMinutes, onsite_hours: onsiteHours, total_hours: Math.round(totalHours * 100) / 100, gross, platform_fee: platformFee, insurance_fee: insuranceFee, oai_applies: feeBreakdown.oaiApplies, oai_fee: oaiFee, fees, mileage_cost: mileageCost, estimated_net: estimatedNet, effective_hourly: effectiveHourly, counteroffer_gross: Math.max(gross, grossToTarget), counteroffer_increase: Math.max(0, Math.round((grossToTarget - gross) * 100) / 100) };
 }
 
 export function parseFieldNationOpportunityEmail(input: { subject: string; sender: string; rawText: string; receivedAt: Date | null; oaiApplies?: boolean; vehicleCost?: OpportunityVehicleCost }): FieldNationOpportunity {
