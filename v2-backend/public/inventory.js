@@ -12,6 +12,20 @@
     host.insertAdjacentHTML('afterend', `<section id="inventoryCard" class="card inventory-card"><div class="inventory-head"><div><h2>Inventory</h2><p class="inventory-help">Stock here is the source of truth. Use its SKU in the mobile tracker while you are onsite.</p></div><button id="inventoryRefresh" class="secondary" type="button">Refresh stock</button></div><div class="inventory-grid"><div class="table-wrap inventory-table" id="inventoryRows"></div><div><h2 style="font-size:16px">Add stocked item</h2><form id="inventoryCreate" class="inventory-form"><div class="field"><label>SKU</label><input name="sku" maxlength="100" placeholder="RJ45-CAT6" required></div><div class="field"><label>Description</label><input name="description" maxlength="255" placeholder="Cat6 RJ45 connector" required></div><div class="field"><label>Unit</label><input name="unit" maxlength="32" placeholder="each or ft" required></div><div class="field"><label>Starting stock</label><input name="quantityOnHand" type="number" min="0.001" step="0.001" required></div><div class="field"><label>Reorder point</label><input name="reorderPoint" type="number" min="0" step="0.001" value="0" required></div><div class="field"><label>Unit cost</label><input name="unitCost" type="number" min="0" step="0.01" value="0" required></div><div class="field"><label>Opening note</label><input name="notes" maxlength="10000" placeholder="Optional"></div><button class="wide" type="submit">Add to inventory</button></form></div></div><div id="inventoryStatus" class="inventory-status"></div></section>`);
     document.getElementById('inventoryRefresh').onclick = refresh;
     document.getElementById('inventoryCreate').onsubmit = createItem;
+    const actions = document.createElement('div');
+    actions.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end';
+    const refreshButton = document.getElementById('inventoryRefresh');
+    refreshButton.replaceWith(actions);
+    actions.appendChild(refreshButton);
+    const downloadButton = document.createElement('button');
+    downloadButton.id = 'inventoryDownload';
+    downloadButton.type = 'button';
+    downloadButton.className = 'secondary';
+    downloadButton.textContent = 'Download catalog';
+    downloadButton.onclick = downloadCatalog;
+    actions.appendChild(downloadButton);
+    document.getElementById('inventoryStatus').setAttribute('role', 'status');
+    document.getElementById('inventoryStatus').setAttribute('aria-live', 'polite');
   }
   async function request(path, options = {}) {
     const headers = { Authorization: `Bearer ${localStorage.getItem('mmit_ops_v2_token') || ''}`, ...(options.headers || {}) };
@@ -29,6 +43,39 @@
   async function refresh() {
     card(); const status = document.getElementById('inventoryStatus'); if (!status) return; status.textContent = 'Loading inventory…';
     try { const response = await request('/api/v1/inventory'); render(Array.isArray(response.data) ? response.data : []); status.textContent = 'Inventory is current.'; } catch (error) { status.textContent = error.message; }
+  }
+  async function downloadCatalog() {
+    const button = document.getElementById('inventoryDownload');
+    const status = document.getElementById('inventoryStatus');
+    button.disabled = true;
+    status.textContent = 'Downloading inventory catalog…';
+    try {
+      // Read-only authenticated requests; never include the login token or stock movement history in the file.
+      const [inventory, identity] = await Promise.all([request('/api/v1/inventory'), request('/api/v1/auth/me')]);
+      const user = identity.data;
+      if (!Array.isArray(inventory.data) || !user?.id || !user?.email) throw Error('The inventory catalog could not be downloaded.');
+      const catalog = {
+        schema: 'mmit.inventory-catalog.v1',
+        serverUrl: window.location.origin,
+        userId: String(user.id), email: user.email,
+        syncedAtEpochMs: Date.now(),
+        items: inventory.data.filter(item => item.active).map(item => ({
+          sku: item.sku, description: item.description, unit: item.unit,
+          quantityOnHand: item.quantityOnHand, unitCost: item.unitCost, active: true,
+        })),
+      };
+      const blob = new Blob([JSON.stringify(catalog, null, 2) + '\n'], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `mmit-inventory-catalog-${new Date(catalog.syncedAtEpochMs).toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+      status.textContent = 'Catalog downloaded. Send it to your phone and choose Import catalog JSON in the tracker.';
+    } catch (error) { status.textContent = error.message; }
+    finally { button.disabled = false; }
   }
   async function createItem(event) {
     event.preventDefault(); const form = event.currentTarget; const status = document.getElementById('inventoryStatus'); const values = Object.fromEntries(new FormData(form).entries()); status.textContent = 'Adding stock item…';
