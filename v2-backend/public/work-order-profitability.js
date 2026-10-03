@@ -34,7 +34,7 @@
     const readiness = profit.complete ? 'Complete' : 'Needs records';
     const missing = Array.isArray(profit.missing) && profit.missing.length
       ? `Needs ${profit.missing.join(', ')} before true profit can be calculated.`
-      : 'Actual payout, recorded miles, vehicle cost, and direct costs are included.';
+      : 'Calculated job pay, recorded miles, vehicle cost, and direct costs are included.';
     const vehicleDetail = profit.vehicleCostPerMile == null
       ? 'Assign a complete vehicle cost model'
       : `${vehicleName || 'Assigned vehicle'} · $${Number(profit.vehicleCostPerMile).toFixed(4)}/mi snapshot`;
@@ -66,22 +66,14 @@
     </section>`;
   }
 
-  const original = window.openWorkOrder;
-  let activeWorkOrderId = null;
-  window.openWorkOrder = async id => {
-    activeWorkOrderId = String(id);
-    await original(id);
-    const content = document.getElementById('detailContent');
-    if (!content || content.querySelector(`[data-profitability-work-order="${String(id)}"]`)) return;
-    try {
-      const response = await request(`/api/v1/work-orders/${encodeURIComponent(id)}/profitability`);
-      if (activeWorkOrderId !== String(id)) return;
-      const section = document.createElement('div');
-      section.dataset.profitabilityWorkOrder = String(id);
-      section.innerHTML = render(response.data || {}, response.data?.vehicleName);
-      content.append(section);
-    } catch (error) {
-      console.warn('Work-order profitability could not load:', error.message);
-    }
-  };
+  window.addEventListener('ops:work-order-ready',async event=>{
+    const view=event.detail,id=view.id;
+    try{
+      const response=await request(`/api/v1/work-orders/${encodeURIComponent(id)}/profitability`);
+      if(window.opsWorkOrderView?.sequence!==view.sequence)return;
+      const section=document.createElement('div');section.dataset.profitabilityWorkOrder=id;
+      section.innerHTML=render(response.data||{},response.data?.vehicleName);
+      document.getElementById('detailContent').append(section);
+    }catch(error){if(window.opsWorkOrderView?.sequence===view.sequence)console.warn('Work-order profitability could not load:',error.message)}
+  });
 })();

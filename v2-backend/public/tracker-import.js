@@ -1,218 +1,84 @@
 (function () {
   'use strict';
-
-  let activeWorkOrderId = null;
-  let selectedPacket = null;
-  let selectedFileName = '';
-
-  const style = document.createElement('style');
-  style.textContent = `
-    .tracker-import-card{margin-top:14px;padding:16px;background:#0a192c;border:1px solid #29415f;border-radius:12px}
-    .tracker-import-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;margin-bottom:6px}
-    .tracker-import-heading strong{font-size:16px}
-    .tracker-import-copy{color:#9db0c8;margin:0 0 13px}
-    .tracker-import-actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
-    .tracker-import-actions input[type=file]{max-width:100%;color:#9db0c8}
-    .tracker-import-preview{margin-top:13px}
-    .tracker-import-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}
-    .tracker-import-summary div{padding:9px;background:#132640;border:1px solid #213752;border-radius:8px}
-    .tracker-import-summary small{display:block;color:#9db0c8;font-size:11px}
-    .tracker-import-summary strong{display:block;margin-top:2px;overflow-wrap:anywhere}
-    .tracker-import-warning{margin-top:10px;padding:10px 12px;border-left:3px solid #f2bd67;background:#49371e;color:#f8d895;border-radius:5px}
-    .tracker-import-success{margin-top:10px;padding:10px 12px;border-left:3px solid #53d39b;background:#123b35;color:#a9f2d2;border-radius:5px}
-    .tracker-import-error{margin-top:10px;padding:10px 12px;border-left:3px solid #ff7d8b;background:#462331;color:#ffc0c8;border-radius:5px}
-    @media(max-width:800px){.tracker-import-summary{grid-template-columns:repeat(2,1fr)}}
-  `;
-  document.head.appendChild(style);
-
-  function html(value) {
-    return String(value == null ? '—' : value).replace(/[&<>"']/g, (char) => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-    }[char]));
-  }
-
-  function formatMoney(value) {
-    return value == null ? '—' : `$${Number(value).toFixed(2)}`;
-  }
-
-  function formatDateTime(value) {
-    return value ? new Date(value).toLocaleString() : '—';
-  }
-
-  async function trackerApi(path, options = {}) {
-    const headers = {
-      ...(options.headers || {}),
-      Authorization: `Bearer ${localStorage.getItem('mmit_ops_v2_token') || ''}`,
-      'Content-Type': 'application/json',
-    };
-    const response = await fetch(path, { ...options, headers });
-    let body = {};
-    try { body = await response.json(); } catch {}
-    if (!response.ok) {
-      const error = new Error(body.error || `Request failed (${response.status})`);
-      error.status = response.status;
-      throw error;
-    }
-    return body;
-  }
-
-  function setPreview(markup) {
-    const target = document.getElementById('trackerImportPreview');
-    if (target) target.innerHTML = markup;
-  }
-
-  function packetValue(packet, key) {
-    if (packet && packet[key] != null) return packet[key];
-    if (packet && packet.shift) {
-      if (key === 'shiftId' && packet.shift.id != null) return packet.shift.id;
-      if (packet.shift[key] != null) return packet.shift[key];
-    }
-    if (packet && packet.metadata && packet.metadata[key] != null) return packet.metadata[key];
-    const events = Array.isArray(packet && packet.events) ? packet.events : [];
-    for (const event of events) {
-      if (event && event.payload && event.payload[key] != null) return event.payload[key];
-    }
-    return null;
-  }
-
-  function eventTypes(packet) {
-    return Array.isArray(packet && packet.events)
-      ? packet.events.map((event) => event && event.type).filter(Boolean)
-      : [];
-  }
-
-  function renderPreview(packet) {
-    const schema = packet && (packet.schema || packet.packetSchema) || '—';
-    const workOrderNumber = packetValue(packet, 'workOrderNumber');
-    const shiftId = packetValue(packet, 'shiftId');
-    const roundTrip = packetValue(packet, 'roundTripExpected');
-    const events = eventTypes(packet);
-    const exportedAt = packetValue(packet, 'exportedAtEpochMs') || packetValue(packet, 'exportedAt');
-    const exportedText = exportedAt ? formatDateTime(typeof exportedAt === 'number' ? new Date(exportedAt).toISOString() : exportedAt) : '—';
-
-    const problems = [];
-    if (!packet || typeof packet !== 'object' || Array.isArray(packet)) problems.push('The selected file is not a JSON object.');
-    if (!events.length) problems.push('No event list was found; the server will reject this packet.');
-    if (!workOrderNumber) problems.push('No work-order number was found in the packet.');
-
-    setPreview(`
-      <div class="muted">${html(selectedFileName)} · ${events.length} event${events.length === 1 ? '' : 's'}</div>
-      <div class="tracker-import-summary">
-        <div><small>Work order</small><strong>${html(workOrderNumber)}</strong></div>
-        <div><small>Packet schema</small><strong>${html(schema)}</strong></div>
-        <div><small>Shift ID</small><strong>${html(shiftId)}</strong></div>
-        <div><small>Round trip</small><strong>${roundTrip == null ? '—' : roundTrip ? 'Yes' : 'No'}</strong></div>
-        <div><small>Exported</small><strong>${html(exportedText)}</strong></div>
-        <div><small>Event sequence</small><strong>${html(events.join(' → '))}</strong></div>
-      </div>
-      ${problems.length ? `<div class="tracker-import-error">${problems.map(html).join('<br>')}</div>` : `
-        <div class="actions" style="margin-top:13px;justify-content:flex-start">
-          <button type="button" id="applyTrackerImport">Apply tracker import</button>
-        </div>
-      `}
-    `);
-
-    const apply = document.getElementById('applyTrackerImport');
-    if (apply) apply.onclick = applyImport;
-  }
-
-  async function applyImport() {
-    if (!selectedPacket || !activeWorkOrderId) {
-      setPreview('<div class="tracker-import-error">Select a work order and packet first.</div>');
-      return;
-    }
-    const apply = document.getElementById('applyTrackerImport');
-    if (apply) {
-      apply.disabled = true;
-      apply.textContent = 'Applying…';
-    }
-    try {
-      const result = await trackerApi(`/api/v1/work-orders/${encodeURIComponent(activeWorkOrderId)}/tracker-import`, {
-        method: 'POST',
-        body: JSON.stringify(selectedPacket),
-      });
-      const data = result.data || {};
-      const imported = data.trackerImport || {};
-      const workOrder = data.workOrder || {};
-      const warnings = Array.isArray(imported.warnings) ? imported.warnings : [];
-      setPreview(`
-        <div class="tracker-import-success">
-          ${data.idempotent ? 'This packet was already imported; no changes were made.' : 'Tracker packet imported and work order updated.'}
-          <br><small>Import ${html(imported.id)} · ${html(workOrder.status)} · ${html(workOrder.actualGrossPay == null ? 'payout unchanged' : formatMoney(workOrder.actualGrossPay))}</small>
-        </div>
-        ${warnings.length ? `<div class="tracker-import-warning"><strong>Review warnings</strong><br>${warnings.map(html).join('<br>')}</div>` : ''}
-      `);
-      if (typeof load === 'function' && typeof openWorkOrder === 'function') {
-        await load();
-        await openWorkOrder(activeWorkOrderId);
-      } else {
-        window.location.reload();
-      }
-    } catch (error) {
-      setPreview(`<div class="tracker-import-error">${html(error.message)}</div>`);
-    } finally {
-      const current = document.getElementById('applyTrackerImport');
-      if (current) {
-        current.disabled = false;
-        current.textContent = 'Apply tracker import';
-      }
-    }
-  }
-
-  function mount() {
-    const detailContent = document.getElementById('detailContent');
-    if (!detailContent || !activeWorkOrderId || !detailContent.querySelector('.detail-grid')) return;
-    if (document.getElementById('trackerImportCard')) return;
-    const card = document.createElement('div');
-    card.id = 'trackerImportCard';
-    card.className = 'tracker-import-card';
-    card.innerHTML = `
-      <div class="tracker-import-heading">
-        <div><div class="label">FieldNation tracker</div><strong>Import completed outing</strong></div>
-        <span class="pill">JSON</span>
-      </div>
-      <p class="tracker-import-copy">Preview the mobile tracker packet, then apply its verified time and mileage to this work order.</p>
-      <div class="tracker-import-actions">
-        <input id="trackerPacketFile" type="file" accept="application/json,.json">
-        <button type="button" id="previewTrackerPacket" class="secondary">Preview packet</button>
-      </div>
-      <div id="trackerImportPreview"></div>
-    `;
-    detailContent.appendChild(card);
-    const file = document.getElementById('trackerPacketFile');
-    const preview = document.getElementById('previewTrackerPacket');
-    file.onchange = () => {
-      selectedPacket = null;
-      selectedFileName = file.files && file.files[0] ? file.files[0].name : '';
-      setPreview('');
-    };
-    preview.onclick = async () => {
-      const selected = file.files && file.files[0];
-      if (!selected) {
-        setPreview('<div class="tracker-import-error">Choose a JSON packet first.</div>');
-        return;
-      }
+  const html = value => String(value ?? '—').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+  const money = value => '$' + Number(value).toFixed(2);
+  const editable = () => ['OWNER','ADMIN','OPERATOR'].includes(window.opsUser?.role);
+  const success = new Map();
+  window.addEventListener('ops:signed-out', () => success.clear());
+  window.addEventListener('ops:work-order-ready', event => {
+    const view = event.detail, job = view.workOrder;
+    if (job.source !== 'FIELD_NATION') return;
+    const current = () => window.opsWorkOrderView?.sequence === view.sequence && card.isConnected;
+    const card = document.createElement('section'); card.id='trackerImportCard';card.className='tracker-import-card';
+    const locked = ['INVOICED','PAID','CANCELLED'].includes(job.status) || !editable();
+    card.innerHTML=`<h3>Import completed outing</h3><p>Selected work order: <strong>${html(job.sourceReference)}</strong></p><p class="muted">Preview the phone export before applying time, mileage, and material use.</p>${locked?'<p class="muted">Import is unavailable for this status or your account permissions.</p>':'<div class="tracker-import-actions"><label>Completed tracker JSON<input id="trackerPacketFile" type="file" accept="application/json,.json"></label><button type="button" id="previewTrackerPacket" class="secondary">Preview packet</button></div>'}<div id="trackerImportPreview" role="status" aria-live="polite"></div>`;
+    document.getElementById('detailContent').append(card);
+    const output=card.querySelector('#trackerImportPreview');
+    if(success.has(view.id))output.innerHTML=success.get(view.id);
+    if(locked)return;
+    const file=card.querySelector('input'), preview=card.querySelector('#previewTrackerPacket');
+    let generation=0, applying=false;
+    file.onchange=()=>{generation++;output.innerHTML='';};
+    preview.onclick=async()=>{
+      if(applying)return;
+      const selected=file.files?.[0], attempt=++generation;
+      const fresh=()=>current() && generation===attempt;
+      if(!selected){output.textContent='Choose a completed tracker export first.';return;}
+      output.textContent='Reading packet…';
       try {
-        selectedPacket = JSON.parse(await selected.text());
-        renderPreview(selectedPacket);
-      } catch (error) {
-        selectedPacket = null;
-        setPreview(`<div class="tracker-import-error">The selected file is not valid JSON: ${html(error.message)}</div>`);
-      }
+        if(selected.size>4*1024*1024)throw Error('Choose a JSON file no larger than 4 MiB.');
+        const packet=JSON.parse(await selected.text());if(!fresh())return;
+        const shift=packet?.shift;
+        if(packet?.schema!=='mmit.work-tracker.v2'||!shift||shift.platform!=='FIELD_NATION')throw Error('Choose a FieldNation outing exported by MMIT Work Tracker.');
+        if(typeof shift.workOrderNumber!=='string')throw Error('The packet is missing its work-order reference.');
+        if(shift.workOrderNumber.trim()!==job.sourceReference)throw Error(`Reference mismatch: packet ${shift.workOrderNumber}; selected job ${job.sourceReference}. Open the matching job or export a new outing with the correct reference.`);
+        const events=packet.events;
+        const expected=['SHIFT_STARTED','FN_TRIP_STARTED','FN_ARRIVED_SITE','FN_CHECKED_IN','FN_WORK_COMPLETED','FN_CHECKED_OUT',...(shift.roundTripExpected?['FN_RETURN_STARTED','FN_RETURN_COMPLETED']:['OUTING_COMPLETED'])];
+        const start=shift.startedAtEpochMs,end=shift.completedAtEpochMs;
+        if(typeof shift.roundTripExpected!=='boolean'||!Array.isArray(events)||events.length!==expected.length||events.some((row,index)=>row.type!==expected[index]))throw Error('Export a completed outing with its original event sequence.');
+        if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<1577836800000||end>4102444800000||end<start||end-start>172800000)throw Error('The outing timeline is incomplete or invalid.');
+        let previous=start;
+        for(const row of events){const at=row.occurredAtEpochMs;if(!Number.isSafeInteger(at)||at<previous||at>end)throw Error('The packet events are out of order or outside the outing.');previous=at;}
+        if(!Number.isFinite(shift.startOdometer)||!Number.isFinite(shift.endOdometer)||shift.startOdometer<0||shift.endOdometer<shift.startOdometer||shift.endOdometer>9999999||shift.endOdometer-shift.startOdometer>3000)throw Error('Starting and ending odometers must be valid and increasing.');
+        const materials=packet.materials??[], seen=new Set();
+        if(!Array.isArray(materials)||materials.length>50)throw Error('The packet material list is invalid.');
+        const usage=materials.map(row=>{
+          const sku=typeof row?.sku==='string'?row.sku.trim().toUpperCase():'';
+          if(!sku||sku.length>100||/[\x00-\x1f\x7f]/.test(sku)||seen.has(sku)||!Number.isFinite(row.quantity)||row.quantity<.001||row.quantity>10000)throw Error('Materials need unique SKUs and valid positive quantities.');
+          seen.add(sku);return{sku,quantity:Number(row.quantity.toFixed(3))};
+        });
+        let stock=[], warning=job.vehicleId?'':'No service vehicle is assigned. Assign it before importing if its odometer should be updated.';
+        if(usage.length){
+          try{stock=(await window.api('/api/v1/inventory')).data;if(!Array.isArray(stock))throw Error('Invalid catalog');}
+          catch{stock=[];warning+=' Current stock could not be loaded. OPS will validate availability and cost when you apply.';}
+          if(!fresh())return;
+        }
+        let total=0,known=true;
+        const lines=usage.map(row=>{
+          const item=stock.find(item=>item.sku===row.sku),valid=item?.active!==false&&item&&Number.isFinite(Number(item.unitCost));
+          const cost=valid?Math.round((row.quantity*Number(item.unitCost)+Number.EPSILON)*100)/100:null;
+          if(cost===null)known=false;else total+=cost;
+          const short=valid&&Number(item.quantityOnHand)<row.quantity;
+          return `<tr><td>${html(row.sku)}<small>${html(item?.description??'OPS will check this SKU')}</small></td><td>${html(row.quantity)} ${html(item?.unit??'')}</td><td>${valid?html(item.quantityOnHand):'Unknown'}</td><td>${cost===null?'Unknown':money(cost)}${short?'<small class="error">Insufficient stock; OPS will check for an existing import first.</small>':''}</td></tr>`;
+        }).join('');
+        output.innerHTML=`<p><strong>Reference matches ${html(job.sourceReference)}</strong> · ${html(selected.name)}</p><div class="tracker-import-summary"><div>Outing duration<strong>${((end-start)/60000).toFixed(2)} min</strong></div><div>Odometer mileage<strong>${(shift.endOdometer-shift.startOdometer).toFixed(2)} mi</strong></div><div>Estimated materials cost<strong>${known?money(total):'Unknown'}</strong></div></div>${usage.length?`<div class="table-wrap"><table><thead><tr><th>Material</th><th>Used</th><th>Current stock</th><th>Estimated cost</th></tr></thead><tbody>${lines}</tbody></table></div>`:'<p>No materials recorded in this packet.</p>'}<p class="muted">${html(warning||'Preview uses current catalog prices. OPS validates the complete packet and deducts stock only once when applied.')} This does not record a received payment.</p>${end-start<300000||shift.endOdometer===shift.startOdometer?'<p class="tracker-import-warning">Short outing or zero mileage: confirm this was intentional.</p>':''}<button type="button" id="applyTrackerImport">Apply to ${html(job.sourceReference)}</button><p class="error" data-import-error></p>`;
+        const apply=output.querySelector('button');
+        apply.onclick=async()=>{
+          if(!fresh()||applying)return;
+          applying=true;apply.disabled=true;file.disabled=true;preview.disabled=true;
+          try{
+            // Capture the view and packet; subsequent navigation cannot change the target.
+            const result=await window.api(`/api/v1/work-orders/${encodeURIComponent(view.id)}/tracker-import`,{method:'POST',body:JSON.stringify(packet)});
+            const data=result.data??{}, warnings=data.trackerImport?.warnings??[];
+            const message=`<p class="tracker-import-success">${data.idempotent?'Already imported; stock was not deducted again.':'Outing imported. Time, mileage, and material use were recorded.'}</p>${warnings.length?`<p class="tracker-import-warning">${warnings.map(html).join('<br>')}</p>`:''}`;
+            success.set(view.id,message);
+            if(fresh())output.innerHTML=message;
+            await window.load();
+            if(current())await window.openWorkOrder(view.id);
+          }catch(error){if(fresh()){const target=output.querySelector('[data-import-error]');if(target)target.textContent=error.message;}}
+          finally{applying=false;if(fresh()){apply.disabled=false;file.disabled=false;preview.disabled=false;}}
+        };
+      }catch(error){if(fresh())output.innerHTML=`<p class="error">${html(error.message)}</p>`;}
     };
-  }
-
-  document.addEventListener('click', (event) => {
-    const button = event.target.closest && event.target.closest('[data-work-order-id]');
-    if (button) {
-      activeWorkOrderId = button.dataset.workOrderId;
-      selectedPacket = null;
-      selectedFileName = '';
-    }
-  }, true);
-
-  const detailContent = document.getElementById('detailContent');
-  if (detailContent) {
-    new MutationObserver(() => setTimeout(mount, 0)).observe(detailContent, { childList: true });
-  }
-})();
+  });
+}());

@@ -2435,14 +2435,31 @@ app.get('/api/v1/work-orders', async (req: Request, res: Response) => {
     res.status(400).json({ error: 'status must be a valid work-order status.' });
     return;
   }
-
-  const workOrders = await prisma.workOrder.findMany({
-    where: status ? { status } : undefined,
-    include: { client: true },
-    orderBy: [{ scheduledAt: 'asc' }, { id: 'desc' }],
-    take: 100,
-  });
-  res.json({ data: workOrders.map(serializeWorkOrder) });
+  // Preserve the old response data while exposing every page to the dashboard.
+  const pageNumber = (value: unknown, fallback: number): number | null => {
+    if (value === undefined) return fallback;
+    if (typeof value !== 'string' || !/^\d+$/.test(value)) return null;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : null;
+  };
+  const limit = pageNumber(req.query.limit, 100);
+  const offset = pageNumber(req.query.offset, 0);
+  if (limit === null || limit < 1 || limit > 100 || offset === null || offset < 0 || offset > 2_147_483_647) {
+    res.status(400).json({ error: 'limit must be 1–100 and offset must be a non-negative integer.' });
+    return;
+  }
+  const where = status ? { status } : undefined;
+  const [total, workOrders] = await prisma.$transaction([
+    prisma.workOrder.count({ where }),
+    prisma.workOrder.findMany({
+      where,
+      include: { client: true },
+      orderBy: [{ scheduledAt: 'asc' }, { id: 'desc' }],
+      take: limit,
+      skip: offset,
+    }),
+  ]);
+  res.json({ data: workOrders.map(serializeWorkOrder), pagination: { total, limit, offset } });
 });
 
 app.post('/api/v1/work-orders', requireRoles(OpsUserRole.OWNER, OpsUserRole.ADMIN, OpsUserRole.OPERATOR), async (req: Request, res: Response) => {
