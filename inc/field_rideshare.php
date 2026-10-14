@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/field_vehicles.php';
+require_once __DIR__ . '/field_rideshare_mileage.php';
 
 /**
  * Lyft/rideshare profitability tracking.
@@ -119,6 +120,10 @@ function field_rideshare_ensure_schema(): void
         'packages_delivered' => 'INT UNSIGNED NULL',
         'packages_returned' => 'INT UNSIGNED NULL',
         'stops_completed' => 'INT UNSIGNED NULL',
+        'odometer_scope' => "VARCHAR(20) NOT NULL DEFAULT 'WORK_INTERVAL'",
+        'offline_odometer' => 'DECIMAL(12,1) NULL',
+        'mileage_split_source' => "VARCHAR(24) NOT NULL DEFAULT 'LEGACY'",
+        'tracker_shift_id' => 'CHAR(36) NULL UNIQUE',
         'deadhead_miles' =>
             'DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER business_miles',
         'deadhead_minutes' =>
@@ -150,139 +155,32 @@ function field_rideshare_ensure_schema(): void
           COLLATE=utf8mb4_unicode_ci"
     );
 
+
+    db()->exec("CREATE TABLE IF NOT EXISTS field_rideshare_tracker_evidence (
+        evidence_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        shift_id BIGINT UNSIGNED NOT NULL,
+        tracker_shift_id CHAR(36) NOT NULL,
+        packet_sha256 CHAR(64) NOT NULL,
+        packet_json MEDIUMTEXT NOT NULL,
+        imported_by_user_id BIGINT UNSIGNED NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_shift_packet (shift_id, packet_sha256),
+        KEY idx_tracker_shift (tracker_shift_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    db()->exec("CREATE TABLE IF NOT EXISTS field_rideshare_tracker_corrections (
+        correction_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        shift_id BIGINT UNSIGNED NOT NULL,
+        tracker_shift_id CHAR(36) NOT NULL,
+        packet_sha256 CHAR(64) NOT NULL,
+        corrected_fields_json MEDIUMTEXT NOT NULL,
+        correction_note VARCHAR(500) NOT NULL,
+        corrected_by_user_id BIGINT UNSIGNED NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_tracker_correction_shift (shift_id, created_at),
+        KEY idx_tracker_correction_outing (tracker_shift_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
     $schemaReady = true;
-}
 
-/**
- * Pure calculator used by both persistence and smoke tests.
- *
- * Platform fees are informational. Base ride earnings represent the
- * driver's earned amount and therefore are not reduced by platform fees.
- */
-function field_rideshare_calculate(array $input): array
-{
-    $odometerStart = round(
-        max(0.0, (float)($input['odometer_start'] ?? 0)),
-        1
-    );
-
-    $odometerEnd = round(
-        max(0.0, (float)($input['odometer_end'] ?? 0)),
-        1
-    );
-
-    if ($odometerEnd < $odometerStart) {
-        throw new InvalidArgumentException(
-            'Ending odometer cannot be below starting odometer.'
-        );
-    }
-
-    $businessMiles = round($odometerEnd - $odometerStart, 2);
-    $deadheadMiles = round(
-        max(0.0, (float)($input['deadhead_miles'] ?? 0)),
-        2
-    );
-    $totalBusinessMiles = round(
-        $businessMiles + $deadheadMiles,
-        2
-    );
-
-    $vehicleCpm = round(
-        max(0.0, (float)($input['vehicle_cpm_snapshot'] ?? 0)),
-        4
-    );
-
-    $base = round(
-        (float)($input['base_ride_earnings'] ?? 0),
-        2
-    );
-
-    $tips = round((float)($input['tips'] ?? 0), 2);
-    $bonuses = round((float)($input['bonuses'] ?? 0), 2);
-    $adjustments = round((float)($input['adjustments'] ?? 0), 2);
-
-    $tolls = round(
-        (float)($input['toll_reimbursements'] ?? 0),
-        2
-    );
-
-    $directCosts = round(
-        max(0.0, (float)($input['direct_trip_costs'] ?? 0)),
-        2
-    );
-
-    $recognizedRevenue = round(
-        $base + $tips + $bonuses + $adjustments + $tolls,
-        2
-    );
-
-    $onlineVehicleCost = round($businessMiles * $vehicleCpm, 2);
-    $deadheadVehicleCost = round($deadheadMiles * $vehicleCpm, 2);
-    $vehicleCost = round($totalBusinessMiles * $vehicleCpm, 2);
-
-    $profit = round(
-        $recognizedRevenue - $directCosts - $vehicleCost,
-        2
-    );
-
-    $onlineMinutes = max(
-        0,
-        (int)($input['online_minutes'] ?? 0)
-    );
-
-    $onlineHours = $onlineMinutes / 60;
-    $deadheadMinutes = max(
-        0,
-        (int)($input['deadhead_minutes'] ?? 0)
-    );
-    $totalWorkMinutes = $onlineMinutes + $deadheadMinutes;
-    $totalWorkHours = $totalWorkMinutes / 60;
-
-    return [
-        'business_miles' => $businessMiles,
-        'deadhead_miles' => $deadheadMiles,
-        'total_business_miles' => $totalBusinessMiles,
-        'deadhead_minutes' => $deadheadMinutes,
-        'total_work_minutes' => $totalWorkMinutes,
-        'vehicle_cpm_snapshot' => $vehicleCpm,
-        'online_vehicle_cost' => $onlineVehicleCost,
-        'deadhead_vehicle_cost' => $deadheadVehicleCost,
-        'vehicle_cost' => $vehicleCost,
-        'recognized_revenue' => $recognizedRevenue,
-        'true_operating_profit' => $profit,
-
-        'gross_per_business_mile' => $businessMiles > 0
-            ? round($recognizedRevenue / $businessMiles, 2)
-            : null,
-
-        'profit_per_business_mile' => $businessMiles > 0
-            ? round($profit / $businessMiles, 2)
-            : null,
-
-        'gross_per_total_business_mile' => $totalBusinessMiles > 0
-            ? round($recognizedRevenue / $totalBusinessMiles, 2)
-            : null,
-
-        'profit_per_total_business_mile' => $totalBusinessMiles > 0
-            ? round($profit / $totalBusinessMiles, 2)
-            : null,
-
-        'gross_per_online_hour' => $onlineHours > 0
-            ? round($recognizedRevenue / $onlineHours, 2)
-            : null,
-
-        'profit_per_online_hour' => $onlineHours > 0
-            ? round($profit / $onlineHours, 2)
-            : null,
-
-        'gross_per_total_hour' => $totalWorkHours > 0
-            ? round($recognizedRevenue / $totalWorkHours, 2)
-            : null,
-
-        'profit_per_total_hour' => $totalWorkHours > 0
-            ? round($profit / $totalWorkHours, 2)
-            : null,
-    ];
 }
 
 function field_rideshare_find_shift(int $shiftId): ?array
@@ -323,10 +221,11 @@ function field_rideshare_normalize_datetime(
         'Y-m-d H:i',
         'Y-m-d H:i:s',
         'Y-m-d\TH:i',
+        'Y-m-d\TH:i:s',
     ];
 
     foreach ($formats as $format) {
-        $date = DateTimeImmutable::createFromFormat($format, $value);
+        $date = DateTimeImmutable::createFromFormat('!' . $format, $value);
 
         if (
             $date instanceof DateTimeImmutable
@@ -547,6 +446,46 @@ function field_rideshare_save_shift(
 
     $shiftId = max(0, (int)($input['shift_id'] ?? 0));
     $vehicleId = max(0, (int)($input['vehicle_id'] ?? 0));
+    $reviewToken = (string)($input['tracker_review_token'] ?? '');
+    $review = $reviewToken !== '' ? ($_SESSION['rideshare_tracker_reviews'][$reviewToken] ?? null) : null;
+    if ($reviewToken !== '' && !is_array($review)) {
+        throw new InvalidArgumentException('Tracker preview expired. Preview the file again before saving.');
+    }
+    // Re-parse server-held evidence; a hidden field never supplies raw trusted readings.
+    $tracker = $review ? field_rideshare_tracker_preview($review['raw']) : null;
+    $trackerBaseline = $tracker;
+    $newTrackerEvidence = $tracker !== null;
+    if ($tracker) {
+        if ((int)$review['shift_id'] !== $shiftId) {
+            throw new InvalidArgumentException('Tracker preview belongs to a different shift.');
+        }
+    } elseif ($shiftId > 0) {
+        // Editing a saved tracker shift still compares against its immutable packet.
+        $evidence = db()->prepare('SELECT packet_json FROM field_rideshare_tracker_evidence
+            WHERE shift_id = ? ORDER BY evidence_id DESC LIMIT 1');
+        $evidence->execute([$shiftId]);
+        $savedPacket = $evidence->fetchColumn();
+        if (is_string($savedPacket) && $savedPacket !== '') {
+            $trackerBaseline = field_rideshare_tracker_preview($savedPacket);
+        }
+    }
+
+    $trackerCorrections = [];
+    foreach (['platform', 'odometer_start', 'odometer_end', 'odometer_scope', 'offline_odometer'] as $field) {
+        if ($trackerBaseline && (string)($input[$field] ?? '') !== (string)$trackerBaseline['form'][$field]) {
+            $trackerCorrections[$field] = [
+                'tracker' => $trackerBaseline['form'][$field],
+                'corrected' => (string)($input[$field] ?? ''),
+            ];
+        }
+    }
+    $trackerCorrectionNote = trim((string)($input['tracker_correction_note'] ?? ''));
+    if ($trackerCorrections && $trackerCorrectionNote === '') {
+        throw new InvalidArgumentException('Explain the tracker correction before saving changed tracker-derived fields.');
+    }
+    if (strlen($trackerCorrectionNote) > 500) {
+        throw new InvalidArgumentException('Tracker correction note must be 500 characters or fewer.');
+    }
 
     $vehicle = field_vehicle_find($vehicleId);
 
@@ -739,6 +678,10 @@ function field_rideshare_save_shift(
     }
 
     $values = [
+        'odometer_scope' => $calculation['odometer_scope'],
+        'offline_odometer' => $calculation['offline_odometer'],
+        'mileage_split_source' => $calculation['mileage_split_source'],
+        'tracker_shift_id' => $tracker['tracker_shift_id'] ?? null,
         'vehicle_id' => $vehicleId,
         'platform' => $platform,
         'scheduled_minutes' => $scheduledMinutes,
@@ -831,7 +774,7 @@ function field_rideshare_save_shift(
     try {
         if ($shiftId > 0) {
             $lockStatement = $pdo->prepare(
-                'SELECT shift_id, accounting_journal_id
+                'SELECT shift_id, accounting_journal_id, tracker_shift_id
                  FROM field_rideshare_shifts
                  WHERE shift_id = ?
                  LIMIT 1
@@ -854,9 +797,18 @@ function field_rideshare_save_shift(
                 );
             }
 
+            if ($tracker && !empty($lockedShift['tracker_shift_id'])
+                && $lockedShift['tracker_shift_id'] !== $tracker['tracker_shift_id']) {
+                throw new InvalidArgumentException('This shift already belongs to another tracker outing.');
+            }
+            $values['tracker_shift_id'] ??= $lockedShift['tracker_shift_id'];
             $sql = "
                 UPDATE field_rideshare_shifts
-                SET vehicle_id = :vehicle_id,
+                SET odometer_scope = :odometer_scope,
+                    offline_odometer = :offline_odometer,
+                    mileage_split_source = :mileage_split_source,
+                    tracker_shift_id = :tracker_shift_id,
+                    vehicle_id = :vehicle_id,
                     platform = :platform,
                     scheduled_minutes = :scheduled_minutes,
                     flex_finish_estimated = :flex_finish_estimated,
@@ -929,6 +881,25 @@ function field_rideshare_save_shift(
             $shiftId = (int)$pdo->lastInsertId();
         }
 
+        if ($newTrackerEvidence && $tracker) {
+            $evidence = $pdo->prepare('INSERT IGNORE INTO field_rideshare_tracker_evidence
+                (shift_id, tracker_shift_id, packet_sha256, packet_json, imported_by_user_id)
+                VALUES (?, ?, ?, ?, ?)');
+            $evidence->execute([$shiftId, $tracker['tracker_shift_id'], $tracker['sha256'], $tracker['raw'], $userId ?: null]);
+        }
+        if ($trackerCorrections && $trackerBaseline) {
+            $correction = $pdo->prepare('INSERT INTO field_rideshare_tracker_corrections
+                (shift_id, tracker_shift_id, packet_sha256, corrected_fields_json, correction_note, corrected_by_user_id)
+                VALUES (?, ?, ?, ?, ?, ?)');
+            $correction->execute([
+                $shiftId,
+                $trackerBaseline['tracker_shift_id'],
+                $trackerBaseline['sha256'],
+                json_encode($trackerCorrections, JSON_THROW_ON_ERROR),
+                $trackerCorrectionNote,
+                $userId ?: null,
+            ]);
+        }
         field_rideshare_replace_breaks(
             $shiftId,
             $breaks
@@ -945,6 +916,9 @@ function field_rideshare_save_shift(
         throw $exception;
     }
 
+    if ($tracker) {
+        unset($_SESSION['rideshare_tracker_reviews'][$reviewToken]);
+    }
     $saved = field_rideshare_find_shift($shiftId);
 
     if (!$saved) {
@@ -1016,6 +990,7 @@ function field_rideshare_summary(
         'shift_count' => count($shifts),
         'rideshare_online_minutes' => 0,
         'estimated_shift_count' => 0,
+        'unallocated_mileage_shift_count' => 0,
         'business_miles' => 0.0,
         'deadhead_miles' => 0.0,
         'total_business_miles' => 0.0,
@@ -1035,6 +1010,7 @@ function field_rideshare_summary(
             $summary['rideshare_online_minutes'] += (int)$shift['online_minutes'];
         }
         $summary['estimated_shift_count'] += !empty($shift['flex_finish_estimated']) ? 1 : 0;
+        $summary['unallocated_mileage_shift_count'] += ($shift['mileage_split_source'] ?? '') === 'UNALLOCATED' ? 1 : 0;
         $summary['business_miles'] +=
             (float)$shift['business_miles'];
 
@@ -1106,7 +1082,7 @@ function field_rideshare_summary(
         : null;
 
     $summary['gross_per_business_mile'] =
-        $summary['business_miles'] > 0
+        $summary['unallocated_mileage_shift_count'] === 0 && $summary['business_miles'] > 0
             ? round(
                 $summary['recognized_revenue']
                 / $summary['business_miles'],
@@ -1115,7 +1091,7 @@ function field_rideshare_summary(
             : null;
 
     $summary['profit_per_business_mile'] =
-        $summary['business_miles'] > 0
+        $summary['unallocated_mileage_shift_count'] === 0 && $summary['business_miles'] > 0
             ? round(
                 $summary['true_operating_profit']
                 / $summary['business_miles'],
