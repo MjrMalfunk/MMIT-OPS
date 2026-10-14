@@ -176,12 +176,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             if ($existing) {
                 $_POST = [...$_POST, ...$existing];
+                if ($trackerPreview['flex'] && !$trackerPreview['flex']['pay_confirmed']) {
+                    $trackerPreview['warnings'][] = 'Your saved earnings were retained because this export does not contain a confirmed payout.';
+                }
             }
             $token = bin2hex(random_bytes(16));
             $pending = $_SESSION['rideshare_tracker_reviews'] ?? [];
             $pending[$token] = ['raw' => $raw, 'shift_id' => (int)($_POST['shift_id'] ?? 0)];
             $_SESSION['rideshare_tracker_reviews'] = array_slice($pending, -3, null, true);
-            $_POST = [...$_POST, ...$trackerPreview['form'], 'tracker_review_token' => $token];
+            $_POST = [...field_rideshare_tracker_prefill($trackerPreview, $_POST, $existing !== null), 'tracker_review_token' => $token];
             $flashSuccess = 'Tracker preview loaded. Review the fields, add platform earnings, then Save. No shift has been saved.';
         } else {
         field_rideshare_save_shift(
@@ -280,6 +283,7 @@ $form += [
     'payout_destination' => 'LYFT_DIRECT',
     'notes' => '',
     'block_hours' => '',
+    'flex_scheduled_start_at' => '',
     'flex_station' => '',
     'packages_assigned' => '',
     'packages_delivered' => '',
@@ -297,6 +301,16 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 if (($form['mileage_split_source'] ?? '') === 'UNALLOCATED') {
     $form['deadhead_miles'] = '';
+}
+// Reopen the original schedule from immutable evidence; no new database column is needed.
+if ($editShift && !empty($editShift['tracker_shift_id']) && $form['platform'] === 'AMAZON_FLEX') {
+    $evidence = db()->prepare('SELECT packet_json FROM field_rideshare_tracker_evidence WHERE shift_id = ? ORDER BY evidence_id DESC LIMIT 1');
+    $evidence->execute([(int)$editShift['shift_id']]);
+    $savedPacket = $evidence->fetchColumn();
+    if (is_string($savedPacket) && $savedPacket !== '') {
+        $savedPreview = field_rideshare_tracker_preview($savedPacket);
+        $form['flex_scheduled_start_at'] = $savedPreview['form']['flex_scheduled_start_at'] ?? '';
+    }
 }
 $breakRows = [];
 
@@ -1044,11 +1058,11 @@ $rangeLabel = match ($range) {
 
         <fieldset>
           <legend>Import tracker outing</legend>
-          <label>Completed Lyft / Uber tracker file
+          <label>Completed Lyft / Uber / Flex tracker file
             <input type="file" name="tracker_packet" accept="application/json,.json">
           </label>
           <button type="submit" id="preview-tracker-button" name="action" value="preview_tracker" formnovalidate disabled>Preview tracker file</button>
-          <p>Preview fills times and odometers. Review earnings and booked figures from Lyft/Uber before saving. For an outing entered manually before, open Edit first.</p>
+          <p>Preview fills times and odometers, plus Flex block details and recorded pay. Review earnings, costs, and any personal travel before saving. For an outing entered manually before, open Edit first.</p>
           <?php if ($trackerPreview): ?>
             <ul><?php foreach ($trackerPreview['warnings'] as $warning): ?><li><?= $h($warning) ?></li><?php endforeach; ?></ul>
           <?php endif; ?>
@@ -1056,7 +1070,7 @@ $rangeLabel = match ($range) {
             <?php if ($form['tracker_review_token'] !== ''): ?>
             <input type="hidden" name="tracker_review_token" value="<?= $h($form['tracker_review_token']) ?>">
             <?php endif; ?>
-            <p>Original tracker evidence stays attached. If you correct the tracker-derived service or odometers, explain why below; the original and corrected values are both retained.</p>
+            <p>Original tracker evidence stays attached. Explain corrections to service, readings, or travel times below; the original and corrected values are both retained.</p>
             <label>Tracker correction note
               <input type="text" name="tracker_correction_note" maxlength="500" value="<?= $h($form['tracker_correction_note']) ?>" placeholder="Example: corrected ending odometer after entry typo">
             </label>
@@ -1079,6 +1093,10 @@ $rangeLabel = match ($range) {
           </label>
           <fieldset id="flex-fields">
             <legend>Flex block</legend>
+            <input type="hidden" id="flex_scheduled_start_at" name="flex_scheduled_start_at" value="<?= $h($form['flex_scheduled_start_at']) ?>">
+            <?php if ($form['flex_scheduled_start_at'] !== ''): ?>
+              <p>Scheduled block start: <?= $h(str_replace('T', ' ', $form['flex_scheduled_start_at'])) ?>. Work time below starts when you departed.</p>
+            <?php endif; ?>
             <label>Block hours
               <input name="block_hours" id="block_hours" type="number" min="0.25" max="24" step="0.25" value="<?= $h($form['block_hours']) ?>">
             </label>
@@ -1719,10 +1737,10 @@ $rangeLabel = match ($range) {
       el.hidden = flex;
       el.querySelectorAll('input').forEach(input => input.disabled = flex);
     });
-    document.getElementById('start-label').textContent = flex ? 'Block start time' : 'Went online';
+    document.getElementById('start-label').textContent = flex ? 'Departure / work start' : 'Went online';
     document.getElementById('end-label').textContent = flex ? 'Actual finish (optional)' : 'Went offline';
     document.getElementById('work-minutes-label').textContent = flex ? 'Actual / estimated work minutes' : 'Online minutes';
-    const start = new Date(document.getElementById('started_at').value);
+    const start = new Date(document.getElementById('flex_scheduled_start_at').value || document.getElementById('started_at').value);
     const hours = Number(blockHours.value);
     scheduledEnd.value = '';
     const info = document.getElementById('flex-timing');

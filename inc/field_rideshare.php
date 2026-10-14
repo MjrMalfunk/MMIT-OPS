@@ -470,15 +470,7 @@ function field_rideshare_save_shift(
         }
     }
 
-    $trackerCorrections = [];
-    foreach (['platform', 'odometer_start', 'odometer_end', 'odometer_scope', 'offline_odometer'] as $field) {
-        if ($trackerBaseline && (string)($input[$field] ?? '') !== (string)$trackerBaseline['form'][$field]) {
-            $trackerCorrections[$field] = [
-                'tracker' => $trackerBaseline['form'][$field],
-                'corrected' => (string)($input[$field] ?? ''),
-            ];
-        }
-    }
+    $trackerCorrections = $trackerBaseline ? field_rideshare_tracker_changes($trackerBaseline['form'], $input) : [];
     $trackerCorrectionNote = trim((string)($input['tracker_correction_note'] ?? ''));
     if ($trackerCorrections && $trackerCorrectionNote === '') {
         throw new InvalidArgumentException('Explain the tracker correction before saving changed tracker-derived fields.');
@@ -533,7 +525,9 @@ function field_rideshare_save_shift(
         if ($startedAt === null) {
             throw new InvalidArgumentException('Enter the Flex block start.');
         }
-        $block = field_gig_block_end($startedAt, $input['block_hours'] ?? null);
+        // Imported departure may precede the block. The server-held packet owns its schedule.
+        $scheduledStart = $trackerBaseline['form']['flex_scheduled_start_at'] ?? $startedAt;
+        $block = field_gig_block_end(str_replace('T', ' ', $scheduledStart), $input['block_hours'] ?? null);
         $scheduledMinutes = $block['minutes'];
         if ($endedAt === null) {
             $endedAt = $block['end'];

@@ -81,7 +81,7 @@ function field_rideshare_mileage(array $input): array
     ];
 }
 
-/** Read only completed rideshare packets. Never infer odometers or earnings from GPS. */
+/** Read completed gig packets. GPS never supplies an odometer reading or payout. */
 function field_rideshare_tracker_preview(string $raw): array
 {
     if (strlen($raw) > 4 * 1024 * 1024) {
@@ -99,8 +99,8 @@ function field_rideshare_tracker_preview(string $raw): array
     $shift = $packet['shift'];
     $id = (string)($shift['id'] ?? '');
     if (!preg_match('/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i', $id)
-        || !in_array($shift['platform'] ?? '', ['LYFT', 'UBER'], true)) {
-        throw new InvalidArgumentException('Select a completed Lyft or Uber outing.');
+        || !in_array($shift['platform'] ?? '', ['LYFT', 'UBER', 'AMAZON_FLEX'], true)) {
+        throw new InvalidArgumentException('Select a completed Lyft, Uber, or Amazon Flex outing.');
     }
     $times = [];
     foreach (['startedAtEpochMs', 'wentOfflineAtEpochMs', 'homeArrivedAtEpochMs', 'completedAtEpochMs'] as $key) {
@@ -166,6 +166,7 @@ function field_rideshare_tracker_preview(string $raw): array
         'deadhead_miles' => '',
         'mileage_split_source' => 'MANUAL_ESTIMATE',
         'deadhead_minutes' => (int)round(($arrival - $offline) / 60000),
+        'online_minutes' => max(0, (int)round(($offline - $start) / 60000) - array_sum(array_map(static fn($b) => (int)round(($b[1] - $b[0]) / 60000), $breaks))),
         'break_started_at' => array_map(static fn($b) => $format($b[0]), $breaks),
         'break_ended_at' => array_map(static fn($b) => $format($b[1]), $breaks),
     ];
@@ -188,8 +189,126 @@ function field_rideshare_tracker_preview(string $raw): array
     if (!$mileage['mileage_split_known']) {
         $warnings[] = 'Offline odometer was not recorded. Total miles are preserved; the online/offline split is unknown unless you enter an estimate.';
     }
+    $flex = null;
+    if ($shift['platform'] === 'AMAZON_FLEX') {
+        $flex = field_rideshare_flex_tracker_fields($packet, $times, $format);
+        $form = [...$form, ...$flex['form']];
+        $warnings[0] = 'Times use Fort Wayne local time. Work time starts at departure, not the scheduled block start. Package counts and costs are not recorded by the tracker.';
+        $warnings = [...$warnings, ...$flex['warnings']];
+    }
     return ['form' => $form, 'tracker_shift_id' => strtolower($id), 'sha256' => hash('sha256', $raw),
-        'warnings' => $warnings, 'raw' => $raw];
+        'warnings' => $warnings, 'raw' => $raw, 'flex' => $flex];
+}
+
+/** Validate Flex facts independently of user-editable earnings and schedule fields. */
+function field_rideshare_flex_tracker_fields(array $packet, array $times, callable $format): array
+{
+    $block = $packet['flexBlock'] ?? null;
+    if (!is_array($block) || !in_array($block['version'] ?? null, [1, 2], true)) {
+        throw new InvalidArgumentException('The Flex export is missing supported block details.');
+    }
+    $epochs = [];
+    foreach (['scheduledStartEpochMs', 'scheduledEndEpochMs', 'actualWorkFinishedAtEpochMs'] as $key) {
+        $value = $block[$key] ?? null;
+        if (!is_int($value) || $value < 946684800000 || $value > 4102444800000) {
+            throw new InvalidArgumentException('Invalid Flex schedule or actual finish.');
+        }
+        $epochs[$key] = $value;
+    }
+    $duration = $epochs['scheduledEndEpochMs'] - $epochs['scheduledStartEpochMs'];
+    if ($duration < 900000 || $duration > 86400000 || $duration % 900000 !== 0
+        || $epochs['actualWorkFinishedAtEpochMs'] !== $times['wentOfflineAtEpochMs']) {
+        throw new InvalidArgumentException('Flex block duration or actual finish does not agree with the outing.');
+    }
+    $money = static function ($value): int {
+        if (!is_int($value) || $value < 0 || $value > 100000000) {
+            throw new InvalidArgumentException('Invalid Flex pay amount.');
+        }
+        return $value;
+    };
+    $offered = $money($block['offeredPayCents'] ?? null);
+    $confirmed = isset($block['confirmedPayCents']) ? $money($block['confirmedPayCents']) : null;
+    $types = array_column($packet['events'] ?? [], 'type');
+    if (in_array('FLEX_PACKAGE_RETURN_STARTED', $types, true) && !in_array('FLEX_PACKAGE_RETURN_COMPLETED', $types, true)) {
+        throw new InvalidArgumentException('Required station returns must be completed before importing a Flex outing.');
+    }
+    $outcome = $block['outcome'] ?? ($block['version'] === 1
+        ? (in_array('FLEX_RELEASED_NO_ROUTE', $types, true) ? 'RELEASED_NO_ROUTE' : 'COMPLETED') : '');
+    $finishEvent = match ($outcome) {
+        'COMPLETED' => in_array('FLEX_PACKAGE_RETURN_COMPLETED', $types, true) ? 'FLEX_PACKAGE_RETURN_COMPLETED' : 'FLEX_DELIVERIES_FINISHED',
+        'RELEASED_NO_ROUTE' => 'FLEX_RELEASED_NO_ROUTE',
+        'CANCELLED' => 'FLEX_BLOCK_CANCELLED',
+        default => throw new InvalidArgumentException('Unsupported Flex outcome.'),
+    };
+    $matching = array_values(array_filter($packet['events'] ?? [], static fn($e) => ($e['type'] ?? '') === $finishEvent));
+    if (count($matching) !== 1 || ($matching[0]['occurredAtEpochMs'] ?? null) !== $times['wentOfflineAtEpochMs']) {
+        throw new InvalidArgumentException('The Flex finish event does not match its outcome and offline boundary.');
+    }
+    $effective = $confirmed ?? ($outcome === 'CANCELLED' ? 0 : $offered);
+    if (isset($block['effectivePayCents']) && $money($block['effectivePayCents']) !== $effective) {
+        throw new InvalidArgumentException('Flex effective pay does not agree with the offer, outcome, and confirmed payout.');
+    }
+    $station = $block['station'] ?? '';
+    if (!is_string($station) || strlen($station) > 100 || preg_match('/[\x00-\x1f\x7f]/', $station)) {
+        throw new InvalidArgumentException('Invalid Flex station.');
+    }
+    $warnings = [
+        'The full recorded return is included in miles and time. Personal detours require a reviewed correction; importing does not automatically remove them.',
+        $confirmed !== null ? 'Earnings are your confirmed Flex payout.' : ($outcome === 'CANCELLED'
+            ? 'Canceled / pulled block: earnings default to $0. An appeal is not a confirmed payout.'
+            : 'Earnings are the offered block pay, not a confirmed payout. Check Flex earnings before posting to Accounting.'),
+    ];
+    $summary = sprintf('Tracker export: Flex %s; scheduled %s to %s; offered $%.2f; %s.',
+        str_replace('_', ' ', strtolower($outcome)), str_replace('T', ' ', $format($epochs['scheduledStartEpochMs'])),
+        str_replace('T', ' ', $format($epochs['scheduledEndEpochMs'])), $offered / 100,
+        $confirmed !== null ? sprintf('confirmed pay $%.2f', $confirmed / 100) : 'payout not confirmed in export');
+    foreach ([$block['cancellationReason'] ?? null, $block['cancellationNote'] ?? null, $packet['shift']['closingNote'] ?? null] as $note) {
+        if ($note === null) continue;
+        if (!is_string($note) || strlen($note) > 10000 || strpos($note, "\0") !== false) {
+            throw new InvalidArgumentException('Invalid tracker closeout or cancellation note.');
+        }
+        if (trim($note) !== '') $summary .= "\n" . trim($note);
+    }
+    return ['form' => [
+        'block_hours' => $duration / 3600000,
+        'flex_scheduled_start_at' => $format($epochs['scheduledStartEpochMs']),
+        'flex_station' => trim($station),
+        'base_ride_earnings' => number_format($effective / 100, 2, '.', ''),
+    ], 'warnings' => $warnings, 'summary_note' => $summary, 'outcome' => $outcome, 'pay_confirmed' => $confirmed !== null,
+        'offered_pay_cents' => $offered, 'scheduled_start' => $format($epochs['scheduledStartEpochMs']),
+        'scheduled_finish' => $format($epochs['scheduledEndEpochMs'])];
+}
+
+/** Fill known facts without overwriting manually confirmed earnings on an existing shift. */
+function field_rideshare_tracker_prefill(array $preview, array $current, bool $editing): array
+{
+    $imported = $preview['form'];
+    $flex = $preview['flex'];
+    if ($editing && $flex && !$flex['pay_confirmed']) unset($imported['base_ride_earnings']);
+    if (!$editing && $flex) $imported['payout_destination'] = 'PERSONAL_BANK';
+    $filled = array_replace($current, $imported);
+    if ($flex && !str_contains((string)($filled['notes'] ?? ''), $flex['summary_note'])) {
+        $filled['notes'] = trim((string)($filled['notes'] ?? '') . "\n" . $flex['summary_note']);
+    }
+    return $filled;
+}
+
+/** Compare recorded facts with reviewed fields without treating date display formats as edits. */
+function field_rideshare_tracker_changes(array $original, array $current): array
+{
+    $changes = [];
+    foreach (['platform', 'odometer_start', 'odometer_end', 'odometer_scope', 'offline_odometer', 'started_at', 'ended_at', 'deadhead_minutes'] as $field) {
+        $a = trim((string)($original[$field] ?? ''));
+        $b = trim((string)($current[$field] ?? ''));
+        if (in_array($field, ['started_at', 'ended_at'], true)) {
+            $a = str_replace('T', ' ', $a); $b = str_replace('T', ' ', $b);
+            if (strlen($a) === 16) $a .= ':00';
+            if (strlen($b) === 16) $b .= ':00';
+        }
+        if ($a === $b || (is_numeric($a) && is_numeric($b) && (float)$a === (float)$b)) continue;
+        $changes[$field] = ['tracker' => $original[$field] ?? '', 'corrected' => $current[$field] ?? ''];
+    }
+    return $changes;
 }
 
 /**
