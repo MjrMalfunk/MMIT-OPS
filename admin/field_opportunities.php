@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../inc/bootstrap.php';
 require_once __DIR__ . '/../inc/field_ops.php';
+require_once __DIR__ . '/../inc/outlook_calendar.php';
 
 require_login();
 
@@ -11,6 +12,7 @@ field_ops_ensure_opportunity_schema();
 $h = 'field_ops_fn_h';
 $flashSuccess = '';
 $flashError = '';
+$calendarSyncNotice = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_validate_or_die();
@@ -34,8 +36,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         );
     } elseif ($action === 'apply_assigned_email_event') {
         $result = field_ops_apply_assigned_email_event_to_work_order((int)($_POST['email_event_id'] ?? 0));
+        if (!empty($result['ok']) && (int)($result['work_order_id'] ?? 0) > 0) {
+            $calendarResult = outlook_calendar_sync_work_order((int)$result['work_order_id'], (int)(current_user()['user_id'] ?? 0));
+            if (empty($calendarResult['ok'])) {
+                $calendarSyncNotice = ' Outlook sync needs attention: ' . (string)($calendarResult['error'] ?? 'Open the calendar page to retry.');
+            }
+        }
     } elseif ($action === 'apply_declined_email_event') {
         $result = field_ops_apply_declined_email_event((int)($_POST['email_event_id'] ?? 0));
+        if (!empty($result['ok']) && !empty($result['work_order_updated']) && (int)($result['work_order_id'] ?? 0) > 0) {
+            $calendarResult = outlook_calendar_sync_work_order((int)$result['work_order_id'], (int)(current_user()['user_id'] ?? 0));
+            if (empty($calendarResult['ok'])) {
+                $calendarSyncNotice = ' Outlook cancellation needs attention: ' . (string)($calendarResult['error'] ?? 'Open the calendar page to retry.');
+            }
+        }
     } elseif ($action === 'ignore_opportunity') {
         $result = field_ops_ignore_opportunity((int)($_POST['opportunity_id'] ?? 0));
     } elseif ($action === 'watch_opportunity') {
@@ -70,7 +84,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'update_opportunity_profitability' => 'Profitability assumptions saved and opportunity rescored.',
             'rescore_opportunities' => 'Active opportunities rescored using real profitability.',
             default => 'Saved.',
-        };
+        } . $calendarSyncNotice;
         }
 
         $returnParams = [];

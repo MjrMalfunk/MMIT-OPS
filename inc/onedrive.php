@@ -203,18 +203,23 @@ function onedrive_append_query(string $url, array $params): string
     return $url . $sep . http_build_query($params);
 }
 
-function onedrive_authorize_url(string $returnTo = ''): string
+function onedrive_authorize_url(string $returnTo = '', bool $includeCalendar = false): string
 {
     $state = bin2hex(random_bytes(16));
     $_SESSION['onedrive_oauth_state'] = $state;
     $_SESSION['onedrive_oauth_return_to'] = $returnTo;
+    $scopes = ['offline_access', 'Files.ReadWrite', 'User.Read'];
+    if ($includeCalendar) {
+        $scopes[] = 'Calendars.ReadWrite';
+    }
+    $_SESSION['onedrive_oauth_scopes'] = $scopes;
 
     $params = [
         'client_id' => (string)ONEDRIVE_CLIENT_ID,
         'response_type' => 'code',
         'redirect_uri' => (string)ONEDRIVE_REDIRECT_URI,
         'response_mode' => 'query',
-        'scope' => 'offline_access Files.ReadWrite User.Read',
+        'scope' => implode(' ', $scopes),
         'state' => $state,
         'prompt' => 'select_account',
     ];
@@ -277,15 +282,19 @@ function onedrive_http_request(string $method, string $url, array $headers = [],
     ];
 }
 
-function onedrive_exchange_code(string $code): array
+function onedrive_exchange_code(string $code, array $scopes = []): array
 {
+    $scopes = onedrive_normalize_scopes($scopes);
+    if ($scopes === []) {
+        $scopes = ['offline_access', 'Files.ReadWrite', 'User.Read'];
+    }
     $payload = http_build_query([
         'client_id' => (string)ONEDRIVE_CLIENT_ID,
         'client_secret' => (string)ONEDRIVE_CLIENT_SECRET,
         'redirect_uri' => (string)ONEDRIVE_REDIRECT_URI,
         'grant_type' => 'authorization_code',
         'code' => $code,
-        'scope' => 'offline_access Files.ReadWrite User.Read',
+        'scope' => implode(' ', $scopes),
     ]);
     return onedrive_http_request('POST', 'https://login.microsoftonline.com/' . onedrive_tenant_path() . '/oauth2/v2.0/token', [
         'Content-Type: application/x-www-form-urlencoded',
@@ -299,13 +308,17 @@ function onedrive_refresh_access_token(array $tokenData): array
     if ($refreshToken === '') {
         return ['ok' => false, 'error' => 'Missing OneDrive refresh token.'];
     }
+    $scopes = onedrive_normalize_scopes((array)($tokenData['scopes'] ?? []));
+    if ($scopes === []) {
+        $scopes = ['offline_access', 'Files.ReadWrite', 'User.Read'];
+    }
     $payload = http_build_query([
         'client_id' => (string)ONEDRIVE_CLIENT_ID,
         'client_secret' => (string)ONEDRIVE_CLIENT_SECRET,
         'redirect_uri' => (string)ONEDRIVE_REDIRECT_URI,
         'grant_type' => 'refresh_token',
         'refresh_token' => $refreshToken,
-        'scope' => 'offline_access Files.ReadWrite User.Read',
+        'scope' => implode(' ', $scopes),
     ]);
     return onedrive_http_request('POST', 'https://login.microsoftonline.com/' . onedrive_tenant_path() . '/oauth2/v2.0/token', [
         'Content-Type: application/x-www-form-urlencoded',
@@ -321,6 +334,9 @@ function onedrive_build_saved_token_payload(array $tokenResponse, array $profile
     if ($accountLabel === '') {
         $accountLabel = 'Connected OneDrive account';
     }
+    $rawScopes = is_array($tokenResponse['scopes'] ?? null)
+        ? $tokenResponse['scopes']
+        : (preg_split('/\s+/', trim((string)($tokenResponse['scope'] ?? ''))) ?: []);
     return [
         'access_token' => (string)($tokenResponse['access_token'] ?? ''),
         'refresh_token' => (string)($tokenResponse['refresh_token'] ?? ''),
@@ -328,7 +344,25 @@ function onedrive_build_saved_token_payload(array $tokenResponse, array $profile
         'expires_at' => time() + $expiresIn - 60,
         'saved_at' => $savedAt,
         'account_label' => $accountLabel,
+        'scopes' => onedrive_normalize_scopes($rawScopes),
     ];
+}
+
+function onedrive_normalize_scopes(array $scopes): array
+{
+    $normalized = [];
+    $seen = [];
+    foreach ($scopes as $scope) {
+        foreach (preg_split('/\s+/', trim((string)$scope)) ?: [] as $part) {
+            $part = trim($part);
+            $key = strtolower($part);
+            if ($part !== '' && !isset($seen[$key])) {
+                $seen[$key] = true;
+                $normalized[] = $part;
+            }
+        }
+    }
+    return $normalized;
 }
 
 function onedrive_get_profile(string $accessToken): array
@@ -369,6 +403,9 @@ function onedrive_get_valid_access_token(): array
     $response = $refresh['json'];
     if (trim((string)($response['refresh_token'] ?? '')) === '') {
         $response['refresh_token'] = (string)$tokenData['refresh_token'];
+    }
+    if (empty($response['scope']) && empty($response['scopes'])) {
+        $response['scopes'] = (array)($tokenData['scopes'] ?? []);
     }
     $saved = onedrive_build_saved_token_payload($response, ['displayName' => $tokenData['account_label'] ?? '']);
     $saveResult = onedrive_save_token_data($saved);

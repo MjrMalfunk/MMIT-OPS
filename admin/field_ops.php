@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../inc/bootstrap.php';
 require_once __DIR__ . '/../inc/field_ops.php';
+require_once __DIR__ . '/../inc/outlook_calendar.php';
 
 require_login();
 
@@ -14,6 +15,7 @@ $h = 'field_ops_h';
 
 $flashSuccess = '';
 $flashError = '';
+$calendarSyncNotice = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_validate_or_die();
@@ -27,8 +29,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $result = field_ops_save_inventory_item($_POST);
     } elseif ($action === 'save_work_order') {
         $result = field_ops_save_work_order($_POST, (int)($user['user_id'] ?? 0));
+        if (!empty($result['ok']) && (int)($result['work_order_id'] ?? 0) > 0) {
+            $calendarResult = outlook_calendar_sync_work_order((int)$result['work_order_id'], (int)($user['user_id'] ?? 0));
+            if (empty($calendarResult['ok'])) {
+                $calendarSyncNotice = ' Outlook sync needs attention: ' . (string)($calendarResult['error'] ?? 'Open the calendar page to retry.');
+            }
+        }
     } elseif ($action === 'discard_work_order') {
         $result = field_ops_discard_work_order((int)($_POST['work_order_id'] ?? 0), (string)($_POST['delete_reason'] ?? 'Rejected, withdrawn, or no longer needed.'));
+        if (!empty($result['ok'])) {
+            $calendarResult = outlook_calendar_sync_work_order((int)($_POST['work_order_id'] ?? 0), (int)($user['user_id'] ?? 0));
+            if (empty($calendarResult['ok'])) {
+                $calendarSyncNotice = ' Outlook cancellation needs attention: ' . (string)($calendarResult['error'] ?? 'Open the calendar page to retry.');
+            }
+        }
     }
 
     if (!empty($result['ok'])) {
@@ -38,7 +52,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'save_work_order' => 'Work order added.',
             'discard_work_order' => 'Work order discarded.',
             default => 'Saved.',
-        };
+        } . $calendarSyncNotice;
 
         $returnParams = [];
         $returnQuery = substr(trim((string)($_GET['q'] ?? '')), 0, 120);
@@ -851,8 +865,9 @@ $dtDisplay = static fn($value = ''): string => field_ops_datetime_display($value
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_projects.php">Projects</a>
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_vehicles.php">Service vehicles</a>
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_rideshare.php">Gig work</a>
-  <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_receipts.php">Receipts</a>
-  <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_expense_drafts.php">Expense drafts</a>
+      <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_calendar.php">Outlook calendar</a>
+      <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_receipts.php">Receipts</a>
+      <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_expense_drafts.php">Expense drafts</a>
       <a class="btn" href="<?= $h(BASE_URL) ?>/admin/index.php">Back to admin</a>
     </div>
   </div>
