@@ -1333,6 +1333,7 @@ $rangeLabel = match ($range) {
 
           <fieldset>
             <legend>Time and utilization</legend>
+            <p class="full" style="margin:0;">For Lyft and Uber, booked time runs from accepted pickup through drop-off or cancellation; available time between rides is excluded. Booked miles use tracker GPS during pickup and passenger phases and are an estimate.</p>
 
             <label>
               <span id="work-minutes-label">Online minutes</span>
@@ -1358,7 +1359,7 @@ $rangeLabel = match ($range) {
             </label>
 
             <label data-rideshare-only>
-              Passenger minutes
+              Passenger minutes (optional)
               <input
                 type="number"
                 name="passenger_minutes"
@@ -1369,7 +1370,7 @@ $rangeLabel = match ($range) {
             </label>
 
             <label data-rideshare-only>
-              Booked miles
+              Booked miles (GPS estimate)
               <input
                 type="number"
                 name="booked_miles"
@@ -1381,7 +1382,7 @@ $rangeLabel = match ($range) {
             </label>
 
             <label data-rideshare-only>
-              Passenger miles
+              Passenger miles (optional)
               <input
                 type="number"
                 name="passenger_miles"
