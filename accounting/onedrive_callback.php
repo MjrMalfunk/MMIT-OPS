@@ -7,13 +7,14 @@ require_login();
 csrf_check();
 
 $returnTo = trim((string)($_SESSION['onedrive_oauth_return_to'] ?? (BASE_URL . '/accounting/bills.php')));
+$requestedScopes = onedrive_normalize_scopes((array)($_SESSION['onedrive_oauth_scopes'] ?? []));
 if ($returnTo === '' || !str_starts_with($returnTo, BASE_URL)) {
     $returnTo = BASE_URL . '/accounting/bills.php';
 }
 
 $state = trim((string)($_GET['state'] ?? ''));
 $expectedState = trim((string)($_SESSION['onedrive_oauth_state'] ?? ''));
-unset($_SESSION['onedrive_oauth_state'], $_SESSION['onedrive_oauth_return_to']);
+unset($_SESSION['onedrive_oauth_state'], $_SESSION['onedrive_oauth_return_to'], $_SESSION['onedrive_oauth_scopes']);
 
 if ($state === '' || $expectedState === '' || !hash_equals($expectedState, $state)) {
     header('Location: ' . onedrive_append_query($returnTo, ['error' => 'OneDrive sign-in state check failed. Please try again.']));
@@ -32,13 +33,18 @@ if ($code === '') {
     exit;
 }
 
-$exchange = onedrive_exchange_code($code);
+$exchange = onedrive_exchange_code($code, $requestedScopes);
 if (empty($exchange['ok']) || !is_array($exchange['json'])) {
     header('Location: ' . onedrive_append_query($returnTo, ['error' => (string)($exchange['error'] ?? 'Unable to connect OneDrive.')]));
     exit;
 }
 
 $tokenResponse = $exchange['json'];
+$tokenResponse['scopes'] = onedrive_normalize_scopes(
+    is_array($tokenResponse['scopes'] ?? null)
+        ? $tokenResponse['scopes']
+        : (preg_split('/\s+/', trim((string)($tokenResponse['scope'] ?? ''))) ?: $requestedScopes)
+);
 $accessToken = trim((string)($tokenResponse['access_token'] ?? ''));
 $profile = [];
 if ($accessToken !== '') {
@@ -59,7 +65,10 @@ audit_event((int)(current_user()['user_id'] ?? 0), 'ONEDRIVE_CONNECTED', [
     'has_refresh_token' => trim((string)($saved['refresh_token'] ?? '')) !== '' ? 1 : 0,
 ]);
 
-$message = 'OneDrive connected for receipt uploads.';
+$calendarRequested = in_array('calendars.readwrite', array_map('strtolower', $requestedScopes), true);
+$message = $calendarRequested
+    ? 'Outlook calendar access connected.'
+    : 'OneDrive connected for receipt uploads.';
 if (empty($save['persisted'])) {
     $message .= ' Session connection is live, but token persistence failed. Check write access on storage/onedrive.';
 }

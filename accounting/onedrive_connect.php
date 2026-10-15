@@ -16,5 +16,6 @@ if (!onedrive_is_configured()) {
     exit;
 }
 
-header('Location: ' . onedrive_authorize_url($returnTo));
+$includeCalendar = ($_POST['calendar'] ?? $_GET['calendar'] ?? '') === '1';
+header('Location: ' . onedrive_authorize_url($returnTo, $includeCalendar));
 exit;

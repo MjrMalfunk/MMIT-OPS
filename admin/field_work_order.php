@@ -4,6 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../inc/bootstrap.php';
 require_once __DIR__ . '/../inc/field_ops.php';
 require_once __DIR__ . '/../inc/onedrive.php';
+require_once __DIR__ . '/../inc/outlook_calendar.php';
 
 require_login();
 
@@ -118,6 +119,7 @@ if ($fnPacket) {
 
 $flashSuccess = '';
 $flashError = '';
+$calendarNotice = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_validate_or_die();
@@ -146,6 +148,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_POST,
             (int)(current_user()['user_id'] ?? 0)
         );
+        if (!empty($result['ok'])) {
+            $calendarResult = outlook_calendar_sync_work_order($workOrderId, (int)(current_user()['user_id'] ?? 0));
+            if (empty($calendarResult['ok'])) {
+                $calendarNotice = ' Outlook sync needs attention: ' . (string)($calendarResult['error'] ?? 'Open the Outlook calendar page to retry.');
+            }
+        }
+    } elseif ($action === 'sync_outlook') {
+        $result = outlook_calendar_sync_work_order($workOrderId, (int)(current_user()['user_id'] ?? 0));
+        if (!empty($result['ok']) && !empty($result['not_ready'])) {
+            $calendarNotice = ' Add an assigned status and a complete schedule before syncing.';
+        }
     } elseif ($action === 'post_accounting') {
         $result = field_ops_post_work_order_to_accounting(
             (int)($_POST['work_order_id'] ?? 0),
@@ -185,6 +198,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         );
     } elseif ($action === 'discard_work_order') {
         $result = field_ops_discard_work_order($workOrderId, (string)($_POST['delete_reason'] ?? 'Discarded from detail page.'));
+        if (!empty($result['ok'])) {
+            $calendarResult = outlook_calendar_sync_work_order($workOrderId, (int)(current_user()['user_id'] ?? 0));
+            if (empty($calendarResult['ok'])) {
+                $calendarNotice = ' Outlook cancellation needs attention: ' . (string)($calendarResult['error'] ?? 'Open the Outlook calendar page to retry.');
+            }
+        }
     }
 
     if (!empty($result['ok'])) {
@@ -195,6 +214,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'update_time' => 'Time entry updated.',
             'remove_time' => 'Time entry removed.',
             'update_state' => 'Work order updated.',
+            'sync_outlook' => 'Outlook calendar sync completed.',
             'save_sli_terms' => 'Authorized SLI terms saved.',
             'create_pay_change' => 'Pay-change request recorded.',
             'resolve_pay_change' => 'Pay-change request resolved.',
@@ -207,7 +227,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'remove_project_membership' => 'Work order removed from project.',
             'discard_work_order' => 'Work order discarded.',
             default => 'Saved.',
-        };
+        } . $calendarNotice;
 
         if ($action === 'discard_work_order') {
             header('Location: ' . BASE_URL . '/admin/field_ops.php');
@@ -236,6 +256,10 @@ $sliProjection = field_ops_sli_projection($workOrderId);
 $items = field_ops_inventory_items();
 $totals = field_ops_work_order_totals($workOrderId);
 $attachments = field_ops_work_order_attachments($workOrderId);
+$calendarSync = strcasecmp((string)($wo['platform'] ?? ''), 'FieldNation') === 0
+    ? outlook_calendar_event_row('FIELDNATION', $workOrderId)
+    : null;
+$calendarConnection = outlook_calendar_connection_status();
 $clients = field_ops_clients_for_invoice();
 $linkedInvoice = field_ops_existing_invoice_for_work_order($workOrderId);
 $onedriveStatus = onedrive_connection_status();
@@ -562,6 +586,38 @@ $receivableStateClass = match ($receivableState) {
 
   <?php if ($flashSuccess !== ''): ?><div class="flash-success"><?= $h($flashSuccess) ?></div><?php endif; ?>
   <?php if ($flashError !== ''): ?><div class="flash-error"><?= $h($flashError) ?></div><?php endif; ?>
+
+  <?php if (strcasecmp((string)$wo['platform'], 'FieldNation') === 0): ?>
+    <section class="card" style="margin-bottom:18px;border-top:3px solid <?= ($calendarSync['sync_status'] ?? '') === 'SYNCED' ? 'rgba(74,222,128,.86)' : 'rgba(96,165,250,.82)' ?>;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+        <div>
+          <div class="eyebrow">Outlook calendar</div>
+          <h2 style="margin:.35rem 0;">Work block sync</h2>
+          <div class="field-hint">
+            <?php if (($calendarSync['sync_status'] ?? '') === 'SYNCED'): ?>
+              Synced <?= $h((string)($calendarSync['last_synced_at'] ?? '')) ?>.
+            <?php elseif (($calendarSync['sync_status'] ?? '') === 'ERROR'): ?>
+              Needs attention: <?= $h((string)($calendarSync['last_error'] ?? 'Retry from the calendar page.')) ?>
+            <?php elseif (empty($calendarConnection['calendar_permission'])): ?>
+              Connect Outlook Calendar once to enable automatic sync.
+            <?php else: ?>
+              Set status to Assigned or Scheduled and enter the reserved start/end window; OPS will add it to Outlook automatically.
+            <?php endif; ?>
+          </div>
+        </div>
+        <div class="actions">
+          <form method="post" style="margin:0;">
+            <?= csrf_field() ?><input type="hidden" name="action" value="sync_outlook"><input type="hidden" name="work_order_id" value="<?= (int)$workOrderId ?>">
+            <button class="btn" type="submit"><?= ($calendarSync['sync_status'] ?? '') === 'ERROR' ? 'Retry Outlook sync' : 'Sync to Outlook' ?></button>
+          </form>
+          <a class="btn" href="<?= $h(BASE_URL) ?>/admin/field_calendar.php">Calendar settings</a>
+        </div>
+      </div>
+      <?php if ($calendarSync && trim((string)($calendarSync['last_error'] ?? '')) !== ''): ?>
+        <p style="margin:.7rem 0 0;color:#fecaca;"><?= $h($calendarSync['last_error']) ?></p>
+      <?php endif; ?>
+    </section>
+  <?php endif; ?>
 
   <?php if ($trackerClosingNote !== null): ?>
     <section class="card" style="margin-bottom:18px;border-top:3px solid rgba(74,222,128,.86);">
