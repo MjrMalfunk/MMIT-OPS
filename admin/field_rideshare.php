@@ -46,7 +46,7 @@ $dateInput = static function (mixed $value): string {
         return '';
     }
 
-    return str_replace(' ', 'T', substr($raw, 0, 16));
+    return str_replace(' ', 'T', substr($raw, 0, 19));
 };
 
 $today = new DateTimeImmutable('today');
@@ -111,6 +111,7 @@ if ($range === 'custom') {
 
 $flashSuccess = '';
 $flashError = '';
+$trackerPreview = null;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_validate_or_die();
@@ -148,6 +149,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             );
             exit;
         }
+        if (($_POST['action'] ?? '') === 'preview_tracker') {
+            $file = $_FILES['tracker_packet'] ?? [];
+            if (($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK
+                || !is_uploaded_file((string)($file['tmp_name'] ?? ''))
+                || (int)($file['size'] ?? 0) > 4 * 1024 * 1024) {
+                throw new InvalidArgumentException('Choose a tracker JSON file smaller than 4 MB.');
+            }
+            $raw = file_get_contents($file['tmp_name']);
+            if ($raw === false) { throw new RuntimeException('Unable to read the tracker file.'); }
+            $trackerPreview = field_rideshare_tracker_preview($raw);
+            $lookup = db()->prepare('SELECT * FROM field_rideshare_shifts WHERE tracker_shift_id = ? LIMIT 1');
+            $lookup->execute([$trackerPreview['tracker_shift_id']]);
+            $existing = $lookup->fetch(PDO::FETCH_ASSOC) ?: null;
+            $requestedId = (int)($_POST['shift_id'] ?? 0);
+            if ($existing && $requestedId > 0 && (int)$existing['shift_id'] !== $requestedId) {
+                throw new InvalidArgumentException('This tracker outing already belongs to a different shift.');
+            }
+            $existing ??= $requestedId > 0 ? field_rideshare_find_shift($requestedId) : null;
+            if ($existing && !empty($existing['accounting_journal_id'])) {
+                throw new InvalidArgumentException('This outing is already posted to Accounting.');
+            }
+            if ($existing && !empty($existing['tracker_shift_id'])
+                && $existing['tracker_shift_id'] !== $trackerPreview['tracker_shift_id']) {
+                throw new InvalidArgumentException('This shift belongs to another tracker outing.');
+            }
+            if ($existing) {
+                $_POST = [...$_POST, ...$existing];
+                if ($trackerPreview['flex'] && !$trackerPreview['flex']['pay_confirmed']) {
+                    $trackerPreview['warnings'][] = 'Your saved earnings were retained because this export does not contain a confirmed payout.';
+                }
+            }
+            $token = bin2hex(random_bytes(16));
+            $pending = $_SESSION['rideshare_tracker_reviews'] ?? [];
+            $pending[$token] = ['raw' => $raw, 'shift_id' => (int)($_POST['shift_id'] ?? 0)];
+            $_SESSION['rideshare_tracker_reviews'] = array_slice($pending, -3, null, true);
+            $_POST = [...field_rideshare_tracker_prefill($trackerPreview, $_POST, $existing !== null), 'tracker_review_token' => $token];
+            $flashSuccess = 'Tracker preview loaded. Review the fields, add platform earnings, then Save. No shift has been saved.';
+        } else {
         field_rideshare_save_shift(
             $_POST,
             (int)($user['user_id'] ?? 0)
@@ -178,6 +217,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             . http_build_query($returnQuery)
         );
         exit;
+        }
     } catch (Throwable $exception) {
         $flashError = $exception->getMessage();
     }
@@ -203,7 +243,7 @@ foreach ($vehicles as $vehicle) {
             : 0.0;
 }
 
-$editShiftId = max(0, (int)($_GET['edit'] ?? 0));
+$editShiftId = max(0, (int)($_POST['shift_id'] ?? $_GET['edit'] ?? 0));
 $editShift = $editShiftId > 0
     ? field_rideshare_find_shift($editShiftId)
     : null;
@@ -219,6 +259,11 @@ $form += [
     'shift_date' => $today->format('Y-m-d'),
     'started_at' => '',
     'ended_at' => '',
+    'odometer_scope' => $editShift ? 'WORK_INTERVAL' : 'ENTIRE_OUTING',
+    'offline_odometer' => '',
+    'mileage_split_source' => 'MANUAL_ESTIMATE',
+    'tracker_review_token' => '',
+    'tracker_correction_note' => '',
     'odometer_start' => '',
     'odometer_end' => '',
     'deadhead_miles' => '',
@@ -238,6 +283,7 @@ $form += [
     'payout_destination' => 'LYFT_DIRECT',
     'notes' => '',
     'block_hours' => '',
+    'flex_scheduled_start_at' => '',
     'flex_station' => '',
     'packages_assigned' => '',
     'packages_delivered' => '',
@@ -251,6 +297,19 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
         if (!empty($editShift['flex_finish_estimated'])) { $form['ended_at'] = ''; }
     } elseif ($form['platform'] === 'AMAZON_FLEX') {
         $form['payout_destination'] = 'PERSONAL_BANK';
+    }
+}
+if (($form['mileage_split_source'] ?? '') === 'UNALLOCATED') {
+    $form['deadhead_miles'] = '';
+}
+// Reopen the original schedule from immutable evidence; no new database column is needed.
+if ($editShift && !empty($editShift['tracker_shift_id']) && $form['platform'] === 'AMAZON_FLEX') {
+    $evidence = db()->prepare('SELECT packet_json FROM field_rideshare_tracker_evidence WHERE shift_id = ? ORDER BY evidence_id DESC LIMIT 1');
+    $evidence->execute([(int)$editShift['shift_id']]);
+    $savedPacket = $evidence->fetchColumn();
+    if (is_string($savedPacket) && $savedPacket !== '') {
+        $savedPreview = field_rideshare_tracker_preview($savedPacket);
+        $form['flex_scheduled_start_at'] = $savedPreview['form']['flex_scheduled_start_at'] ?? '';
     }
 }
 $breakRows = [];
@@ -895,7 +954,10 @@ $rangeLabel = match ($range) {
         <?= $h(number_format((float)$summary['total_business_miles'], 1)) ?>
         outing miles ·
         <?= $h(number_format((float)$summary['deadhead_miles'], 1)) ?>
-        deadhead
+        recorded offline miles
+        <?php if ($summary['unallocated_mileage_shift_count'] > 0): ?>
+          · <?= (int)$summary['unallocated_mileage_shift_count'] ?> outing(s) have an unknown mileage split
+        <?php endif; ?>
       </div>
     </article>
 
@@ -968,7 +1030,7 @@ $rangeLabel = match ($range) {
         </div>
       </div>
 
-      <form method="post" id="shift-form">
+      <form method="post" enctype="multipart/form-data" id="shift-form">
         <?php
         if (function_exists('csrf_field')) {
             echo csrf_field();
@@ -994,6 +1056,28 @@ $rangeLabel = match ($range) {
         <input type="hidden" name="return_from" value="<?= $h($from) ?>">
         <input type="hidden" name="return_to" value="<?= $h($to) ?>">
 
+        <fieldset>
+          <legend>Import tracker outing</legend>
+          <label>Completed Lyft / Uber / Flex tracker file
+            <input type="file" name="tracker_packet" accept="application/json,.json">
+          </label>
+          <button type="submit" id="preview-tracker-button" name="action" value="preview_tracker" formnovalidate disabled>Preview tracker file</button>
+          <p>Preview fills times and odometers, plus Flex block details and recorded pay. Review earnings, costs, and any personal travel before saving. For an outing entered manually before, open Edit first.</p>
+          <?php if ($trackerPreview): ?>
+            <ul><?php foreach ($trackerPreview['warnings'] as $warning): ?><li><?= $h($warning) ?></li><?php endforeach; ?></ul>
+          <?php endif; ?>
+          <?php if ($form['tracker_review_token'] !== '' || !empty($form['tracker_shift_id'])): ?>
+            <?php if ($form['tracker_review_token'] !== ''): ?>
+            <input type="hidden" name="tracker_review_token" value="<?= $h($form['tracker_review_token']) ?>">
+            <?php endif; ?>
+            <p>Original tracker evidence stays attached. Explain corrections to service, readings, or travel times below; the original and corrected values are both retained.</p>
+            <label>Tracker correction note
+              <input type="text" name="tracker_correction_note" maxlength="500" value="<?= $h($form['tracker_correction_note']) ?>" placeholder="Example: corrected ending odometer after entry typo">
+            </label>
+            <button type="button" id="clear-tracker-preview">Clear tracker link for manual entry</button>
+          <?php endif; ?>
+        </fieldset>
+
         <div class="form-grid">
           <label>Service
             <select name="platform" id="platform" required>
@@ -1009,11 +1093,15 @@ $rangeLabel = match ($range) {
           </label>
           <fieldset id="flex-fields">
             <legend>Flex block</legend>
+            <input type="hidden" id="flex_scheduled_start_at" name="flex_scheduled_start_at" value="<?= $h($form['flex_scheduled_start_at']) ?>">
+            <?php if ($form['flex_scheduled_start_at'] !== ''): ?>
+              <p>Scheduled block start: <?= $h(str_replace('T', ' ', $form['flex_scheduled_start_at'])) ?>. Work time below starts when you departed.</p>
+            <?php endif; ?>
             <label>Block hours
               <input name="block_hours" id="block_hours" type="number" min="0.25" max="24" step="0.25" value="<?= $h($form['block_hours']) ?>">
             </label>
             <label>Scheduled finish (calculated)
-              <input type="datetime-local" id="scheduled_end" readonly>
+              <input type="datetime-local" step="1" id="scheduled_end" readonly>
             </label>
             <p id="flex-timing" aria-live="polite"></p>
             <p>Actual finish can be earlier or later. If blank, scheduled finish is used as an estimate. Include required station returns before actual finish; record home travel separately.</p>
@@ -1055,7 +1143,7 @@ $rangeLabel = match ($range) {
           <label>
             <span id="start-label">Went online</span>
             <input
-              type="datetime-local"
+              type="datetime-local" step="1"
               name="started_at"
               id="started_at"
               value="<?= $h($dateInput($form['started_at'])) ?>"
@@ -1065,7 +1153,7 @@ $rangeLabel = match ($range) {
           <label>
             <span id="end-label">Went offline</span>
             <input
-              type="datetime-local"
+              type="datetime-local" step="1"
               name="ended_at"
               id="ended_at"
               value="<?= $h($dateInput($form['ended_at'])) ?>"
@@ -1086,7 +1174,7 @@ $rangeLabel = match ($range) {
                   <label>
                     Break start
                     <input
-                      type="datetime-local"
+                      type="datetime-local" step="1"
                       name="break_started_at[]"
                       value="<?= $h($dateInput(
                           $break['started_at'] ?? ''
@@ -1099,7 +1187,7 @@ $rangeLabel = match ($range) {
                   <label>
                     Break end
                     <input
-                      type="datetime-local"
+                      type="datetime-local" step="1"
                       name="break_ended_at[]"
                       value="<?= $h($dateInput(
                           $break['ended_at'] ?? ''
@@ -1138,7 +1226,7 @@ $rangeLabel = match ($range) {
                 <label>
                   Break start
                   <input
-                    type="datetime-local"
+                    type="datetime-local" step="1"
                     name="break_started_at[]"
                     data-break-start
                     aria-describedby="break-help"
@@ -1148,7 +1236,7 @@ $rangeLabel = match ($range) {
                 <label>
                   Break end
                   <input
-                    type="datetime-local"
+                    type="datetime-local" step="1"
                     name="break_ended_at[]"
                     data-break-end
                     aria-describedby="break-help"
@@ -1166,6 +1254,15 @@ $rangeLabel = match ($range) {
             </template>
           </fieldset>
 
+          <label>Ending odometer covers
+            <select name="odometer_scope" id="odometer_scope" aria-describedby="mileage-help">
+              <option value="ENTIRE_OUTING" <?= $form['odometer_scope'] === 'ENTIRE_OUTING' ? 'selected' : '' ?>>Full outing, including the drive home</option>
+              <option value="WORK_INTERVAL" <?= $form['odometer_scope'] === 'WORK_INTERVAL' ? 'selected' : '' ?>>Only to going offline / finishing work</option>
+            </select>
+          </label>
+          <label>Odometer when going offline (optional)
+            <input type="number" name="offline_odometer" id="offline_odometer" min="0" step="0.1" value="<?= $h($form['offline_odometer']) ?>" aria-describedby="mileage-help">
+          </label>
           <label>
             Starting odometer
             <input
@@ -1196,14 +1293,20 @@ $rangeLabel = match ($range) {
 
           <fieldset>
             <legend>Off-app deadhead / repositioning</legend>
+            <label>Source of entered offline miles
+              <select name="mileage_split_source" id="mileage_split_source">
+                <option value="MANUAL_ESTIMATE" <?= $form['mileage_split_source'] === 'MANUAL_ESTIMATE' ? 'selected' : '' ?>>Driver estimate</option>
+                <option value="GPS_ESTIMATE" <?= $form['mileage_split_source'] === 'GPS_ESTIMATE' ? 'selected' : '' ?>>Tracker GPS estimate</option>
+              </select>
+            </label>
 
             <label>
-              Business miles driven offline
+              Offline work miles (if no offline odometer)
               <input
                 type="number"
                 name="deadhead_miles"
                 id="deadhead_miles"
-                step="0.1"
+                step="0.01"
                 min="0"
                 inputmode="decimal"
                 value="<?= $h($form['deadhead_miles']) ?>"
@@ -1224,12 +1327,13 @@ $rangeLabel = match ($range) {
             </label>
 
             <p class="full" style="margin:0;">
-              Enter only work travel miles outside the starting/ending odometer span above. Miles already included there must not be added again. Enter travel minutes outside the work start/finish interval.
+              <span id="mileage-help">With a full-outing ending reading, offline miles are part of that total. They are never added again. An offline odometer gives an exact split; leave miles blank if the split is unknown. Offline minutes run from finishing work to arrival.</span>
             </p>
           </fieldset>
 
           <fieldset>
             <legend>Time and utilization</legend>
+            <p class="full" style="margin:0;">For Lyft and Uber, booked time runs from accepted pickup through drop-off or cancellation; available time between rides is excluded. Booked miles use tracker GPS during pickup and passenger phases and are an estimate.</p>
 
             <label>
               <span id="work-minutes-label">Online minutes</span>
@@ -1255,7 +1359,7 @@ $rangeLabel = match ($range) {
             </label>
 
             <label data-rideshare-only>
-              Passenger minutes
+              Passenger minutes (optional)
               <input
                 type="number"
                 name="passenger_minutes"
@@ -1266,7 +1370,7 @@ $rangeLabel = match ($range) {
             </label>
 
             <label data-rideshare-only>
-              Booked miles
+              Booked miles (GPS estimate)
               <input
                 type="number"
                 name="booked_miles"
@@ -1278,7 +1382,7 @@ $rangeLabel = match ($range) {
             </label>
 
             <label data-rideshare-only>
-              Passenger miles
+              Passenger miles (optional)
               <input
                 type="number"
                 name="passenger_miles"
@@ -1348,7 +1452,7 @@ $rangeLabel = match ($range) {
           </label>
 
           <div class="form-actions full">
-            <button class="btn-primary" type="submit">
+            <button class="btn-primary" type="submit" name="action" value="save_shift">
               <?= $editShift ? 'Update shift' : 'Save shift' ?>
             </button>
 
@@ -1400,7 +1504,7 @@ $rangeLabel = match ($range) {
 
       <div class="preview-grid">
         <div class="preview-item">
-          <span class="preview-label">Online miles</span>
+          <span class="preview-label">Miles before going offline</span>
           <strong class="preview-value" id="preview-online-miles">0.0</strong>
         </div>
 
@@ -1469,6 +1573,8 @@ $rangeLabel = match ($range) {
           $deadheadMinutes = (int)($shift['deadhead_minutes'] ?? 0);
           $totalWorkMinutes = $onlineMinutes + $deadheadMinutes;
           $deadheadMiles = (float)($shift['deadhead_miles'] ?? 0);
+          $splitUnknown = ($shift['mileage_split_source'] ?? '') === 'UNALLOCATED';
+          $splitEstimate = in_array($shift['mileage_split_source'] ?? '', ['GPS_ESTIMATE', 'MANUAL_ESTIMATE'], true);
           $totalMiles = (float)$shift['business_miles'] + $deadheadMiles;
           $grossHourly = $totalWorkMinutes > 0
               ? (float)$shift['recognized_revenue']
@@ -1500,9 +1606,10 @@ $rangeLabel = match ($range) {
                     $totalMiles,
                     1
                 )) ?> miles
-                <?php if ($deadheadMiles > 0 || $deadheadMinutes > 0): ?>
+                <?php if ($splitUnknown): ?> · Mileage split not recorded
+                <?php elseif ($deadheadMiles > 0 || $deadheadMinutes > 0): ?>
                   · <?= $h(number_format($deadheadMiles, 1)) ?> mi /
-                  <?= $h($hours($deadheadMinutes)) ?> deadhead
+                  <?= $h($hours($deadheadMinutes)) ?> deadhead<?= $splitEstimate ? " (estimated miles)" : "" ?>
                 <?php endif; ?>
               </div>
             </div>
@@ -1631,10 +1738,10 @@ $rangeLabel = match ($range) {
       el.hidden = flex;
       el.querySelectorAll('input').forEach(input => input.disabled = flex);
     });
-    document.getElementById('start-label').textContent = flex ? 'Block start time' : 'Went online';
+    document.getElementById('start-label').textContent = flex ? 'Departure / work start' : 'Went online';
     document.getElementById('end-label').textContent = flex ? 'Actual finish (optional)' : 'Went offline';
     document.getElementById('work-minutes-label').textContent = flex ? 'Actual / estimated work minutes' : 'Online minutes';
-    const start = new Date(document.getElementById('started_at').value);
+    const start = new Date(document.getElementById('flex_scheduled_start_at').value || document.getElementById('started_at').value);
     const hours = Number(blockHours.value);
     scheduledEnd.value = '';
     const info = document.getElementById('flex-timing');
@@ -1739,12 +1846,22 @@ $rangeLabel = match ($range) {
     const selected = vehicle?.options[vehicle.selectedIndex];
     const cpm = Number.parseFloat(selected?.dataset.cpm ?? '0') || 0;
 
-    const onlineMiles = Math.max(
-      0,
-      numberValue('odometer_end') - numberValue('odometer_start')
-    );
-    const deadheadMiles = Math.max(0, numberValue('deadhead_miles'));
-    const totalMiles = onlineMiles + deadheadMiles;
+    const fullOuting = document.getElementById('odometer_scope').value === 'ENTIRE_OUTING';
+    const span = Math.max(0, numberValue('odometer_end') - numberValue('odometer_start'));
+    const boundary = document.getElementById('offline_odometer');
+    boundary.disabled = !fullOuting;
+    const enteredMiles = document.getElementById('deadhead_miles');
+    const hasBoundary = fullOuting && boundary.value.trim() !== '';
+    enteredMiles.readOnly = hasBoundary;
+    const known = !fullOuting || hasBoundary || enteredMiles.value.trim() !== '';
+    const deadheadMiles = hasBoundary
+      ? Math.max(0, numberValue('odometer_end') - numberValue('offline_odometer'))
+      : Math.max(0, numberValue('deadhead_miles'));
+    const onlineMiles = fullOuting ? Math.max(0, span - deadheadMiles) : span;
+    const totalMiles = fullOuting ? span : span + deadheadMiles;
+    const splitSource = document.getElementById('mileage_split_source').value;
+    const sourceLabel = hasBoundary ? ' (odometer)' : fullOuting && known
+      ? (splitSource === 'GPS_ESTIMATE' ? ' (GPS estimate)' : ' (estimate)') : '';
 
     const revenue =
       numberValue('base_ride_earnings')
@@ -1764,10 +1881,10 @@ $rangeLabel = match ($range) {
       : null;
 
     document.getElementById('preview-online-miles').textContent =
-      onlineMiles.toFixed(1);
+      known ? onlineMiles.toFixed(1) + sourceLabel : 'Not recorded';
 
     document.getElementById('preview-deadhead-miles').textContent =
-      deadheadMiles.toFixed(1);
+      known ? deadheadMiles.toFixed(1) + sourceLabel : 'Not recorded';
 
     document.getElementById('preview-total-miles').textContent =
       totalMiles.toFixed(1);
@@ -1789,6 +1906,16 @@ $rangeLabel = match ($range) {
     document.getElementById('preview-hourly').textContent =
       profitHourly === null ? '—' : money(profitHourly);
   };
+
+  document.getElementById('clear-tracker-preview')?.addEventListener('click', (event) => {
+    document.querySelector('[name="tracker_review_token"]')?.remove();
+    event.currentTarget.textContent = 'Tracker link cleared — manual record';
+    event.currentTarget.disabled = true;
+  });
+  const packetInput = document.querySelector('[name="tracker_packet"]');
+  packetInput?.addEventListener('change', () => {
+    document.getElementById('preview-tracker-button').disabled = packetInput.files.length === 0;
+  });
 
   const affectsWorkingTime = (target) =>
     target.id === 'platform'
